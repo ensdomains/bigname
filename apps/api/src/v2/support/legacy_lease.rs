@@ -22,13 +22,17 @@
 //! A name with no such events is served as composed. The fill stands until the stored
 //! registration carries the lease, which the shape check then no longer matches. Lookup, address
 //! names and the name listing fill their rows the same way ([`LeaseRow`]). Every other route
-//! serves the stored registration.
+//! serves the stored registration. The first shape also serves the lease's holder as `owner`,
+//! and no `owner` or `manager` once released (`legacy_lease_holder`).
 //!
-//! The API owns these four statements. They are route-specific reads of Interpret's events and
+//! The API owns these five statements. They are route-specific reads of Interpret's events and
 //! the chain lineage, transitional until the stored registration carries the lease.
 use serde_json::{Map, Value};
 use sqlx::{PgConnection, Row};
 
+use super::legacy_lease_holder::{
+    is_current_lease, is_eth_second_level, load_lease_holder, serve_lease_holder,
+};
 use super::*;
 
 /// The `.eth` registrar grace period the lifecycle keys `grace_ends_at` on.
@@ -42,6 +46,9 @@ pub(crate) struct LeaseEvent {
     pub(crate) block_number: i64,
     pub(crate) resource_id: String,
     pub(crate) expiry: Option<i64>,
+    /// Whether the composer's implied lease reads the event: a registrar-kind row that is not
+    /// derived from retained state.
+    pub(crate) implies_lease: bool,
 }
 
 /// The shape of a composed row this read heals.
@@ -90,11 +97,6 @@ pub(crate) fn legacy_lease_shape(
         }
         _ => None,
     }
-}
-
-fn is_eth_second_level(name: &str) -> bool {
-    name.strip_suffix(".eth")
-        .is_some_and(|label| !label.is_empty() && !label.contains('.'))
 }
 
 /// Dates an undated registrar registration at its lease's grant block (`grant_block`, the lease's
@@ -254,7 +256,7 @@ pub(crate) async fn serve_legacy_lease_in_savepoint<R: LeaseRow>(
     selected_snapshot: &SelectedSnapshot,
 ) -> Result<bool> {
     let read = lease_read(row, |chain_id| snapshot_bound(selected_snapshot, chain_id));
-    serve_read_in_savepoint(conn, row, read).await
+    super::legacy_lease_rows::serve_read_in_savepoint(conn, row, read).await
 }
 
 fn snapshot_bound(selected_snapshot: &SelectedSnapshot, chain_id: &str) -> Option<i64> {
@@ -264,48 +266,6 @@ fn snapshot_bound(selected_snapshot: &SelectedSnapshot, chain_id: &str) -> Optio
         .values()
         .find(|position| position.chain_id == chain_id)
         .map(|position| position.block_number)
-}
-
-pub(super) async fn serve_read_in_savepoint<R: LeaseRow>(
-    conn: &mut PgConnection,
-    row: &mut R,
-    read: Option<LeaseRead>,
-) -> Result<bool> {
-    let Some(read) = read else {
-        return Ok(false);
-    };
-    #[cfg(test)]
-    let _ = LEASE_SAVEPOINTS.try_with(|count| count.set(count.get() + 1));
-    let composed = row.declared_summary().clone();
-    let mut savepoint = sqlx::Connection::begin(&mut *conn).await?;
-    match fill_lease(&mut savepoint, &mut *row, read).await {
-        Ok(filled) => {
-            if let Err(error) = savepoint.commit().await {
-                *row.declared_summary_mut() = composed;
-                return Err(error.into());
-            }
-            Ok(filled)
-        }
-        Err(read_error) => {
-            *row.declared_summary_mut() = composed;
-            if let Err(rollback_error) = savepoint.rollback().await {
-                error!(
-                    service = "api",
-                    name = %row.normalized_name(),
-                    error = %read_error,
-                    "legacy lease read failed and its savepoint did not roll back"
-                );
-                return Err(rollback_error.into());
-            }
-            error!(
-                service = "api",
-                name = %row.normalized_name(),
-                error = %read_error,
-                "legacy lease read failed, serving the composed registration"
-            );
-            Ok(false)
-        }
-    }
 }
 
 /// What the fill of a row reads: its shape, its chain and the snapshot's block on that chain.
@@ -350,9 +310,9 @@ pub(crate) async fn serve_legacy_lease<R: LeaseRow>(
 }
 
 /// Heals `row`'s registration on the snapshot's position on its chain: the unleased shape from the
-/// name's registrar events, the undated shape from its lease's grant. Returns whether the
-/// registration changed.
-async fn fill_lease<R: LeaseRow>(
+/// name's registrar events and its lease's holder, the undated shape from its lease's grant.
+/// Returns whether the registration changed.
+pub(super) async fn fill_lease<R: LeaseRow>(
     conn: &mut PgConnection,
     row: &mut R,
     read: LeaseRead,
@@ -371,10 +331,10 @@ async fn fill_lease<R: LeaseRow>(
             }
             let handoff_block =
                 bigname_storage::name_current_registry_handoff_block_number(row.provenance());
+            let lease = &events[0].resource_id;
             let first_block = match handoff_block {
                 Some(_) => None,
                 None => {
-                    let lease = &events[0].resource_id;
                     load_first_lease_block(
                         &mut *conn,
                         &chain_id,
@@ -384,6 +344,12 @@ async fn fill_lease<R: LeaseRow>(
                     )
                     .await?
                 }
+            };
+            let current = is_current_lease(&events, handoff_block);
+            let holder = if current {
+                load_lease_holder(&mut *conn, &chain_id, lease, handoff_block, bound).await?
+            } else {
+                None
             };
             let dates = LeaseDates {
                 handoff_block,
@@ -395,14 +361,23 @@ async fn fill_lease<R: LeaseRow>(
             blocks.extend(first_block);
             blocks.push(bound);
             let times = load_block_times(&mut *conn, &chain_id, &blocks).await?;
-            let Some(registration) = row
-                .declared_summary_mut()
+            let (summary, provenance) = row.summary_and_provenance_mut();
+            let Some(registration) = summary
                 .get_mut("registration")
                 .and_then(Value::as_object_mut)
             else {
                 return Ok(false);
             };
-            Ok(heal_registration(registration, &events, dates, &times))
+            let healed = heal_registration(registration, &events, dates, &times);
+            if current {
+                serve_lease_holder(
+                    summary,
+                    provenance,
+                    holder.as_deref(),
+                    times.get(&bound).copied(),
+                );
+            }
+            Ok(healed)
         }
         LegacyLeaseShape::UndatedLease(lease) => {
             let Some(grant_block) = load_grant_block(&mut *conn, &lease, bound).await? else {
@@ -465,7 +440,9 @@ async fn load_lease_events(
     let rows = sqlx::query(
         "/* api:v2.support.legacy_lease.events */
          SELECT event_kind, block_number, resource_id::text AS resource_id,
-                after_state ->> 'expiry' AS expiry
+                after_state ->> 'expiry' AS expiry,
+                (COALESCE(NULLIF(after_state ->> 'authority_kind', ''), 'registrar') = 'registrar'
+                 AND (after_state ->> 'state_derived') IS DISTINCT FROM 'true') AS implies_lease
          FROM bigname_phase.normalized_events
          WHERE logical_name_id = $1
            AND chain_id = $2
@@ -497,6 +474,7 @@ async fn load_lease_events(
             expiry: row
                 .get::<Option<String>, _>("expiry")
                 .and_then(|expiry| expiry.parse::<i64>().ok()),
+            implies_lease: row.get::<bool, _>("implies_lease"),
         })
         .collect())
 }

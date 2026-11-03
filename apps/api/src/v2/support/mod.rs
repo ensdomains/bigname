@@ -25,6 +25,7 @@ const BASENAMES_COMPAT_TARGET_CHAIN_ID: &str = bigname_storage::ETHEREUM_MAINNET
 mod alias_paths;
 mod json;
 mod legacy_lease;
+mod legacy_lease_holder;
 mod legacy_lease_rows;
 mod primary_name_claim_gate;
 mod primary_name_live;
@@ -47,6 +48,8 @@ pub(crate) mod status_freshness;
 pub(crate) use alias_paths::*;
 pub(crate) use json::*;
 pub(crate) use legacy_lease::*;
+#[cfg(test)]
+pub(crate) use legacy_lease_holder::LEASE_HOLDER_SQL;
 pub(crate) use legacy_lease_rows::*;
 pub(crate) use primary_name_live::*;
 pub(crate) use primary_name_lookup::*;
