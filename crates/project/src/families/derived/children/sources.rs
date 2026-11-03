@@ -145,11 +145,7 @@ const ADVANCE: &str = "/* project:families.derived.child_listing_source_advance 
     INSERT INTO project_child_preimage_watermark
         (chain_id, source_chain_id, source_block_number, source_input_content_hash,
          source_redo_attempt_generation)
-    VALUES ($1, $2, $3, $4, $5)
-    ON CONFLICT (chain_id, source_chain_id)
-    DO UPDATE SET source_block_number = EXCLUDED.source_block_number,
-                  source_input_content_hash = EXCLUDED.source_input_content_hash,
-                  source_redo_attempt_generation = EXCLUDED.source_redo_attempt_generation";
+    VALUES ($1, $2, $3, $4, $5)";
 
 /// The highest block of chain `$1` with a preimage observation, read as `CUTOFF` reads them:
 /// the start of a rebuild's watermarks, below which its composition pass composes every row
