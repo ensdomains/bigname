@@ -5164,3 +5164,78 @@ still running. Then run the schema-migrations again.
 
 Interpret and the verified label-preimage importer write three more btree entries for each
 raw-backed or structural search document of at most 2000 bytes they insert or change.
+
+## A partial index for the Transfer arm of the history handoff probe
+
+The build that adds `normalized_events_v1_transfer_node_idx` changes how history's registry
+handoff read finds a name's registry `Transfer` events. The read runs for history pages with
+`include=data` ([table ownership](storage.md#table-ownership)).
+
+- Before, its two `Transfer` arms read `normalized_events_project_name_node_idx`. Under a
+  top-level node such as `eth` that index holds every second-level name's `NewOwner` events,
+  none of which is a `Transfer`, so the arms read all of them. On a large database the history
+  of such a node failed at the API's statement timeout.
+- The arms now read the new partial index, which holds `Transfer` events only. Responses do
+  not change. The statement in `crates/storage/src/history/registry_handoffs.rs` is unchanged.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and no hashed file changes. No redo is needed. The change ships as an image swap plus the
+  schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261102130000_normalized_events_v1_transfer_node_index.sql` installs the
+index. Where an index of that name already exists, valid and ready, with the reviewed
+definition, the schema-migration adopts it without a build and without a lock, so it is a
+no-op on a database where the index was already built by hand with the statement below. An
+empty `normalized_events` builds it directly. A populated table without it is refused, so on
+an initialized database prebuild it concurrently first, outside a transaction. The phase
+runner and API can keep running while it builds, and the API reads it as soon as it is
+valid:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v1_transfer_node_idx
+    ON bigname_phase.normalized_events (chain_id, (namespace || ':' || lower(after_state ->> 'node')), block_number)
+    INCLUDE (normalized_event_id)
+    WHERE event_kind = 'AuthorityTransferred'
+      AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+      AND after_state ->> 'source_event' = 'Transfer'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+ANALYZE bigname_phase.normalized_events;
+```
+
+`IF NOT EXISTS` matches the index name only, and an interrupted concurrent build leaves an
+invalid index. Check the index after the build:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'normalized_events_v1_transfer_node_idx';
+RESET search_path;
+```
+
+It must return one row with `relkind` `i`, `indrelid` `bigname_phase.normalized_events`, and
+`indisvalid` and `indisready` true. The definition must be exactly this line, which is the
+text the schema-migration compares:
+
+```text
+CREATE INDEX normalized_events_v1_transfer_node_idx ON bigname_phase.normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])) AND ((after_state ->> 'source_event'::text) = 'Transfer'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))
+```
+
+The schema-migration refuses a name that is not an index, an index on another table or one
+that is not valid and ready, and another definition. Its error names the index and, for
+another definition, prints the definition it found and the one it expects. The recovery
+steps:
+
+- A name that is not an index: remove or rename that relation, then build the index with the
+  statement above.
+- Any other refusal: confirm in `pg_stat_progress_create_index` that no build of the index is
+  still running, drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.normalized_events_v1_transfer_node_idx`, then build
+  it again with the statement above.
+
+Then run the schema-migrations again. `ops/walk-index-set/drop.sql` drops the index with the
+other Project and API indexes, and its `install.sql` rebuilds it.

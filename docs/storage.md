@@ -924,17 +924,31 @@ populated upgrades require the [concurrent prebuild and verifier](../ops/history
 They change no rows, hash inputs, catalogue encoding or phase markers and require no replay.
 
 History's registry handoff read (`load_history_registry_handoffs` in
-`crates/storage/src/history/registry_handoffs.rs`) reads two indexes on `normalized_events`.
-The normalized-events baseline and `20260917131000_project_scoped_history_indexes.sql`
-install them:
+`crates/storage/src/history/registry_handoffs.rs`) reads two indexes on `normalized_events`
+for its owner arms. The normalized-events baseline installs both.
+`20260917131000_project_scoped_history_indexes.sql` installs the first, and
+`20261102130000_normalized_events_v1_transfer_node_index.sql` the second:
 
 | Index | Serves |
 | --- | --- |
 | `normalized_events_project_name_child_idx` | the `SubregistryChanged` arm of `owner_probe`: the `SubregistryChanged` events of one name in source family `ens_v1_registry_l1`, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'child_node')` |
-| `normalized_events_project_name_node_idx` | the `AuthorityTransferred` arm of `owner_probe`: the `AuthorityTransferred` events of one name in source family `ens_v1_registry_l1`, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'node')` |
+| `normalized_events_v1_transfer_node_idx` | the `AuthorityTransferred` arm of `owner_probe`: the `AuthorityTransferred` events with source event `Transfer` of one name in source family `ens_v1_registry_l1`, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'node')` |
 
 Neither index restricts `consumer_visibility`. The statement filters it.
-`history/registry_handoffs_tests.rs` checks that each arm reads its index.
+
+The Transfer arm needs its own partial index. A registry `NewOwner(node, label, owner)` log is
+stored as a `SubregistryChanged` and an `AuthorityTransferred` event, and both carry the parent
+in `after_state ->> 'node'`. `normalized_events_project_name_node_idx` has the same key and
+admits both, so under a top-level node such as `eth` it holds every second-level name's
+`NewOwner` events, and none of them is a `Transfer`. The Transfer arm read through it visits
+every one of them and keeps none, and it cannot stop early, because an arm that finds nothing
+reads its whole key range before the `LIMIT 1` above it is decided.
+`normalized_events_v1_transfer_node_idx` admits `Transfer` events only, so the same arm reads
+the parent's own transfers and nothing else. The handoff read no longer uses
+`normalized_events_project_name_node_idx`.
+
+`history/registry_handoffs_tests.rs` checks that each arm reads its index, and that the
+Transfer arms under a parent with many children read none of the children's rows.
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
@@ -3043,7 +3057,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 32 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 33 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
@@ -3059,7 +3073,8 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_mainnet_user_registry_departure_idx`,
 `normalized_events_pointer_after_resolver_history_idx`,
 `normalized_events_pointer_before_resolver_history_idx`, `normalized_events_project_name_node_idx`,
-`normalized_events_project_name_child_idx`, `normalized_events_address_registrant_match_idx`,
+`normalized_events_project_name_child_idx`, `normalized_events_v1_transfer_node_idx`,
+`normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
 `normalized_events_address_root_permission_idx`, `normalized_events_project_node_history_idx`
