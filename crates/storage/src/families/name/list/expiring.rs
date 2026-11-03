@@ -11,7 +11,12 @@
 //!    them once.
 //!
 //! The work a page composes is bounded by its size, whatever the namespace holds. Selecting can
-//! still read many narrow keys: a sparse `parent`, or a second that many names share.
+//! still read many narrow keys: the names of a second that many names share, or the names
+//! below a parent that are not in the window. A `parent` is matched by labelhash path, which
+//! `name_surfaces_project_parent_key_idx` keys, so a parent with few names below it is read
+//! from that index and a parent above most names from the expiry. Each selection statement
+//! is planned for its own values (`persistent(false)`), because a plan reused across parents
+//! would read one of them the slow way.
 //!
 //! Each [`ExpiringSelection`] is one window. A disjoint union merges at most `page_size + 1`
 //! narrow keys from each window in one SQL statement, takes the global first `page_size + 1`,
@@ -27,12 +32,12 @@ use crate::{
     NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentListPage, UnixSeconds,
     families::name::CoverageShape,
     families::name::rendered::{self, composed_surface_sql, rendered_name_sql},
-    name_current::{expiring_page_from, push_parent_predicate},
+    name_current::{expiring_page_from, parent_labelhash_path, push_parent_key_predicate},
 };
 
 /// What one selection reads: the listable names of `namespace` whose expiry is in the half-open
 /// window `[expires_after, expires_before)`, optionally of the listed public authorities and
-/// exactly one label below `parent`, after `cursor` in `order`.
+/// exactly one label below the node of `parent`, after `cursor` in `order`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ExpiringSelection<'a> {
     pub(crate) deadline: crate::NameCurrentDeadline,
@@ -95,6 +100,7 @@ pub async fn load_family_expiring_page(
     } else {
         expiring_union_query("", filter, order, cursor, limit)?
             .build_query_scalar()
+            .persistent(false)
             .fetch_all(&mut *snapshot)
             .await
             .context("failed to select the disjoint expiring windows")?
@@ -123,6 +129,7 @@ pub(crate) async fn select_expiring_names(
 ) -> Result<Vec<String>> {
     expiring_names_query("", selection, limit)?
         .build_query_scalar()
+        .persistent(false)
         .fetch_all(conn)
         .await
         .context("failed to select the expiring names")
@@ -185,8 +192,8 @@ fn push_expiring_selection<'a>(
         Some(_) => bail!("name_current expiring page cursor must carry an expiry timestamp"),
     };
     let ascending = selection.order == NameCurrentListOrder::Asc;
-    // The served name: the key of this arm's order, cursor and `parent` test, and the
-    // `raw_name` column a union of arms merges by.
+    // The served name: the key of this arm's order and cursor, and the `raw_name` column a
+    // union of arms merges by.
     let name = rendered_name_sql("surface");
     let date = selection.deadline.column();
     builder.push(format!(
@@ -223,7 +230,10 @@ fn push_expiring_selection<'a>(
         }
     }
     if let Some(parent) = selection.parent {
-        push_parent_predicate(builder, &format!("({name})"), parent);
+        // Both namespaces lead the same logical name id. Spelled out, the parent key index is
+        // read with its namespace column bound.
+        builder.push(" AND surface.namespace = summary.namespace");
+        push_parent_key_predicate(builder, "surface", &parent_labelhash_path(parent));
     }
     if let Some(expires_after) = selection.expires_after {
         builder.push(format!(" AND summary.{date} >= "));

@@ -235,9 +235,9 @@ fn prepared(name: &str, selection: &ExpiringSelection<'_>, limit: u64) -> Result
         }
     }
     if let Some(parent) = selection.parent {
-        let (one_below, deeper) = crate::name_current::parent_like_patterns(parent);
-        types.extend(["text", "text"]);
-        values.extend([literal(&one_below), literal(&deeper)]);
+        let path = super::measure::path_literal(parent);
+        types.extend(["text[]", "text[]"]);
+        values.extend([path.clone(), path]);
     }
     for bound in [selection.expires_after, selection.expires_before]
         .into_iter()

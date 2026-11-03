@@ -684,7 +684,7 @@ collection route carry neither header.
 | `grace_ends_before` | query | string | no | none | Exclusive finite grace-deadline upper bound, as decimal Unix seconds or RFC 3339; later than grace_ends_after when both are supplied. Cannot combine with expiry parameters. |
 | `grace_ends_window` | query | repeated array [1, 32] of string | no | none | Repeat for disjoint half-open grace-deadline windows with the same rules as expires_window. Input order defines grace_ends_window_index. Cannot combine with scalar grace or any expiry parameter. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
-| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by labelhash path, are listed. A bracketed labelhash label names the node it hashes. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `sort` | query | enum `expires_at`, `grace_ends_at` | no | none | Defaults to the supplied date family; explicit sort must match it. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -733,9 +733,12 @@ collection route carry neither header.
   unordered comma-separated set of served authority values using the grammar
   of [address names](#get-v1addressesaddressnames); rows that serve no authority
   match no set. `parent` selects names exactly one label below the supplied
-  ENSIP-15-normalized name by served spelling, including its
-  [rendered-name](glossary.md#rendered-name) rules, not registry topology.
-  `parent=eth` selects second-level `.eth` names and excludes deeper subnames.
+  ENSIP-15-normalized name by labelhash path, not by served spelling. A
+  bracketed labelhash label in `parent` names the node it hashes, and a name is
+  listed whatever text its labels are served under, a
+  [rendered-name](glossary.md#rendered-name) label with no verified text
+  included. `parent=eth` selects second-level `.eth` names and excludes deeper
+  subnames.
   Both filters apply before paging. Empty or invalid parents and invalid
   authority sets return `400 invalid_input`.
 - A proved canonical allocation remains discoverable when current authority is
@@ -762,9 +765,10 @@ collection route carry neither header.
   before selecting at most `page_size + 1` names for composition. A repeated
   request selects at most that many narrow keys per window, then composes only
   the global first `page_size + 1` once. Namespace/deadline and
-  namespace/authority/deadline indexes support both families. Composition is
-  bounded even when a sparse parent filter or many names sharing a deadline
-  require inspecting more narrow keys; the database chooses the query plan.
+  namespace/authority/deadline indexes support both families, and a parent key
+  index reads the names below a parent with few names below it. Composition is
+  bounded even when many names sharing a deadline require inspecting more
+  narrow keys. The database chooses the query plan for each request's values.
   A mismatch between a selected stored deadline and its composed row fails
   with `500 internal_error` rather than returning a shortened page.
 - Each page reads one publication snapshot. Its cursor binds the date family,
