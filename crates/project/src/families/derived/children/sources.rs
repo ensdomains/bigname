@@ -49,6 +49,10 @@ use crate::{ProjectError, Result, families::input};
 /// blocks.
 const SOURCE_EVENTS: i64 = 1000;
 
+thread_local! {
+    static REDO_FROM: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
 /// Every other chain with heads, its finality floor (finalized, else safe; null with neither),
 /// and chain `$1`'s watermark row for it: whether there is one, its block and the other chain's
 /// Interpret revision it was read under.
@@ -209,7 +213,7 @@ fn plan(stored: Option<(i64, &input::Revision)>, current: Option<&input::Revisio
     };
     match stored {
         Some((_, revision)) if revision != current => Plan {
-            after: -1,
+            after: REDO_FROM.with(|from| from.get()).map_or(-1, |from| from - 1).min(watermark),
             reset: true,
             advances: true,
         },
@@ -278,6 +282,7 @@ pub(super) async fn read(
         let stored = has_row.then_some((block.unwrap_or(-1), &revision));
         let token = input::token_in(transaction, &source).await?;
         let current = token.revision();
+        REDO_FROM.with(|from| from.set(token.project_redo_mode.as_ref().and(token.project_redo_from)));
         let plan = plan(stored, current.as_ref());
         let after = plan.after;
         let limit = (!whole_tail(after, floor)).then_some(SOURCE_EVENTS);
