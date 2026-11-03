@@ -529,16 +529,17 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=505
+expected_refusal_assertions=514
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=87
+expected_predecessor_shape_proof_count=88
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
 unnamed_lease_index_migration="$ROOT/migrations/20261016120000_project_lifecycle_event_drop_unnamed_lease_index.sql"
 search_prefix_index_migration="$ROOT/migrations/20261029120000_search_prefix_bucket_indexes.sql"
 transfer_node_index_migration="$ROOT/migrations/20261102130000_normalized_events_v1_transfer_node_index.sql"
+registry_roles_index_migration="$ROOT/migrations/20261102140000_normalized_events_registry_roles_index.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.
@@ -838,6 +839,11 @@ check_served_projection_removal() {
                 emit_phase_migration "$transfer_node_index_migration" preceding-shape
             fi
             emit_phase_migration "$transfer_node_index_migration" baseline-first
+            # The registry roles index: absent from the pre-7c shape, present in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$registry_roles_index_migration" preceding-shape
+            fi
+            emit_phase_migration "$registry_roles_index_migration" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -995,7 +1001,8 @@ for migration_file in \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
     "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" \
     "$search_prefix_index_migration" \
-    "$transfer_node_index_migration"
+    "$transfer_node_index_migration" \
+    "$registry_roles_index_migration"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1355,6 +1362,10 @@ emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainne
 # still empty here, so the schema-migration builds it.
 emit_phase_migration "$transfer_node_index_migration" preceding-shape | run_psql
 emit_phase_migration "$transfer_node_index_migration" baseline-first | run_psql
+# The same fixture lacks the registry roles index, and the schema-migration builds it on the
+# empty table.
+emit_phase_migration "$registry_roles_index_migration" preceding-shape | run_psql
+emit_phase_migration "$registry_roles_index_migration" baseline-first | run_psql
 # The historical normalized-event fixture lacks the registrar lease index. Install
 # the current operational definition before walk-set and exact-adoption checks.
 render_phase_migration "$ROOT/ops/history-registrar-lease-index/install.sql" | run_psql
@@ -3679,8 +3690,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 33 THEN
-        RAISE EXCEPTION 'drop.sql does not list 33 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 34 THEN
+        RAISE EXCEPTION 'drop.sql does not list 34 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
@@ -4884,6 +4895,7 @@ done
 source "$ROOT/scripts/schema-check/history-registrar-lease.sh"
 source "$ROOT/scripts/schema-check/history-direct-accounts.sh"
 source "$ROOT/scripts/schema-check/history-transfer-node.sh"
+source "$ROOT/scripts/schema-check/registry-roles.sh"
 
 # Recreate the registry token index from its preceding schema shape. Compare
 # the resulting catalog definition to the fresh baseline, then prove a rerun
