@@ -1315,7 +1315,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total. When only resolver or contract_address anchors the read, it is exact up to 100,000 rows and null above.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total, and page.total_count is null without it. When only resolver or contract_address anchors the read, it is exact up to 100,000 rows and null above.",
             "schema": {
               "type": "array",
               "items": {

@@ -170,7 +170,9 @@ async fn v2_history_walks_equal_their_unpaged_collection() -> Result<()> {
             for counted in [base.clone(), exact] {
                 let (baseline, total_count) = hkw_baseline(&database, &counted).await?;
                 assert!(baseline.len() >= 4, "{counted}: {baseline:?}");
-                let expected_total = if counted.starts_with("/v1/addresses/") && counted == base {
+                let expected_total = if counted == base
+                    && (counted.starts_with("/v1/addresses/") || counted.starts_with("/v1/events"))
+                {
                     Value::Null
                 } else {
                     json!(baseline.len())
