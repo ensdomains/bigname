@@ -14,10 +14,11 @@
 //! | 11 | A supervised walk | Interpret runs without the index, Project's first batch has it | `restore_runs_before_projects_first_batch_and_not_during_interpret` |
 //! | 12 | A one-shot Interpret redo | Absent through Interpret, present for the stamped Project redo | `interpret_redo_walks_without_the_index_and_project_redo_gets_it_back` |
 //! | 13 | Another chain still in an Interpret redo | Built, warned naming that chain | `restore_warns_about_a_chain_still_in_an_interpret_redo` |
-//! | 14 | A build that fails | Error names the index and the cause, not retried, Project not started | `a_failed_build_stops_project_with_the_error_line` |
+//! | 14 | A build that fails | Error names the index and the cause, not retried, Project not started (the supervisor's non-zero exit on a not-retried error is the runner's existing behaviour) | `a_failed_build_stops_project_with_the_error_line` |
 //! | 15 | A stop during a build | Returns within the stop budget, the server build is cancelled, the leftover is rebuilt next time | `a_stop_during_the_restore_cancels_the_build_and_leaves_a_rebuildable_leftover` |
 //! | 20 | The transfer node schema-migration | Adopts the runner's build, and the runner keeps the migration's | `the_transfer_node_migration_and_the_runner_build_each_others_index_once` |
 //! | 23 | Another login's build, `VACUUM` or `ANALYZE` on the table | Waits naming the backend, keeps the loop heartbeat fresh, then builds | `restore_waits_for_another_build_on_the_table` |
+//! | 25 | A build that failed, then another chain's Project entry in the same process, then a restart | The other chain stops with the same error and no build, the restart builds again | `a_failed_build_stops_every_chain_in_the_process_and_a_restart_builds_again` |
 
 use std::collections::BTreeMap;
 
@@ -703,6 +704,65 @@ async fn a_failed_build_stops_project_with_the_error_line() -> Result<()> {
         ("completed".to_owned(), false)
     );
     assert_eq!(oid(scratch.pool(), DROPPED).await?, None);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_failed_build_stops_every_chain_in_the_process_and_a_restart_builds_again() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("walk_index_restore_failed_twice").await?;
+    let (first, second) = ("walk-index-failed-first", "walk-index-failed-second");
+    completed_chain(&scratch, first).await?;
+    completed_chain(&scratch, second).await?;
+    drop_index(scratch.pool(), DROPPED).await?;
+    let database = non_owner_database(&scratch).await?;
+    let process = runner(
+        database.clone(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "walk-index-failed-twice-runner",
+    )?;
+
+    let failed = project_redo(&process, first, CancellationToken::new())
+        .await
+        .expect_err("the first build fails")
+        .to_string();
+    assert!(!failed.contains("already failed"), "{failed}");
+    let error = project_redo(&process, second, CancellationToken::new())
+        .await
+        .expect_err("another chain in the process must not build again");
+    let message = error.to_string();
+    assert!(
+        message.contains("already failed in this process"),
+        "{message}"
+    );
+    assert!(message.contains(DROPPED), "{message}");
+    assert!(message.contains("must be owner"), "{message}");
+    assert!(!error.is_retryable());
+    assert_eq!(
+        project_row(scratch.pool(), second).await?,
+        ("completed".to_owned(), false)
+    );
+    database.pool().close().await;
+
+    // A restart is a new process, which builds again.
+    let restarted = non_owner_database(&scratch).await?;
+    let again = project_redo(
+        &runner(
+            restarted.clone(),
+            PhaseSet::loopback(),
+            available_capacity(),
+            "walk-index-failed-twice-restarted",
+        )?,
+        second,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("the cause persists")
+    .to_string();
+    restarted.pool().close().await;
+    assert!(!again.contains("already failed"), "{again}");
+    assert!(again.contains("must be owner"), "{again}");
     scratch.cleanup().await
 }
 
