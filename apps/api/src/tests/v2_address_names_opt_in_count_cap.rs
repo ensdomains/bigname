@@ -10,16 +10,18 @@ async fn with_opt_in_cap<F: std::future::Future>(cap: usize, future: F) -> F::Ou
 }
 
 /// The payload of `uri` read with no candidate cap and an opt-in cap of `opt_in`, with the
-/// paths it took and the size of every composition batch.
+/// paths it took and the size of every composition batch. The request is boxed, so the test's
+/// own future stays small enough for the test thread's stack.
 async fn opt_in_page(
     database: &TestDatabase,
     uri: &str,
     opt_in: usize,
 ) -> Result<(Value, Vec<&'static str>, Vec<usize>)> {
-    let ((payload, paths), batches) = with_batches(with_exact_total_cap(
+    let request = Box::pin(with_paths(bulk_payload(database, uri)));
+    let ((payload, paths), batches) = Box::pin(with_batches(with_exact_total_cap(
         0,
-        with_opt_in_cap(opt_in, with_paths(bulk_payload(database, uri))),
-    ))
+        with_opt_in_cap(opt_in, request),
+    )))
     .await;
     Ok((payload?, paths, batches))
 }
@@ -63,7 +65,7 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
         "relation=owner&parent=eth&dedupe=registration",
     ] {
         let uri = format!("{counted}&{query}");
-        let full = bulk_payload(&database, &uri).await?;
+        let full = Box::pin(bulk_payload(&database, &uri)).await?;
         assert!(full["page"]["total_count"].is_u64(), "{query}: {full}");
         let (exact, _, _) = opt_in_page(&database, &uri, every).await?;
         assert_eq!(exact["page"]["total_count"], full["page"]["total_count"], "{query}");

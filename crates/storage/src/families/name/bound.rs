@@ -314,7 +314,9 @@ async fn select(
 /// generic plan's guess of a few hundred names. It is sent unprepared, which no cached statement
 /// can switch to its generic plan, and it runs under `plan_cache_mode = force_custom_plan`
 /// ([`custom_plans`]), which a server, role or session setting of `force_generic_plan` cannot
-/// override.
+/// override. The savepoint also turns sorts off, so the count's order is met only by reading
+/// the index in page order. Without it, a resolver whose size the planner estimates below the
+/// limit is read by a bitmap scan of every listed row, each probed, then sorted.
 pub(crate) async fn count(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
@@ -344,8 +346,9 @@ fn count_limit(cap: Option<u64>) -> Option<i64> {
 }
 
 /// A savepoint on `conn` (or a transaction, on a connection outside one) whose statements are
-/// planned with their values: `SET LOCAL plan_cache_mode = force_custom_plan`. The caller rolls
-/// it back, which restores the setting for the rest of the read and keeps its snapshot.
+/// planned with their values and without a sort: `SET LOCAL plan_cache_mode =
+/// force_custom_plan` and `SET LOCAL enable_sort = off`. The caller rolls it back, which
+/// restores both settings for the rest of the read and keeps its snapshot.
 async fn custom_plans(conn: &mut PgConnection) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
     let mut scoped = conn
         .begin()
@@ -355,6 +358,10 @@ async fn custom_plans(conn: &mut PgConnection) -> Result<sqlx::Transaction<'_, s
         .execute(&mut *scoped)
         .await
         .context("failed to plan the bound-name count with its values")?;
+    sqlx::query("SET LOCAL enable_sort = off")
+        .execute(&mut *scoped)
+        .await
+        .context("failed to plan the bound-name count in index order")?;
     Ok(scoped)
 }
 

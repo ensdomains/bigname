@@ -641,6 +641,10 @@ Family indexes serve these concrete readers:
   every surface before the first row, past any limit. The count is sent unprepared, inside a
   savepoint that sets `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count
   with the resolver's own values and limit even on a session set to `force_generic_plan`.
+  The savepoint also sets `enable_sort = off`. A resolver whose size the planner estimates
+  below the limit would otherwise be read by a bitmap scan of every listed row, each probed
+  by the fences, and then sorted. Without a sort only the index range in page order meets the
+  count's order.
   Interpret writes a surface's raw bytes and its shadow
   state in place when it observes a preimage for it, and keeps the surface's block. The summary
   writer reads them as the composed block does (`loaders::surfaces_at`): only when the surface's

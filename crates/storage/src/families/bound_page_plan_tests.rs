@@ -192,11 +192,11 @@ async fn a_bound_name_page_reads_one_page_of_summary_rows_at_a_million_names() -
     .await
 }
 
-/// The prepared count under either plan, for a resolver whose support is `supported`, whose
-/// listing reads `index` and holds `total` names. Uncapped it counts `total`, as the fences
-/// written as `EXISTS` do. Capped it counts `CAP + 1`: a `Limit` holds the scan of `index` to
-/// `CAP + 1` rows, the other index is not read, and the fences run as a subplan once for each
-/// row, never as a join over the surfaces.
+/// The prepared count under either plan, with sorts off as the reader's savepoint sets them, for
+/// a resolver whose support is `supported`, whose listing reads `index` and holds `total` names.
+/// Uncapped it counts `total`, as the fences written as `EXISTS` do. Capped it counts
+/// `CAP + 1`: a `Limit` holds the scan of `index` to `CAP + 1` rows, the other index is not
+/// read, and the fences run as a subplan once for each row, never as a join over the surfaces.
 async fn count(
     connection: &mut PgConnection,
     (supported, index, total): (bool, &str, i64),
@@ -209,6 +209,9 @@ async fn count(
     .execute(&mut *connection)
     .await
     .context("prepare the bound-name count")?;
+    raw_sql("SET enable_sort = off")
+        .execute(&mut *connection)
+        .await?;
     for mode in PLAN_MODES {
         raw_sql(&format!("SET plan_cache_mode = {mode}"))
             .execute(&mut *connection)
@@ -273,7 +276,7 @@ async fn count(
             );
         }
     }
-    raw_sql("RESET plan_cache_mode")
+    raw_sql("RESET plan_cache_mode; RESET enable_sort")
         .execute(&mut *connection)
         .await?;
     let existing: i64 = sqlx::query_scalar(&exists_count_sql(supported))
@@ -388,6 +391,23 @@ async fn reader_count(connection: &mut PgConnection) -> Result<()> {
         text.contains(&format!("'{CHAIN}'::text")),
         "the reader's count was planned without the resolver's values\n{text}"
     );
+    // The reader's own savepoint reads either index in page order under the limit, with no
+    // bitmap scan or sort, whatever the planner estimates for the resolver.
+    for (supported, index) in [(true, ORDER_INDEX), (false, EXEMPT_INDEX)] {
+        let plan =
+            bound_count_plan(&mut *connection, (CHAIN, &address, None), supported, cap).await?;
+        ensure!(
+            plan.contains("Limit")
+                && plan.contains(&format!("Index Scan using {index}"))
+                && !plan.contains("Sort")
+                && !plan.contains("Bitmap"),
+            "the reader's count (supported {supported}) does not read {index} in order\n{plan}"
+        );
+    }
+    let setting: String = sqlx::query_scalar("SHOW enable_sort")
+        .fetch_one(&mut *connection)
+        .await?;
+    ensure!(setting == "on", "the count left enable_sort {setting}");
     forced_generic_count(connection).await
 }
 
