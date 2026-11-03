@@ -768,7 +768,7 @@ collection route carry neither header.
   namespace/authority/deadline indexes support both families, and a parent key
   index reads the names below a parent with few names below it. Composition is
   bounded even when many names sharing a deadline require inspecting more
-  narrow keys. The database chooses the query plan for each request's values.
+  narrow keys. With `parent`, the database chooses the query plan for each request's values.
   A mismatch between a selected stored deadline and its composed row fails
   with `500 internal_error` rather than returning a shortened page.
 - Each page reads one publication snapshot. Its cursor binds the date family,
@@ -3603,10 +3603,10 @@ introduces it rebuilds Project from full history before serving the option; see
   `authority` (Basenames rows and ownerless registry rows) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
-  `parent` keeps only names exactly one label below the given name, by the
-  rule it has on [`GET /v1/names`](#get-v1names): the value is normalized as a
-  path name, and a row matches by its normalized name spelling, not by node or
-  registry topology, so `parent=eth` keeps the `.eth` second-level names and
+  `parent` keeps only names exactly one label below the given name. The value
+  is normalized as a path name, and a row matches by its normalized name
+  spelling, not by node or registry topology. [`GET /v1/names`](#get-v1names)
+  matches by labelhash path instead. Here `parent=eth` keeps the `.eth` second-level names and
   no deeper subname, wrapped or not (see the
   [naming dictionary](api-v1.md#naming-dictionary)). An ENSv1 registry child
   with no name row matches by the name it serves, which spells an unknown

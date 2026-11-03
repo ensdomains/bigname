@@ -810,8 +810,8 @@ It is a btree on `(namespace, hash_array_extended(entry_key_hashes(labelhashes[2
 the surfaces the listing reads, active and not the empty root name. The statement also compares
 the labelhashes after the first with the parent's path, so a hash collision never lists a name.
 A parent with few names below it is read from this index. A parent above most names, such as
-`eth`, is read from `project_name_summary_expiry_idx`, with the key compared on each row. Both
-statements run unprepared, so each is planned with its own parent and the index statistics
+`eth`, is read from `project_name_summary_expiry_idx`, with the key compared on each row. With a
+parent, both statements run unprepared, so each is planned with its own parent and the index statistics
 choose between the two. `crates/storage/src/families/name/list/expiring/parent_tests.rs` checks
 the rows of every parent class and the rows each plan examines. Interpret pays one btree entry
 when it inserts a surface.

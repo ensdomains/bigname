@@ -5497,8 +5497,8 @@ The build that adds `name_surfaces_project_parent_key_idx` changes how `GET /v1/
   statement timeout.
 - The statement now matches the parent by labelhash path, and the new index keys each surface
   by its parent's path. A parent with few names below it is read from the index. A parent
-  above most names, such as `eth`, is still read in expiry order. Each selection statement is
-  planned for its own values, so the planner chooses by the parent's statistics.
+  above most names, such as `eth`, is still read in expiry order. A selection with a parent
+  is planned for its own values, so the planner chooses by the parent's statistics.
 - A name is now listed by its place in the tree, not by the text it is served under. A parent
   label spelled as its labelhash lists the names below that node, and a name whose middle
   label has no known text is listed under the parent spelled in text.

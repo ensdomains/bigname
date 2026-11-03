@@ -14,8 +14,8 @@
 //! still read many narrow keys: the names of a second that many names share, or the names
 //! below a parent that are not in the window. A `parent` is matched by labelhash path, which
 //! `name_surfaces_project_parent_key_idx` keys, so a parent with few names below it is read
-//! from that index and a parent above most names from the expiry. Each selection statement
-//! is planned for its own values (`persistent(false)`), because a plan reused across parents
+//! from that index and a parent above most names from the expiry. A selection with a parent
+//! is not kept prepared, so it is planned for its own parent. A plan reused across parents
 //! would read one of them the slow way.
 //!
 //! Each [`ExpiringSelection`] is one window. A disjoint union merges at most `page_size + 1`
@@ -100,7 +100,7 @@ pub async fn load_family_expiring_page(
     } else {
         expiring_union_query("", filter, order, cursor, limit)?
             .build_query_scalar()
-            .persistent(false)
+            .persistent(filter.parent.is_none())
             .fetch_all(&mut *snapshot)
             .await
             .context("failed to select the disjoint expiring windows")?
@@ -129,7 +129,7 @@ pub(crate) async fn select_expiring_names(
 ) -> Result<Vec<String>> {
     expiring_names_query("", selection, limit)?
         .build_query_scalar()
-        .persistent(false)
+        .persistent(selection.parent.is_none())
         .fetch_all(conn)
         .await
         .context("failed to select the expiring names")

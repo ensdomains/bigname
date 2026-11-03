@@ -32,11 +32,12 @@ const AUTHORITY_INDEX: &str = "project_name_summary_authority_expiry_idx";
 /// whose labels all have usable preimages, and a label with no preimage one label below
 /// `p.eth`. Each is listed under the name built from its label hashes.
 ///
-/// Five more, all sharing [`TIE`]: `k1`, `k2` and `k3` one label below `few.eth` (ROWS + 10 to
-/// ROWS + 12), `k3` with its label hashes after the first stored in uppercase hex; a shadow
-/// surface with no bytes one label below `few.eth` (ROWS + 13); and a surface with no bytes one
-/// label below `zz.eth` (ROWS + 15), whose label `zz` has no preimage, so it is served as
-/// `[dd…].[<labelhash of zz>].eth`.
+/// Five more share [`TIE`]:
+/// - `k1`, `k2` and `k3` one label below `few.eth` (ROWS + 10 to ROWS + 12). `k3` stores its
+///   label hashes after the first in uppercase hex.
+/// - A shadow surface with no bytes one label below `few.eth` (ROWS + 13).
+/// - A surface with no bytes one label below `zz.eth` (ROWS + 15). Its label `zz` has no
+///   preimage, so it is served as `[dd…].[<labelhash of zz>].eth`.
 ///
 /// Every surface's label hashes are its path, label by label ([`fixture_labelhash`]).
 pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
@@ -401,6 +402,8 @@ async fn expiring_selection_reads_the_selector_indexes_in_the_public_order() -> 
                     &[EXPIRY_INDEX, AUTHORITY_INDEX][..],
                     15,
                 ),
+                // With sorts off, these rows show the expiry path stays available to a parent.
+                // Which path a parent takes under its own statistics is in parent_tests.rs.
                 ("parent", None, Some("p.eth"), &[EXPIRY_INDEX][..], 15),
                 // The parent is a literal: `_` and `%` in it match only themselves.
                 (
