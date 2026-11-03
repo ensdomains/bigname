@@ -49,8 +49,11 @@ const PAGE_TYPES: &str = "text, uuid[], text, text, uuid, text, bigint, uuid, te
 
 /// The WrapperRegistry sources of a read bound to one published resource: the owner source,
 /// then the operator source.
-fn bound_sources(_subject: bool) -> [String; 2] {
-    sources_before()
+fn bound_sources(subject: bool) -> [String; 2] {
+    [
+        super::super::wrapper_registry::resource_owner_candidates(),
+        super::super::wrapper_registry::resource_operator_candidates(subject),
+    ]
 }
 
 /// The WrapperRegistry sources of the statement for a page's resources.
@@ -274,6 +277,23 @@ fn unkeyed(cell: &str, plan: &[String], steps: &[Step]) -> Vec<String> {
     vec![format!("{}\n{}", failures.join("\n"), shown(plan))]
 }
 
+/// The lookups of `steps` the plan of a source before makes. Each one would mean the fixture
+/// does not tell that source and its replacement apart.
+fn made_before(cell: &str, plan: &[String], steps: &[Step]) -> Option<String> {
+    let missed = missing_steps(plan, steps);
+    let made: Vec<&str> = steps
+        .iter()
+        .map(|step| step.label)
+        .filter(|label| !missed.contains(label))
+        .collect();
+    (!made.is_empty()).then(|| {
+        format!(
+            "{cell}: the source before also makes the lookups of {made:?}\n{}",
+            shown(plan)
+        )
+    })
+}
+
 /// A plan for a failure message, its lines cut short: the bound ids make them long.
 fn shown(plan: &[String]) -> String {
     plan.iter()
@@ -382,23 +402,37 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
             };
             let [owners, operators] = bound_sources(subject.is_some());
             let [owners_before, operators_before] = sources_before();
-            let arms = [
-                (
-                    "owner",
-                    owners,
-                    owners_before,
-                    vec![ROOT_GRANTS, PARENT_ROW, PARENT_ENTRY],
-                ),
-                (
-                    "operator",
-                    operators,
-                    operators_before,
-                    vec![ROOT_GRANTS, PARENT_ROW, PARENT_ENTRY, approvals],
-                ),
-            ];
+            let owner_steps = [ROOT_GRANTS, PARENT_ROW, PARENT_ENTRY];
+            let operator_steps = [ROOT_GRANTS, PARENT_ROW, PARENT_ENTRY, approvals];
             let values = read.values();
             for mode in PLAN_MODES {
-                for (arm, source, source_before, steps) in &arms {
+                // The lookups the source before misses on this fixture, which tell the two
+                // sources apart. The operator source before starts from the approvals and
+                // misses all of them. The owner source before has no key for the resource in
+                // a generic plan. A custom plan folds its `$2 IS NULL`, so it starts from the
+                // root grant too, except at a root with 300 holders, where it merge-joins every
+                // entry of the chain with every parent row.
+                let owner_before_misses: &[Step] = match (mode, read.resource == root(1)) {
+                    ("force_generic_plan", _) => &[ROOT_GRANTS],
+                    (_, true) => &[PARENT_ROW, PARENT_ENTRY],
+                    _ => &[],
+                };
+                for (arm, source, source_before, steps, before_misses) in [
+                    (
+                        "owner",
+                        &owners,
+                        &owners_before,
+                        &owner_steps[..],
+                        owner_before_misses,
+                    ),
+                    (
+                        "operator",
+                        &operators,
+                        &operators_before,
+                        &operator_steps[..],
+                        &operator_steps[..],
+                    ),
+                ] {
                     let cell = format!("{}, {arm} source, {mode}", read.label);
                     let plan = explain(
                         connection,
@@ -410,8 +444,6 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
                     )
                     .await?;
                     failures.extend(unkeyed(&cell, &plan, steps));
-                    // The source before must make none of these lookups on the same fixture,
-                    // or the fixture would not tell the two sources apart.
                     let plan = explain(
                         connection,
                         &mut count,
@@ -421,14 +453,7 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
                         mode,
                     )
                     .await?;
-                    let made = steps.len() - missing_steps(&plan, steps).len();
-                    if made > 0 {
-                        failures.push(format!(
-                            "{cell}: the source before makes {made} of {} lookups by key\n{}",
-                            steps.len(),
-                            shown(&plan)
-                        ));
-                    }
+                    failures.extend(made_before(&cell, &plan, before_misses));
                 }
                 // No source of the statement as sent walks the entry owner index unkeyed.
                 let plan =
@@ -455,13 +480,29 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
         let before = before_statement(&sql, false);
         let [owners, operators] = page_sources();
         let [owners_before, operators_before] = page_sources_before();
+        let owner_steps = [PAGE_ROOT_GRANTS, PARENT_ROW, PARENT_ENTRY];
+        let operator_steps = [PAGE_ROOT_GRANTS, PARENT_ROW, PARENT_ENTRY, OWNER_APPROVALS];
         for mode in PLAN_MODES {
-            for (arm, source, source_before, steps) in [
-                ("owner", &owners, &owners_before, &[PAGE_ROOT_GRANTS][..]),
+            // The owner source before reaches the root grants through the statement's own
+            // bound on the ids in a generic plan, and reads every parent row in a custom one.
+            let owner_before_misses: &[Step] = if mode == "force_custom_plan" {
+                &[PAGE_ROOT_GRANTS]
+            } else {
+                &[]
+            };
+            for (arm, source, source_before, steps, before_misses) in [
+                (
+                    "owner",
+                    &owners,
+                    &owners_before,
+                    &owner_steps[..],
+                    owner_before_misses,
+                ),
                 (
                     "operator",
                     &operators,
                     &operators_before,
+                    &operator_steps[..],
                     &[PAGE_ROOT_GRANTS, OWNER_APPROVALS][..],
                 ),
             ] {
@@ -485,14 +526,7 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
                     mode,
                 )
                 .await?;
-                let made = steps.len() - missing_steps(&plan, steps).len();
-                if made > 0 {
-                    failures.push(format!(
-                        "{cell}: the source before makes {made} of {} lookups by key\n{}",
-                        steps.len(),
-                        shown(&plan)
-                    ));
-                }
+                failures.extend(made_before(&cell, &plan, before_misses));
             }
         }
 
@@ -578,7 +612,10 @@ async fn wrapper_sources_keep_every_key_of_the_resources() -> Result<()> {
         );
         let mut read_keys = BTreeMap::new();
         for read in &reads {
-            for limit in [64, 7] {
+            // 64 is the reader's batch. 7 cuts inside every resource's keys, and 501 inside
+            // those of the two roots with 2,000 keys or more.
+            let heavy = [root(1), root(4)].contains(&read.resource);
+            for limit in if heavy { [64, 501] } else { [64, 7] } {
                 let mut all = Vec::new();
                 let mut after: Option<Cursor> = None;
                 loop {
@@ -708,7 +745,7 @@ async fn wrapper_sources_keep_every_key_of_the_resources() -> Result<()> {
         for (chain, resources) in &chains {
             for resource in resources {
                 let read = Read {
-                    chain: *chain,
+                    chain,
                     ..Read::new("a page resource", *resource)
                 };
                 let mut after: Option<Cursor> = None;

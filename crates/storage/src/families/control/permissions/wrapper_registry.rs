@@ -45,9 +45,14 @@ const ONE_RESOURCE: &str = "AND ($9::text IS NULL OR entry.chain_id = $9)
       AND ($2::uuid IS NULL OR virtual_grant.resource_id = COALESCE($8::uuid, $2::uuid))";
 const ROOT_RESOURCE: &str = "CASE WHEN $8::uuid = virtual_grant.resource_id
         THEN $2::uuid ELSE virtual_grant.resource_id END";
-/// Page sources retain the chain; the outer page builder bounds the projected resource id.
-/// Applying that same array predicate here again can misestimate the selected root grants.
-const PAGE_CHAIN: &str = "AND entry.chain_id = $9";
+/// The one resource `$2` of a read, or the registry root `$8` of its token resource.
+const BOUND_RESOURCE: &str = "grant_row.resource_id = COALESCE($8::uuid, $2::uuid)";
+/// The resources `$2` of a page.
+const PAGE_RESOURCES: &str = "grant_row.resource_id = ANY($2::uuid[])";
+const LIVE_ENTRY: &str = "entry.status = 'registered' AND entry.owner IS NOT NULL
+      AND entry.expiry > extract(epoch FROM marker.block_timestamp)";
+const ENTRY_SCOPE: &str = "concat('account:', entry.chain_id, ':ens_v2_registry:',
+            entry.registry, ':', entry.owner) AS scope";
 const OPERATOR_SCOPE: &str = "concat('account:', approval.chain_id, ':ens_v2_registry:',
             approval.authority_contract, ':', approval.owner) AS scope
         FROM bigname_phase.project_account_approval approval
@@ -58,6 +63,8 @@ const APPROVED_OPERATOR: &str = "AND approval.authority_kind = 'ens_v2_registry'
           AND approval.relation_kind = 'operator' AND approval.approved
           AND approval.subject <> approval.owner";
 
+/// The owner source of a read not bound to a published resource: an address read by `$1`,
+/// which starts from the subject's entries, or a read of a resource with no publication.
 pub(super) fn owner_candidates() -> String {
     format!(
         "SELECT entry.owner AS subject, {ROOT_RESOURCE} AS resource_id, 'root'::text AS scope
@@ -67,6 +74,8 @@ pub(super) fn owner_candidates() -> String {
     )
 }
 
+/// The operator source of a read not bound to a published resource: an address read by `$1`,
+/// which starts from the subject's approvals, or a read of a resource with no publication.
 pub(super) fn operator_candidates() -> String {
     format!(
         "SELECT approval.subject, {ROOT_RESOURCE} AS resource_id,
@@ -78,23 +87,95 @@ pub(super) fn operator_candidates() -> String {
     )
 }
 
-/// [`owner_candidates`] for the resources of a page.
-pub(super) fn page_owner_candidates() -> String {
+/// The root grants `resources` selects on chain `$9`, then for each grant its WrapperRegistry's
+/// parent row and the parent's live entry, each found by its primary key. Each step is an
+/// `OFFSET 0` subquery, which the planner cannot merge into a join: it cannot start from the
+/// entries or the parent rows, whatever their estimates. The first also keeps a page's outer
+/// bound on the resource ids out of the root-grant lookup, so the array predicate is applied
+/// once: applied twice, it misestimates the selected root grants.
+fn resource_root(resources: &str) -> String {
     format!(
-        "SELECT entry.owner AS subject, virtual_grant.resource_id, 'root'::text AS scope
-        FROM bigname_phase.project_ens_v2_entry_owner entry {PARENT_ROOT}
-      {PAGE_CHAIN}"
+        "FROM (SELECT grant_row.chain_id, grant_row.resource_id, grant_row.subject,
+                      grant_row.scope_detail ->> 'registry_address' AS registry
+               FROM bigname_phase.project_grant grant_row
+               WHERE grant_row.chain_id = $9 AND grant_row.scope = 'root' AND {resources}
+               OFFSET 0) virtual_grant
+        JOIN LATERAL (
+            SELECT entry.chain_id, entry.registry, entry.owner
+            FROM bigname_phase.project_ens_v2_registry_parent parent
+            JOIN bigname_phase.project_ens_v2_entry_owner entry
+              ON entry.chain_id = parent.chain_id AND entry.registry = parent.parent
+             AND entry.entry_key = parent.parent_entry_key
+            JOIN bigname_phase.project_family_marker marker ON marker.chain_id = entry.chain_id
+            WHERE parent.chain_id = virtual_grant.chain_id
+              AND parent.registry = virtual_grant.registry
+              AND parent.parent = virtual_grant.subject AND {LIVE_ENTRY}
+            OFFSET 0) entry ON true"
     )
 }
 
-/// [`operator_candidates`] for the resources of a page.
+/// The approved operators of the parent entry's owner in the parent registry. The lateral
+/// subquery runs after the entry is found, so it probes the approvals' primary key with the
+/// entry's chain, registry and owner, and no plan depends on the approvals' estimate.
+fn entry_operators(subject: &str) -> String {
+    format!(
+        "JOIN LATERAL (
+            SELECT approval.subject
+            FROM bigname_phase.project_account_approval approval
+            WHERE approval.chain_id = entry.chain_id
+              AND approval.authority_kind = 'ens_v2_registry'
+              AND approval.authority_contract = entry.registry AND approval.owner = entry.owner
+              AND approval.relation_kind = 'operator' AND approval.approved
+              AND approval.subject <> approval.owner {subject}
+            OFFSET 0) approval ON true"
+    )
+}
+
+/// The owner source of a read bound to the published resource `$2` on chain `$9`, or to the
+/// registry root `$8` of the token resource `$2`: it starts from the resource's root grants.
+pub(super) fn resource_owner_candidates() -> String {
+    format!(
+        "SELECT entry.owner AS subject, {ROOT_RESOURCE} AS resource_id, 'root'::text AS scope
+        {}
+        WHERE ($1::text IS NULL OR entry.owner = $1)",
+        resource_root(BOUND_RESOURCE)
+    )
+}
+
+/// The operator source of a read bound to the published resource `$2` on chain `$9`, or to the
+/// registry root `$8` of the token resource `$2`: it starts from the resource's root grants.
+/// With a `subject`, the approvals' probe also compares `$1`.
+pub(super) fn resource_operator_candidates(subject: bool) -> String {
+    format!(
+        "SELECT approval.subject, {ROOT_RESOURCE} AS resource_id, {ENTRY_SCOPE}
+        {} {}",
+        resource_root(BOUND_RESOURCE),
+        entry_operators(if subject {
+            "AND approval.subject = $1"
+        } else {
+            ""
+        })
+    )
+}
+
+/// The owner source for the resources `$2` of a page on chain `$9`: it starts from their root
+/// grants.
+pub(super) fn page_owner_candidates() -> String {
+    format!(
+        "SELECT entry.owner AS subject, virtual_grant.resource_id, 'root'::text AS scope
+        {}",
+        resource_root(PAGE_RESOURCES)
+    )
+}
+
+/// The operator source for the resources `$2` of a page on chain `$9`: it starts from their
+/// root grants.
 pub(super) fn page_operator_candidates() -> String {
     format!(
-        "SELECT approval.subject, virtual_grant.resource_id,
-        {OPERATOR_SCOPE}
-        {PARENT_ROOT}
-      {PAGE_CHAIN}
-          {APPROVED_OPERATOR}"
+        "SELECT approval.subject, virtual_grant.resource_id, {ENTRY_SCOPE}
+        {} {}",
+        resource_root(PAGE_RESOURCES),
+        entry_operators("")
     )
 }
 
