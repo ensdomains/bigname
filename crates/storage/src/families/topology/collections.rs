@@ -277,3 +277,7 @@ async fn page(
         total_count: u64::try_from(total).context("negative collection total")?,
     })
 }
+
+#[cfg(test)]
+#[path = "collections_tests.rs"]
+mod tests;
