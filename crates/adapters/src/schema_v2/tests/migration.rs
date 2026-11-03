@@ -565,7 +565,13 @@ fn sepolia_base_registrar_admission_restores_unwrapped_fallback_authority() -> a
     before_input
         .admissions
         .retain(|admission| admission.source_manifest_id != Some(V1_REGISTRAR_MANIFEST_ID));
-    let before = interpret_test_batch(before_input)?;
+    let before = {
+        let _dropped = allow_unmatched(&[(
+            registrar,
+            "this pass removes the BaseRegistrar's manifest and admission, so its logs are deliberately not read",
+        )]);
+        interpret_test_batch(before_input)?
+    };
     assert!(!before.normalized_events.iter().any(|event| {
         event.event_kind == "SurfaceBound" && event.after_state["source_event"] == "Transfer"
     }));

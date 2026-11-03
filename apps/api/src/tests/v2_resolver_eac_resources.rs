@@ -4,8 +4,9 @@ use alloy_primitives::{B256, LogData, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, ManifestInput, RawBlockInput, RawLogInput,
-    StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 const CHAIN: &str = "ethereum-mainnet";
 const RESOLVER: &str = "0x0000000000000000000000000000000000000253";
@@ -131,7 +132,7 @@ fn interpret(
             0,
         ),
     );
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests: vec![manifest.clone()],

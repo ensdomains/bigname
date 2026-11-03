@@ -3,8 +3,9 @@ use alloy_primitives::U256;
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput, RawLogInput,
-    StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 const CHAIN: &str = "ethereum-mainnet";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000d4";
@@ -93,7 +94,7 @@ async fn registry_selector_reads_the_root_resource_the_adapter_derives() -> Resu
         roles_changed(5, LABEL_HOLDER, U256::ZERO, bit(16), 123)?,
     ];
     let (manifest, admission) = registry_family();
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests: vec![manifest],

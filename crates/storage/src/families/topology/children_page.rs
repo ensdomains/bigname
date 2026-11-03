@@ -218,6 +218,8 @@ pub(crate) mod listing_support;
 #[cfg(test)]
 mod listing_tests;
 #[cfg(test)]
+mod narrowed_plan_tests;
+#[cfg(test)]
 mod performance_tests;
 #[cfg(test)]
 mod registry_labels_tests;

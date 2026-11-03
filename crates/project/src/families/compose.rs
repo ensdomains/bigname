@@ -406,8 +406,14 @@ pub(crate) async fn pairs_chunk(
             .into_iter()
             .map(|(namespace, node)| format!("{namespace}:{node}"))
             .collect();
-        let listing =
-            derived::derive_child_listing(transaction, chain_id, block, &parents, &[]).await?;
+        let listing = Box::pin(derived::derive_child_listing(
+            transaction,
+            chain_id,
+            block,
+            &parents,
+            &[],
+        ))
+        .await?;
         *stats.rows.entry(CHILD_LISTING.name).or_default() += listing.rows;
         return Ok(());
     }

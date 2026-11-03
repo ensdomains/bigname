@@ -838,8 +838,8 @@ check_served_projection_removal() {
             emit_phase_migration "$serving_read_index_migration" baseline-first
             emit_phase_migration "$serving_read_index_migration" baseline-first
             emit_phase_migration "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql" baseline-first
-            # The child listing family and its two work-list indexes: absent from the pre-7c
-            # shape, present in the baseline.
+            # The child listing family and its work-list index: absent from the pre-7c shape,
+            # present in the baseline.
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261103120000_project_child_listing.sql" preceding-shape
             fi
@@ -1364,7 +1364,7 @@ emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainne
 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first | run_psql
 emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" baseline-first | run_psql
-# The same fixture lacks the child listing family and its work-list indexes.
+# The same fixture lacks the child listing family and its work-list index.
 emit_phase_migration "$ROOT/migrations/20261103120000_project_child_listing.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261103120000_project_child_listing.sql" baseline-first | run_psql
 # The historical normalized-event fixture lacks the registrar lease index. Install

@@ -684,8 +684,9 @@ Family indexes serve these concrete readers:
   of `project_child_listing_count`. The family step reads
   `project_child_listing_recompose_idx` for the rows the migration gate drops at a block's time,
   `project_parent_subregistry_address_idx` for the names whose subregistry an address window
-  moves, and `project_child_edge_candidate_labelhash_idx` for the edge children an observed
-  label spells. All are installed by the phase baseline and
+  moves, and the partial GIN index `project_child_listing_unhealed_idx` on
+  `unhealed_labelhashes` for the rows whose stored name still spells an observed label as
+  `[labelhash]`. All are installed by the phase baseline and
   `20261103120000_project_child_listing.sql`.
 - The children relation, which composes the listing rows and spells a page row's label
   placeholders again at read, checks that an ENSv1 or Basenames edge is its child's latest across

@@ -138,6 +138,7 @@ async fn v2_history_tokens_follow_multiple_same_block_regenerations_and_batch_op
 async fn v2_history_historical_models_keep_direct_words_and_proven_permission_tokens() -> Result<()>
 {
     for preaudit in [true, false] {
+        let _preaudit = allow_preaudit_transfers(preaudit);
         let (mut manifest, _, logs) = fixture(preaudit)?;
         if !preaudit {
             // Retained June declaration copied exactly from main before the deployment rotation;

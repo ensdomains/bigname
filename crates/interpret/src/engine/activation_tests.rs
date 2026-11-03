@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::{
-    StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    StateCacheCapacity,
     schema_v2::{
         inject_activated_transition_for_test,
         seam::{
@@ -11,7 +11,7 @@ use bigname_adapters::{
     },
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
-use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use bigname_test_support::{TestDatabase, TestDatabaseConfig, fixture_logs::prepare_checked};
 use sqlx::{PgPool, types::Uuid};
 
 use super::*;
@@ -155,7 +155,7 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     )
     .await?;
     let expected_orphaning_epoch = loaded.prior_cache.validated_orphaning_epoch;
-    let prepared = prepare_schema_v2_batch_incremental(
+    let prepared = prepare_checked(
         loaded.input,
         loaded.adapter_session,
         StateCacheCapacity::Entries(65_536),
@@ -332,7 +332,7 @@ async fn cold_restore_retains_zero_clear_beside_later_state_tail() -> TestResult
     let block = loaded.input.blocks[0].clone();
     let update = SubregistryUpdated { tokenId: U256::from(1), subregistry: "0x0000000000000000000000000000000000000013".parse()?, sender: Address::ZERO }.encode_log_data();
     loaded.input.raw_logs.push(bigname_adapters::schema_v2::RawLogInput { chain_id: CHAIN.to_owned(), block_hash: block.block_hash, block_number: resume_block, block_timestamp: block.block_timestamp, canonicality_state: "canonical".to_owned(), transaction_hash: "zero-clear-resume".to_owned(), transaction_index: 0, log_index: 0, emitting_address: ETH_REGISTRY.to_owned(), topics: update.topics().iter().map(|topic| format!("{topic:#x}")).collect(), data: update.data.to_vec() });
-    let prepared = prepare_schema_v2_batch_incremental(loaded.input, loaded.adapter_session, StateCacheCapacity::Unlimited)?;
+    let prepared = prepare_checked(loaded.input, loaded.adapter_session, StateCacheCapacity::Unlimited)?;
     let state_values = crate::load::prior_state_values(database.pool(), CHAIN, resume_block, prepared.state_value_requests()).await?;
     let (output, _) = prepared.finish(state_values)?;
     let update = output.normalized_events.iter().find(|event| event.event_kind == "SubregistryChanged").expect("resumed update");

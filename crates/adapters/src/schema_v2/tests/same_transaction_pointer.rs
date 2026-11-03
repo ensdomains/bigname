@@ -342,7 +342,7 @@ fn assert_log_named(output: &BatchOutput, label: &str, block: i64, log: i64) {
 #[test]
 fn pointer_before_a_same_transaction_reservation_is_served_by_its_snapshot() -> anyhow::Result<()> {
     let catalog = catalog()?;
-    let output = interpret_schema_v2_batch(catalog.batch(vec![(
+    let output = checked_interpret(catalog.batch(vec![(
         10,
         catalog.registered(
             "before",
@@ -368,7 +368,7 @@ fn pointer_before_a_same_transaction_reservation_is_served_by_its_snapshot() -> 
 #[test]
 fn pointer_after_a_same_transaction_reservation_keeps_its_name() -> anyhow::Result<()> {
     let catalog = catalog()?;
-    let output = interpret_schema_v2_batch(catalog.batch(vec![(
+    let output = checked_interpret(catalog.batch(vec![(
         10,
         catalog.registered(
             "after",
@@ -392,7 +392,7 @@ fn pointer_after_a_same_transaction_reservation_keeps_its_name() -> anyhow::Resu
 #[test]
 fn pointer_in_a_later_block_is_named() -> anyhow::Result<()> {
     let catalog = catalog()?;
-    let output = interpret_schema_v2_batch(catalog.batch(vec![
+    let output = checked_interpret(catalog.batch(vec![
         (10, catalog.registered("later", "later", vec![], vec![])),
         (11, vec![catalog.pointer("later", RESOLVER)]),
     ]))?;
@@ -406,7 +406,7 @@ fn pointer_in_a_later_block_is_named() -> anyhow::Result<()> {
 fn two_pointers_after_a_same_transaction_reservation_are_named_and_the_last_wins()
 -> anyhow::Result<()> {
     let catalog = catalog()?;
-    let output = interpret_schema_v2_batch(catalog.batch(vec![(
+    let output = checked_interpret(catalog.batch(vec![(
         10,
         catalog.registered(
             "twice",
@@ -431,7 +431,7 @@ fn two_pointers_after_a_same_transaction_reservation_are_named_and_the_last_wins
 #[test]
 fn a_reservation_of_another_label_does_not_name_the_pointer() -> anyhow::Result<()> {
     let catalog = catalog()?;
-    let output = interpret_schema_v2_batch(catalog.batch(vec![(
+    let output = checked_interpret(catalog.batch(vec![(
         10,
         catalog.registered(
             "mine",
@@ -462,7 +462,7 @@ fn a_reservation_of_another_label_does_not_name_the_pointer() -> anyhow::Result<
 #[test]
 fn pointer_clear_after_a_same_transaction_reservation_keeps_its_name() -> anyhow::Result<()> {
     let catalog = catalog()?;
-    let output = interpret_schema_v2_batch(catalog.batch(vec![(
+    let output = checked_interpret(catalog.batch(vec![(
         10,
         catalog.registered(
             "cleared",
@@ -504,7 +504,7 @@ fn assert_after_named(
     let mut failures = Vec::new();
     for (case, after) in cases {
         let log = 3 + after.len() as i64;
-        let output = interpret_schema_v2_batch(
+        let output = checked_interpret(
             catalog.batch(vec![(10, catalog.registered(label, label, vec![], after))]),
         )?;
         for row in unnamed_rows(&output, label, 10, log) {
@@ -602,7 +602,7 @@ fn pointer_after_a_same_transaction_reservation_is_named_in_every_run_shape() ->
             ],
         ),
     ]);
-    let full = interpret_schema_v2_batch(input.clone())?;
+    let full = checked_interpret(input.clone())?;
     assert_named(&full, &raw_pointer(&full, "shaped", 11, 4), "shaped");
     assert_named(&full, &registry_read_copy(&full, "shaped", 11, 4), "shaped");
     // The later pointer shares the restored pointer's state key. Its before is the resolver the
@@ -635,23 +635,18 @@ fn pointer_after_a_same_transaction_reservation_is_named_in_every_run_shape() ->
     let mut session = None;
     let mut per_block = Vec::new();
     for block in 10..=12 {
-        let (output, next) = prepare_schema_v2_batch_incremental(
-            range(block, block),
-            session,
-            StateCacheCapacity::Unlimited,
-        )?
-        .finish(Vec::new())?;
+        let (output, next) = checked_finish(range(block, block), session)?;
         per_block.extend(output.normalized_events);
         session = Some(next);
     }
     assert_eq!(per_block, full.normalized_events, "block per batch");
     for split in [10, 11] {
         let before = range(10, split);
-        let head = interpret_schema_v2_batch(before.clone())?;
+        let head = checked_interpret(before.clone())?;
         let mut tail = range(split + 1, 12);
         tail.prior_events =
             seam::fold_prior_events(Vec::new(), &head.normalized_events, &before.blocks)?;
-        let restored = interpret_schema_v2_batch(tail)?;
+        let restored = checked_interpret(tail)?;
         assert_eq!(
             restored.normalized_events,
             full.normalized_events
@@ -668,7 +663,7 @@ fn pointer_after_a_same_transaction_reservation_is_named_in_every_run_shape() ->
 #[test]
 fn a_known_eth_node_names_the_pointer_in_every_order() -> anyhow::Result<()> {
     let catalog = catalog()?;
-    let output = interpret_schema_v2_batch(catalog.batch(vec![
+    let output = checked_interpret(catalog.batch(vec![
         (9, catalog.eth()),
         (
             10,
@@ -703,7 +698,7 @@ fn a_known_eth_node_names_the_pointer_in_every_order() -> anyhow::Result<()> {
 #[test]
 fn records_after_a_same_transaction_reservation_keep_their_name() -> anyhow::Result<()> {
     let catalog = catalog()?;
-    let output = interpret_schema_v2_batch(catalog.batch(vec![(
+    let output = checked_interpret(catalog.batch(vec![(
         10,
         catalog.registered(
             "recorded",

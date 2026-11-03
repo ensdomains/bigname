@@ -9,10 +9,10 @@ use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, InterpreterStateRequest,
     InterpreterStateValue, ManifestInput, PriorEventInput, RawBlockInput, RawLogInput,
-    StateCacheCapacity, begin_schema_v2_adapter_restore, interpret_schema_v2_batch,
-    prepare_schema_v2_batch_incremental, seam,
+    StateCacheCapacity, begin_schema_v2_adapter_restore, prepare_schema_v2_batch_incremental, seam,
 };
 use bigname_manifests::{LoadedManifest, load_repository};
+use bigname_test_support::fixture_logs::{interpret_checked, prepare_checked};
 use serde::Deserialize;
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -599,7 +599,7 @@ fn v2_expiry_retirement_is_an_empty_block_restore_and_redo_stable_delta() -> Res
         event.after_state["source_event"] == "LabelUnregistered"
             && event.logical_name_id.as_deref() == stale["logical_name_id"].as_str()
     }));
-    let uninterrupted = interpret_schema_v2_batch(input.clone())?;
+    let uninterrupted = interpret_checked(input.clone())?;
     assert!(uninterrupted.normalized_events.iter().any(|event| {
         event.after_state["source_event"] == "LabelUnregistered"
             && event.logical_name_id.as_deref() == stale["logical_name_id"].as_str()
@@ -662,7 +662,7 @@ fn sepolia_eth_registry_self_subregistry_opens_no_edge_because_its_subnames_loop
         token_lineages: Vec::new(),
     };
     let input = batch_input(&fixture.case, &expected, &checked_in_manifests()?)?;
-    let output = interpret_schema_v2_batch(input.clone())?;
+    let output = interpret_checked(input.clone())?;
     let registry = fixture.case.manifests[0].contract_instance_id;
 
     for (block, log) in [(11_840_453, 122), (11_840_461, 90)] {
@@ -707,7 +707,7 @@ fn sepolia_eth_registry_self_subregistry_opens_no_edge_because_its_subnames_loop
     );
     assert_eq!(
         output,
-        interpret_schema_v2_batch(input)?,
+        interpret_checked(input)?,
         "replaying the blocks drifted"
     );
     Ok(())
@@ -779,7 +779,7 @@ fn named_v2_expiry_retains_registration_for_markerless_silent_renewal() -> Resul
             .collect(),
         data: encoded.data.to_vec(),
     };
-    let (expired, session) = prepare_schema_v2_batch_incremental(
+    let (expired, session) = prepare_checked(
         input(
             vec![
                 raw(
@@ -818,7 +818,7 @@ fn named_v2_expiry_retains_registration_for_markerless_silent_renewal() -> Resul
             && event.after_state["source_event"] == "RegistryPathExpired"
     }));
 
-    let (renewed, _) = prepare_schema_v2_batch_incremental(
+    let (renewed, _) = prepare_checked(
         input(
             vec![raw(
                 ExpiryUpdated {
@@ -1055,7 +1055,7 @@ fn dense_log(
 }
 
 fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> Result<BatchOutput> {
-    let fresh = interpret_schema_v2_batch(input.clone())?;
+    let fresh = interpret_checked(input.clone())?;
     let (incremental, live_session) =
         prepare_schema_v2_batch_incremental(input.clone(), None, StateCacheCapacity::Unlimited)?
             .finish(Vec::new())?;
@@ -1144,7 +1144,7 @@ fn interpret_physical_batches(
             blocks: blocks.clone(),
             raw_logs: raw_logs.clone(),
         };
-        let fresh = interpret_schema_v2_batch(restored_input.clone())?;
+        let fresh = interpret_checked(restored_input.clone())?;
         let incremental_input = BatchInput {
             prior_events: if live_session.is_none() {
                 retained_prior.clone()

@@ -1446,6 +1446,8 @@ GRANT SELECT ON TABLE
     bigname_phase.project_ens_v2_registry_parent,
     bigname_phase.project_child_edge_candidate,
     bigname_phase.project_parent_subregistry,
+    bigname_phase.project_child_listing,
+    bigname_phase.project_child_listing_count,
     bigname_phase.project_reverse_tuple,
     bigname_phase.project_reverse_node_claim,
     bigname_phase.project_claim_normalization,
@@ -5741,11 +5743,19 @@ keeps each parent's count and each (parent, label registry) count from the same 
 composition pass derives every parent's rows in a children stream after the names stream.
 
 - It needs `20261103120000_project_child_listing.sql`. The schema-migration creates the two
-  tables and their indexes, plus `project_parent_subregistry_address_idx` and
-  `project_child_edge_candidate_labelhash_idx`, which the family step's work list reads. It
-  takes the family marker table in `EXCLUSIVE` mode first and builds the two indexes on populated
-  tables in its own transaction, so apply it in the redo's maintenance window. It resets nothing:
-  the new tables start empty and the redo fills them.
+  tables and their indexes, plus `project_parent_subregistry_address_idx`, which the family
+  step's work list reads. It takes the family marker table in `EXCLUSIVE` mode first and builds
+  that index on a populated table in its own transaction, so apply it in the redo's maintenance
+  window. It resets nothing: the new tables start empty and the redo fills them.
+- Each listing row keeps the label hashes its stored name still spells as `[labelhash]`
+  (`unhealed_labelhashes`), with a GIN index. A preimage observation derives again only the rows
+  that hold one of the observed name's labels, by that index. On mainnet most blocks carry a
+  preimage observation and most labels are unhealed, so selecting by label instead would derive
+  every unspelled name under a shared label, such as every unspelled `.eth` name, at nearly
+  every block.
+- A preimage written outside a block, such as the rainbow import, emits no observation, and an
+  observation heals only its own chain's rows. The stored names such a preimage would spell heal
+  only when their rows are derived again for another reason. The served name applies it at read.
 - Apply it before starting the release. The family writer inserts into both tables, so without
   them the first family block fails.
 - A block that moves a parent's own facts (its migration state, its ENSv2 subregistry pointer,
@@ -5756,6 +5766,14 @@ composition pass derives every parent's rows in a children stream after the name
 - The subnames page, the registry labels page and the child counts read the stored rows.
   The API startup preflight requires both tables, so an API of this build refuses to start on a
   schema without them.
+- The readers need `SELECT` on both tables. Before restarting an existing API role, apply the
+  grant below on the primary and let it replay on any serving standby. Fresh role setup above
+  already includes it. Startup preflight refuses an API role without it.
+
+  ```sql
+  GRANT SELECT ON bigname_phase.project_child_listing, bigname_phase.project_child_listing_count
+      TO bigname_api;
+  ```
 - Wire changes:
   - The `name` sort, and every tie, orders the stored name byte by byte (C collation), where
     the database collation ordered it before. Names whose byte order differs from that

@@ -82,8 +82,9 @@ async fn v2_events_describe_admitted_registrar_controller_changes() -> Result<()
     use alloy_sol_types::{SolEvent, sol};
     use bigname_adapters::schema_v2::{
         AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
-        StateCacheCapacity, prepare_schema_v2_batch_incremental,
+        StateCacheCapacity,
     };
+    use bigname_test_support::fixture_logs::prepare_checked;
     sol! {
         event ControllerAdded(address indexed controller);
         event ControllerRemoved(address indexed controller);
@@ -159,7 +160,7 @@ async fn v2_events_describe_admitted_registrar_controller_changes() -> Result<()
         data: log.data.to_vec(),
     };
     let stored_manifests = manifests.clone();
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests,
@@ -298,8 +299,9 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
     use alloy_sol_types::{SolEvent, sol};
     use bigname_adapters::schema_v2::{
         AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
-        StateCacheCapacity, prepare_schema_v2_batch_incremental,
+        StateCacheCapacity,
     };
+    use bigname_test_support::fixture_logs::prepare_checked;
     sol! {
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
     }
@@ -376,7 +378,7 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
         })
     };
     let stored_manifests = manifests.clone();
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests,

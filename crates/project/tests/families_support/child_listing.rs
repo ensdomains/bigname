@@ -2,8 +2,13 @@
 //! stored listing (`project_child_listing`) equals the rows the unnarrowed children relation
 //! composes at the published block, and the stored counts (`project_child_listing_count`) equal
 //! the listing's own counts per parent and per (parent, label registry).
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use anyhow::{Result, ensure};
-use bigname_storage::families::topology::{ListingBlock, listing_rows};
+use bigname_storage::families::{
+    name::{ensure_family_publications, is_publication_unavailable},
+    topology::{ListingBlock, listing_rows},
+};
 
 use super::Fixture;
 
@@ -46,8 +51,8 @@ impl Fixture {
     /// The listing of `chain` equals the relation at its family marker's block, and its counts
     /// equal the listing's. A chain with no marker block has neither rows nor counts.
     pub async fn assert_child_listing(&self, chain: &str) -> Result<()> {
-        let marker: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
-            "SELECT current_block_number, extract(epoch FROM block_timestamp)::bigint
+        let marker: Option<(Option<i64>, Option<i64>, String)> = sqlx::query_as(
+            "SELECT current_block_number, extract(epoch FROM block_timestamp)::bigint, state
              FROM project_family_marker WHERE chain_id = $1",
         )
         .bind(chain)
@@ -61,7 +66,7 @@ impl Fixture {
             .bind(chain)
             .fetch_one(&self.pool)
             .await?;
-        let Some((Some(number), Some(timestamp_seconds))) = marker else {
+        let Some((Some(number), Some(timestamp_seconds), state)) = marker else {
             ensure!(
                 stored == "[]" && counts == "[]",
                 "{chain} has no marker block but stores listing rows {stored} and counts {counts}"
@@ -90,6 +95,17 @@ impl Fixture {
             .build_query_scalar::<String>()
             .fetch_one(&self.pool)
             .await?;
+        if stored != composed
+            && self.readers_refuse(chain).await?
+            && self.before_children_stream(chain, &state).await?
+        {
+            // A rebuild whose composition pass has not finished the children stream publishes
+            // nothing yet: the readers refuse it with the structured refusal, and the stream has
+            // not reached every parent. That one difference is allowed, counted, and predicted by
+            // the test (`expect_listing_skips`). Any other difference fails below.
+            self.listing_checks.skipped.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
         ensure!(
             stored == composed,
             "the child listing of {chain} at {number} is {stored}, the relation composes {composed}"
@@ -101,6 +117,79 @@ impl Fixture {
         ensure!(
             counts == counted,
             "the child counts of {chain} at {number} are {counts}, the listing counts {counted}"
+        );
+        self.listing_checks.compared.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Whether the readers refuse `chain`'s publication with the structured refusal
+    /// (`FamilyPublicationUnavailable`), matched by its kind. Any other error fails the check.
+    async fn readers_refuse(&self, chain: &str) -> Result<bool> {
+        match ensure_family_publications(&self.pool, &[chain.to_owned()]).await {
+            Ok(_) => Ok(false),
+            Err(error) if is_publication_unavailable(&error) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether `chain`'s marker (in `state`) belongs to a rebuild whose composition pass has not
+    /// finished the children stream: the marker is `bootstrap_pending` and the repair record is
+    /// still applying ranges before its pass (`rebuilding` with no composed block) or composing
+    /// the names stream (0) or the children stream (4), which run first and second
+    /// (`families/compose.rs`, `Stream`).
+    async fn before_children_stream(&self, chain: &str, state: &str) -> Result<bool> {
+        if state != "bootstrap_pending" {
+            return Ok(false);
+        }
+        let record: Option<(String, Option<i16>, Option<i64>)> = sqlx::query_as(
+            "SELECT state, compose_stream, composed_block FROM project_repair_record
+             WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match record {
+            Some((record, _, composed)) if record == "rebuilding" => composed.is_none(),
+            Some((record, stream, _)) if record == "composing" => {
+                matches!(stream, None | Some(0) | Some(4))
+            }
+            _ => false,
+        })
+    }
+
+    /// The test predicts `skips` publications before the children stream finished whose listing
+    /// differs from the relation (none unless it says so).
+    pub fn expect_listing_skips(&self, skips: usize) {
+        self.listing_checks.expected.store(skips, Ordering::Relaxed);
+    }
+}
+
+/// The child listing checks of one fixture: publications compared in full, publications skipped
+/// before the children stream finished, and the skips the test predicts.
+#[derive(Debug, Default)]
+pub(super) struct Checks {
+    compared: AtomicUsize,
+    skipped: AtomicUsize,
+    expected: AtomicUsize,
+}
+
+impl Checks {
+    /// A fixture skipped exactly the predicted number, and one that checked any publication
+    /// compared at least one in full: each check of a marked block either compares or skips, so
+    /// a fixture that skipped and compared nothing is the only one that checked without
+    /// comparing.
+    pub(super) fn require(&self) -> Result<()> {
+        let compared = self.compared.load(Ordering::Relaxed);
+        let skipped = self.skipped.load(Ordering::Relaxed);
+        let expected = self.expected.load(Ordering::Relaxed);
+        ensure!(
+            skipped == expected,
+            "{skipped} publications were skipped before the children stream finished, the test \
+             predicts {expected}"
+        );
+        ensure!(
+            skipped == 0 || compared > 0,
+            "{skipped} publications were skipped and none was compared in full"
         );
         Ok(())
     }
