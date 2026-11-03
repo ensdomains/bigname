@@ -18,14 +18,22 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
                          'project_wrapper_state', 'project_lifecycle_event', 'project_name_state',
                          'project_parent_subregistry')
     ),
+    -- Every join from the journal to a family table probes that table's key, one journal row at a
+    -- time (`OFFSET 0` keeps each probe its own subquery). The journal's rows are this block's,
+    -- written in this transaction after the last ANALYZE, so the planner can count them as one
+    -- row and otherwise scan a family table whole for each.
     lifecycle AS (
         SELECT journal.before_image AS row FROM journal
         WHERE journal.family = 'project_lifecycle_event' AND journal.before_image IS NOT NULL
         UNION ALL
-        SELECT to_jsonb(event) FROM journal JOIN project_lifecycle_event event
-          ON journal.family = 'project_lifecycle_event'
-         AND event.chain_id = $1 AND event.state_kind = journal.key ->> 1
-         AND event.state_key = journal.key ->> 2 AND event.event_identity = journal.key ->> 3
+        SELECT probe.row FROM journal
+        CROSS JOIN LATERAL (
+            SELECT to_jsonb(event) AS row FROM project_lifecycle_event event
+            WHERE event.chain_id = $1 AND event.state_kind = journal.key ->> 1
+              AND event.state_key = journal.key ->> 2 AND event.event_identity = journal.key ->> 3
+            OFFSET 0
+        ) probe
+        WHERE journal.family = 'project_lifecycle_event'
     ),
     -- Each observation state is probed on its own, as the summary work list's `revealed` does,
     -- so `normalized_events_projection_idx` bounds the range to the blocks.
@@ -71,9 +79,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         WHERE journal.family = 'project_registry_node_state'
         UNION SELECT journal.before_image ->> 'logical_name_id' FROM journal
         WHERE journal.family = 'project_wrapper_state'
-        UNION SELECT wrapper.logical_name_id FROM journal JOIN project_wrapper_state wrapper
-          ON journal.family = 'project_wrapper_state'
-         AND wrapper.chain_id = $1 AND wrapper.resource_id = (journal.key ->> 1)::uuid
+        UNION SELECT wrapper.logical_name_id FROM journal
+        CROSS JOIN LATERAL (
+            SELECT wrapper.logical_name_id FROM project_wrapper_state wrapper
+            WHERE wrapper.chain_id = $1 AND wrapper.resource_id = (journal.key ->> 1)::uuid
+            OFFSET 0
+        ) wrapper
+        WHERE journal.family = 'project_wrapper_state'
         -- A registrar lease row names its node; the relation reads it by node
         -- (children_page/child_flags.rs), under the registrar's namespace.
         UNION SELECT CASE lifecycle.row ->> 'source_family'
@@ -96,9 +108,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         -- The migration columns the gate reads (topology/children.rs, `parent_migration`).
         SELECT journal.key ->> 2 AS id
         FROM journal
-        LEFT JOIN project_name_state state
-          ON state.chain_id = $1 AND state.namespace = journal.key ->> 1
-         AND state.logical_name_id = journal.key ->> 2
+        LEFT JOIN LATERAL (
+            SELECT state.migration_path, state.migration_evidence, state.migration_position
+            FROM project_name_state state
+            WHERE state.chain_id = $1 AND state.namespace = journal.key ->> 1
+              AND state.logical_name_id = journal.key ->> 2
+            OFFSET 0
+        ) state ON true
         WHERE journal.family = 'project_name_state'
           AND jsonb_build_array(
                   COALESCE(journal.before_image, '{}'::jsonb) ->> 'migration_path',

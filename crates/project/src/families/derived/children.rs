@@ -236,7 +236,39 @@ pub(crate) async fn refresh(
     touched: (&[String], &[String]),
 ) -> Result<Refreshed> {
     let (children, parents) = work::list(transaction, chain_id, block, after, touched).await?;
-    derive(transaction, chain_id, block, &parents, &children).await
+    let previous: String = sqlx::query_scalar("/* project:diag.show2 */ SHOW statement_timeout")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("diag show", error))?;
+    sqlx::query("/* project:diag.timeout2 */ SET LOCAL statement_timeout = '20s'")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("diag timeout", error))?;
+    let started = std::time::Instant::now();
+    let derived = derive(transaction, chain_id, block, &parents, &children).await;
+    if let Err(error) = &derived {
+        println!(
+            "TYR455DIAG derive failed at block {} parents {} children {} in {:?}: {error}",
+            block.number,
+            parents.len(),
+            children.len(),
+            started.elapsed()
+        );
+        eprintln!(
+            "TYR455DIAG derive failed at block {} parents {} children {} in {:?}: {error}",
+            block.number,
+            parents.len(),
+            children.len(),
+            started.elapsed()
+        );
+        return derived;
+    }
+    sqlx::query("/* project:diag.restore2 */ SELECT set_config('statement_timeout', $1, true)")
+        .bind(&previous)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("diag restore", error))?;
+    derived
 }
 
 /// Derive the listing rows of `parents`, each whole, and of `children` under every parent that
