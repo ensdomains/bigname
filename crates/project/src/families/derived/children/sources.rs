@@ -225,7 +225,7 @@ fn plan(
 
 /// Whether a read above `after` takes the whole tail: only at or above the floor.
 fn whole_tail(after: i64, floor: Option<i64>) -> bool {
-    floor.is_some_and(|floor| after >= floor)
+    floor.is_some_and(|floor| after >= floor + 1_000_000)
 }
 
 /// The block the watermark moves to after a read above `after` through `cutoff`: the floor or
