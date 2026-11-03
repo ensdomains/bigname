@@ -383,7 +383,7 @@ pub(super) async fn advance(
 ) -> Result<(u64, u64)> {
     let mut undo_rows = 0;
     for (source, to, (hash, attempt)) in &read.advances {
-        if block.journal {
+        if block.journal && source.is_empty() {
             undo_rows += sqlx::query(JOURNAL)
                 .bind(chain_id)
                 .bind(block.number)
