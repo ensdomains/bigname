@@ -528,6 +528,14 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
         ensure!(seen.len() < 2000, "the rebuild does not converge");
     }
     require_equal(&fixture, &expected, "a pass over runs of one block").await?;
+    // The child listing differs from the relation at every publication before the children
+    // stream finished: the first run's, which applied the ranges only, and each run that ended in
+    // the names stream or the children stream (`families_support/child_listing.rs`).
+    let unfinished = seen
+        .iter()
+        .filter(|run| run.state == "composing" && matches!(run.stream.as_i64(), Some(0 | 4)))
+        .count();
+    fixture.expect_listing_skips(1 + unfinished);
     let ended = seen
         .iter()
         .position(|run| run.composed.is_i64())
@@ -660,6 +668,8 @@ async fn a_later_run_of_the_pass_composes_the_list_its_beginning_wrote() -> Resu
         (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_string(),
         "one chunk of names committed: {state} {stream} {cursor}"
     );
+    // That run's publication is the one before the children stream finished.
+    fixture.expect_listing_skips(1);
     // Read now, checked after the probe below.
     let listed: sqlx::Result<(i64, Option<i64>, Option<i64>, i64)> = sqlx::query_as(
         "SELECT count(*), min(serial), max(serial), count(DISTINCT logical_name_id)
@@ -825,6 +835,9 @@ async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Res
         (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_string(),
         "two chunks of names committed: {state} {stream} {cursor}"
     );
+    // That run's publication is the one before the children stream finished. The failed runs
+    // publish nothing.
+    fixture.expect_listing_skips(1);
     let committed = fixture.exact().await?;
     fail_chunk(&fixture, 1).await?;
     let error = run(&fixture, false, &ranged)

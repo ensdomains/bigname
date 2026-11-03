@@ -112,6 +112,8 @@ pub const FAMILY_TABLES: &[&str] = &[
 pub struct Fixture {
     pub database: TestDatabase,
     pub pool: PgPool,
+    /// The child listing checks of this fixture's publications (`child_listing.rs`).
+    listing_checks: child_listing::Checks,
 }
 
 impl Fixture {
@@ -162,7 +164,11 @@ impl Fixture {
             .execute(&mut *connection)
             .await?;
         drop(connection);
-        let fixture = Self { database, pool };
+        let fixture = Self {
+            database,
+            pool,
+            listing_checks: child_listing::Checks::default(),
+        };
         fixture.lineage(CHAIN, blocks).await?;
         Ok(fixture)
     }
@@ -236,6 +242,7 @@ impl Fixture {
     }
 
     pub async fn cleanup(self) -> Result<()> {
+        self.listing_checks.require()?;
         self.database.cleanup().await
     }
 
