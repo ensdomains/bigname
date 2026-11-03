@@ -157,8 +157,11 @@ async fn history_query_record_key_keeps_writes_clears_and_only_scoped_resets() -
     let routes = [
         format!("/v1/names/{G_NAME}/history?scope=both"),
         format!("/v1/names/{G_NAME}/history?scope=both&include=child_registrations,data,raw"),
-        format!("/v1/events?name={G_NAME}"),
-        format!("/v1/events?registration_id={}", Uuid::from_u128(0x7172)),
+        format!("/v1/events?name={G_NAME}&include=total_count"),
+        format!(
+            "/v1/events?registration_id={}&include=total_count",
+            Uuid::from_u128(0x7172)
+        ),
         format!("/v1/addresses/{G_ADDRESS}/history?scope=both&include=total_count"),
     ];
     for route in routes {

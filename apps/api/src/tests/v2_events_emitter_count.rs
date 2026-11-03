@@ -4,11 +4,11 @@
 const EMITTER_SMALL: &str = "0x00000000000000000000000000000000000000e1";
 const EMITTER_LARGE: &str = "0x00000000000000000000000000000000000000e2";
 const EMITTER_OTHER: &str = "0x00000000000000000000000000000000000000e9";
-/// Rows the large emitter emitted, above the default cap of 10,000.
+/// Rows the large emitter emitted, above name history's default cap of 10,000.
 const LARGE_EMITTED: usize = 10_004;
 /// Two pointer changes name the large emitter: one sets it, one clears it.
 const LARGE_TOTAL: u64 = LARGE_EMITTED as u64 + 2;
-/// An opt-in cap below the large emitter's rows and above the default cap.
+/// An opt-in cap below the large emitter's rows and above 10,000.
 const LOWERED_CAP: u64 = 10_002;
 
 fn emitted_by(mut event: NormalizedEvent, emitter: &str) -> NormalizedEvent {
@@ -46,9 +46,9 @@ async fn events_emitter_total_count_is_exact_below_the_opt_in_cap() -> Result<()
     let resolver = format!("/v1/events?resolver=1:{EMITTER_SMALL}");
     let contract = format!("/v1/events?contract_address={EMITTER_SMALL}");
 
-    // Row 1: the opt-in matches the default capped count below every cap.
+    // Row 1: the default does not count, and the opt-in is exact below every cap.
     let default = v2_history_payload_for_database(&database, &resolver).await?;
-    assert_eq!(default["page"]["total_count"], json!(7));
+    assert_eq!(default["page"]["total_count"], Value::Null);
     let counted = v2_history_payload_for_database(&database, &format!("{resolver}&include=total_count")).await?;
     assert_eq!(counted["page"]["total_count"], json!(7));
     assert_eq!(page_rows(&counted), page_rows(&default));
@@ -123,7 +123,7 @@ async fn events_emitter_total_count_is_null_above_the_opt_in_cap() -> Result<()>
     let contract = format!("/v1/events?contract_address={EMITTER_LARGE}&page_size=3");
     let both = format!("{resolver}&contract_address={EMITTER_LARGE}");
 
-    // Row 2: above the default cap and below the opt-in cap, the flag gives the exact count.
+    // Row 2: above 10,000 and below the opt-in cap, the flag gives the exact count.
     let default = v2_history_payload_for_database(&database, &resolver).await?;
     assert_eq!(default["page"]["total_count"], Value::Null);
     for (route, expected) in [

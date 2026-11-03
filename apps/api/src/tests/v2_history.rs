@@ -2248,15 +2248,24 @@ async fn v2_history_timestamp_window_resolves_blocks_through_lineage() -> Result
 }
 
 #[tokio::test]
-async fn v2_history_total_count_is_populated_only_for_anchored_requests() -> Result<()> {
+async fn v2_history_total_count_defaults_only_on_name_history() -> Result<()> {
     let (database, payload) = v2_history_payload("/v1/names/history.eth/history?page_size=3").await?;
     assert_eq!(payload["page"]["total_count"], json!(10));
     assert_eq!(payload["page"]["has_more"], json!(true));
 
+    // `/v1/events` counts only with the opt-in, whatever anchors the read.
     let payload =
         v2_history_payload_for_database(&database, "/v1/events?name=history.eth&page_size=3")
             .await?;
-    assert_eq!(payload["page"]["total_count"], json!(10));
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+    let counted = v2_history_payload_for_database(
+        &database,
+        "/v1/events?name=history.eth&page_size=3&include=total_count",
+    )
+    .await?;
+    assert_eq!(counted["page"]["total_count"], json!(10));
+    assert_eq!(counted["data"], payload["data"]);
+    assert_eq!(counted["page"]["next_cursor"], payload["page"]["next_cursor"]);
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -2535,7 +2544,7 @@ async fn v2_events_resolver_filter_lists_rows_for_one_resolver_contract() -> Res
     // The record write was emitted by the resolver and the pointer change names it.
     let payload = v2_history_payload_for_database(
         &database,
-        &format!("/v1/events?resolver=1:{RESOLVER}"),
+        &format!("/v1/events?resolver=1:{RESOLVER}&include=total_count"),
     )
     .await?;
     assert_eq!(history_blocks(&payload), vec![106, 104]);
@@ -2589,7 +2598,7 @@ async fn v2_events_resolver_filter_lists_rows_for_one_resolver_contract() -> Res
     // Another chain or another resolver matches nothing; the chain scopes the read.
     let empty = v2_history_payload_for_database(
         &database,
-        &format!("/v1/events?resolver=8453:{RESOLVER}"),
+        &format!("/v1/events?resolver=8453:{RESOLVER}&include=total_count"),
     )
     .await?;
     assert_eq!(empty["data"], json!([]));
