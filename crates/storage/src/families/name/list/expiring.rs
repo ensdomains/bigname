@@ -332,3 +332,7 @@ pub(crate) mod measure;
 #[cfg(test)]
 #[path = "expiring/grace_tests.rs"]
 mod grace_tests;
+
+#[cfg(test)]
+#[path = "expiring/parent_tests.rs"]
+mod parent_tests;
