@@ -5377,8 +5377,9 @@ While the runner builds:
   `the rebuild of the normalized_events indexes the walk index set scripts drop waits until storage capacity recovers`
   with `breach_reasons`, `database_size_bytes` and `free_disk_bytes`, and the gauge
   `phase_runner_walk_index_capacity_blocked{chain}` reads 1. A running Project row is paused
-  meanwhile. An idle or completed one records no loop progress, so a long wait raises the
-  stale-loop alert.
+  meanwhile and resumed after. An idle or completed one records no loop progress, so a long
+  wait raises the stale-loop alert. An invalid leftover is dropped before the wait, which
+  frees the space it holds.
 
 When a build fails:
 

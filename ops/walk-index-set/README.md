@@ -135,10 +135,10 @@ below. Otherwise it:
    waited. Otherwise it waits for any other index build, `VACUUM` or `ANALYZE` on the table,
    from any login, to finish. Autovacuum is not waited for: it gives way to the build, apart
    from an anti-wraparound vacuum, which the build then waits behind.
-3. One index at a time, waits for storage capacity, then drops an invalid leftover with
-   `DROP INDEX CONCURRENTLY` and runs `install.sql`'s `CREATE INDEX CONCURRENTLY` statement,
-   outside a transaction, with `lock_timeout` 0 and each build bounded to six hours. It logs
-   each index it built with its duration. The capacity check is the batch loop's, with the same
+3. One index at a time, drops an invalid leftover with `DROP INDEX CONCURRENTLY`, which frees
+   the space it holds, waits for storage capacity, then runs `install.sql`'s
+   `CREATE INDEX CONCURRENTLY` statement, outside a transaction, with `lock_timeout` 0 and
+   each build bounded to six hours. It logs each index it built with its duration. The capacity check is the batch loop's, with the same
    database ceiling and free-disk floor. While a breach lasts it logs
    `the rebuild of the normalized_events indexes the walk index set scripts drop waits until
    storage capacity recovers` on every poll, with `breach_reasons`, `database_size_bytes` and
@@ -152,10 +152,12 @@ below. Otherwise it:
 Before the builds its reads run with a ten-second lock timeout and a one-minute statement
 timeout, so a read held behind a lock fails and the restart loop retries it. While it waits for
 the lock or for another build, or builds, it records loop progress, so a long build does not
-raise the stale-loop alert. While it waits for capacity it pauses a running Project row, as the
-batch loop does, and records loop progress. A Project row that is idle or completed, as on a
-first walk or before a redo, is left as it is and records none, so a long wait for capacity
-raises the stale-loop alert.
+raise the stale-loop alert. While it waits for capacity it pings its connection on every poll, pauses a running Project
+row, as the batch loop does, and resumes it once capacity recovers. A running or paused row
+records loop progress. A Project row that is idle or completed, as on a first walk or before a
+redo, is left as it is and records none, so a long wait for capacity raises the stale-loop
+alert. The rebuild does not refresh the phase heartbeat, so on a running or paused row a long
+build or wait can also raise the heartbeat-stale alert.
 
 - A valid index under one of the names is kept whatever its definition. When the definition
   differs from `install.sql`'s, the runner logs a warning with the definition it found and the

@@ -15,10 +15,7 @@ use super::{
 use crate::{
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
-    phase::PhaseName,
     runner_support::StopClock,
-    shutdown::until_cancelled,
-    state::PhaseStatus,
 };
 
 /// The bounds on the session's reads before the builds. A read that waits longer on a lock,
@@ -26,6 +23,8 @@ use crate::{
 /// error and the restart loop retries it.
 const PREPARE_TIMEOUTS: &str = "SELECT set_config('lock_timeout', '10s', false),
                                        set_config('statement_timeout', '1min', false)";
+
+mod capacity;
 
 pub(super) struct Session {
     pub(super) connection: PgConnection,
@@ -110,23 +109,30 @@ impl Session {
         else {
             return Ok(());
         };
-        info!(
-            chain_id,
-            indexes = pending.len(),
-            maintenance_work_mem = %maintenance_work_mem,
-            max_parallel_maintenance_workers = %max_parallel_maintenance_workers,
-            "building the normalized_events indexes the walk index set scripts drop before Project"
-        );
+        let mut announced = false;
         for status in &pending {
-            if !self.await_capacity(run).await? {
-                return Ok(());
-            }
             let name = status.index.name;
+            // An invalid leftover is dropped before the wait: it holds space that a build cut
+            // off part way already wrote, which the wait may need back.
             if status.state == IndexState::Invalid {
                 let statement = format!("DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.{name}");
                 if !self.run(&statement, run).await? {
                     return Ok(());
                 }
+            }
+            if !self.await_capacity(run).await? {
+                return Ok(());
+            }
+            if !announced {
+                info!(
+                    chain_id,
+                    indexes = pending.len(),
+                    maintenance_work_mem = %maintenance_work_mem,
+                    max_parallel_maintenance_workers = %max_parallel_maintenance_workers,
+                    "building the normalized_events indexes the walk index set scripts drop \
+                     before Project"
+                );
+                announced = true;
             }
             let started = Instant::now();
             if !self.run(status.index.create, run).await? {
@@ -354,74 +360,6 @@ impl Session {
         })
         .await;
         configured.transpose()
-    }
-
-    /// Waits until storage capacity allows the next build, with the batch loop's probe and
-    /// thresholds. While it waits the chain's gauge reads 1, and a running Project row is
-    /// paused, as the batch loop pauses it, and records loop progress. An idle or completed row
-    /// is left as it is and records none, so the stale-loop alert names a long wait. `false`
-    /// when a stop came first.
-    async fn await_capacity(&self, run: &Restore<'_>) -> RunnerResult<bool> {
-        // `Some(paused)` once the wait has begun.
-        let mut blocked: Option<bool> = None;
-        let result = loop {
-            let status =
-                match until_cancelled(run.cancellation, run.capacity.check(&self.pool, 0)).await {
-                    Ok(Some(status)) => status,
-                    Ok(None) => break Ok(false),
-                    Err(error) => break Err(error),
-                };
-            if status.is_available() {
-                if blocked == Some(true) {
-                    let resumed = until_cancelled(
-                        run.cancellation,
-                        run.store.resume_phase(run.chain_id, PhaseName::Project),
-                    )
-                    .await;
-                    break resumed.map(|resumed| resumed.is_some());
-                }
-                break Ok(true);
-            }
-            if blocked.is_none() {
-                run.set_capacity_blocked(true);
-                blocked = Some(false);
-                match until_cancelled(run.cancellation, self.pause_running(run)).await {
-                    Ok(Some(paused)) => blocked = Some(paused),
-                    Ok(None) => break Ok(false),
-                    Err(error) => break Err(error),
-                }
-            }
-            warn!(
-                chain_id = run.chain_id,
-                breach_reasons = ?status.breach_reasons,
-                database_size_bytes = status.measurement.database_size_bytes,
-                free_disk_bytes = status.measurement.free_disk_bytes,
-                "the rebuild of the normalized_events indexes the walk index set scripts drop \
-                 waits until storage capacity recovers"
-            );
-            if blocked == Some(true) {
-                run.progress();
-            }
-            tokio::select! {
-                () = run.cancellation.cancelled() => break Ok(false),
-                () = tokio::time::sleep(run.capacity.poll_interval()) => {}
-            }
-        };
-        if blocked.is_some() {
-            run.set_capacity_blocked(false);
-        }
-        result
-    }
-
-    /// Pauses the chain's Project row when it is running. Whether it did.
-    async fn pause_running(&self, run: &Restore<'_>) -> RunnerResult<bool> {
-        if run.store.status(run.chain_id, PhaseName::Project).await? != PhaseStatus::Running {
-            return Ok(false);
-        }
-        run.store
-            .pause_phase(run.chain_id, PhaseName::Project)
-            .await?;
-        Ok(true)
     }
 
     /// Refreshes the planner statistics, which expression and partial indexes lack until the
