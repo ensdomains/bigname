@@ -340,9 +340,15 @@ async fn the_rebuild_pass_starts_the_watermarks_and_the_steps_read_on() -> Resul
     .await?;
     fixture
         .event(
-            Event::new("unmarked:4:8", 4, 0, "PreimageObserved", "ens_v1_registry_l1")
-                .on(unmarked)
-                .name(&name(8)),
+            Event::new(
+                "unmarked:4:8",
+                4,
+                0,
+                "PreimageObserved",
+                "ens_v1_registry_l1",
+            )
+            .on(unmarked)
+            .name(&name(8)),
         )
         .await?;
 
