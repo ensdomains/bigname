@@ -782,3 +782,51 @@ async fn a_stale_fork_observation_is_not_read_past_its_replacement() -> Result<(
     fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
+
+// Row 13: the other chain runs two Interpret redos with no step here between them. The first
+// reveals `d` at block 2, below the watermark; the second, whose Project redo is still open from
+// block 4, reveals nothing. The changed revision reads the other chain again from block 0, not
+// from below the open Project redo's start, so `d` heals.
+#[tokio::test]
+async fn two_interpret_redos_between_steps_are_read_again_from_block_zero() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_source_two_redos", 20).await?;
+    let (c, d) = (labelhash("c"), labelhash("d"));
+    fixture.surface(&name(1), &node(1)).await?;
+    edge(&fixture, (10, 0), 1, 11, &c, OWNER).await?;
+    edge(&fixture, (10, 1), 1, 12, &d, OWNER).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    source(&fixture, 7, &[&c]).await?;
+    source_surface(&fixture, 8, &[&d]).await?;
+    observe(&fixture, 5, 7).await?;
+    preimage(&fixture, &c, "c").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    ensure!(watermark(&fixture).await? == Some(5));
+
+    // The first redo reveals `d` at block 2, and its Project redo runs and closes.
+    fixture.interpret_row_on(SOURCE, "redo", 1, false).await?;
+    observe(&fixture, 2, 8).await?;
+    preimage(&fixture, &d, "d").await?;
+    // The second redo opens a Project redo from block 4.
+    fixture.interpret_row_on(SOURCE, "redo", 2, false).await?;
+    sqlx::query(
+        "INSERT INTO chain_phase_state (chain_id, phase_name, phase_status,
+             redo_attempt_generation, redo_in_progress, redo_mode,
+             redo_previous_phase_status, redo_from_block_number, redo_to_block_number,
+             last_error, started_at)
+         VALUES ($1, 'project', 'running', 1, true, 'redo', 'idle', 4, 20,
+                 'required downstream redo: interpret', now())",
+    )
+    .bind(SOURCE)
+    .execute(&fixture.pool)
+    .await?;
+    fixture.apply(13, FamilyMode::Normal).await?;
+    ensure!(
+        unhealed(&fixture, &name(12)).await?.is_empty(),
+        "the first redo's label heals"
+    );
+    ensure!(watermark(&fixture).await? == Some(5));
+    ensure!(journalled(&fixture, 13, WATERMARK).await? == (1, 1));
+    assert_served(&fixture, &name(1)).await?;
+    fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}

@@ -12,10 +12,13 @@
 //!   the next step reads it. The watermark moves only to a block at or below that cutoff.
 //! - The row keeps A's Interpret revision (content hash and redo attempt) it was read under. An
 //!   Interpret redo of A alone, such as a manifest-authority redo, re-derives blocks below the
-//!   floor and can reveal labels there, so a step that finds another revision reads again from
-//!   below the start of A's open Project redo, which the redo stamps from its first effect, or
-//!   from block 0 when none is open. While A's redo is in progress the step reads and does not
-//!   move the watermark.
+//!   floor and can reveal labels there, so a step that finds another revision, after any number
+//!   of redos, reads A again from block 0. While A's redo is in progress the step reads and does
+//!   not move the watermark. The read back catches up at about [`SOURCE_EVENTS`] observations
+//!   per B block, so a label only the redo revealed reaches B's stored names after about (A's
+//!   PreimageObserved rows / 1000) B blocks: for A = Ethereum Mainnet at about 7.8 million
+//!   observations and B = Base at 2 s blocks, about 7,800 blocks or 4.3 hours. Labels already in
+//!   `label_preimages` keep their stored names, and served names heal at read meanwhile.
 //! - The watermark advances to A's finality floor (its finalized block, else its safe block) or
 //!   the highest block read, whichever is lower, and never back. A reorg of A deletes and
 //!   re-interprets A's events from the fork up (interpret `write.rs`), at block numbers B may
@@ -191,16 +194,11 @@ struct Plan {
 }
 
 /// The plan for a source whose watermark row holds `stored` (block and revision; none without
-/// a row), whose Interpret revision is now `current` (none while it is in redo), and whose open
-/// Project redo starts at `redo_from`. While the source is in redo the step reads and does not
-/// move. A changed revision means the source's Interpret re-derived blocks the watermark may
-/// stand above, so the step reads again from below the redo's start, or from block 0 when the
-/// token records none.
-fn plan(
-    stored: Option<(i64, &input::Revision)>,
-    current: Option<&input::Revision>,
-    redo_from: Option<i64>,
-) -> Plan {
+/// a row) and whose Interpret revision is now `current` (none while it is in redo). While the
+/// source is in redo the step reads and does not move. A changed revision means the source's
+/// Interpret re-derived blocks the watermark may stand above, any number of redos since the row
+/// was written, so the step reads again from block 0.
+fn plan(stored: Option<(i64, &input::Revision)>, current: Option<&input::Revision>) -> Plan {
     let watermark = stored.map_or(-1, |(block, _)| block);
     let Some(current) = current else {
         return Plan {
@@ -211,9 +209,7 @@ fn plan(
     };
     match stored {
         Some((_, revision)) if revision != current => Plan {
-            after: redo_from
-                .map_or(-1, |from| from.saturating_sub(1).max(-1))
-                .min(watermark),
+            after: -1,
             reset: true,
             advances: true,
         },
@@ -282,11 +278,7 @@ pub(super) async fn read(
         let stored = has_row.then_some((block.unwrap_or(-1), &revision));
         let token = input::token_in(transaction, &source).await?;
         let current = token.revision();
-        let redo_from = token
-            .project_redo_mode
-            .as_ref()
-            .and(token.project_redo_from);
-        let plan = plan(stored, current.as_ref(), redo_from);
+        let plan = plan(stored, current.as_ref());
         let after = plan.after;
         let limit = (!whole_tail(after, floor)).then_some(SOURCE_EVENTS);
         let cutoff: Option<i64> = sqlx::query_scalar(CUTOFF)
@@ -452,14 +444,14 @@ mod tests {
         assert!(!whole_tail(6, None));
     }
 
-    // Row 11's plan: a changed Interpret revision reads again from below the open Project redo's
-    // start, or from block 0, and writes the watermark even with nothing read; an open
-    // Interpret redo reads and writes nothing; the same revision reads on.
+    // Row 11's plan: a changed Interpret revision reads again from block 0 and writes the
+    // watermark even with nothing read; an open Interpret redo reads and writes nothing; the
+    // same revision reads on.
     #[test]
     fn a_changed_revision_reads_again_and_an_open_redo_does_not_move() {
         let old = (Some("a".to_owned()), Some(1));
         let new = (Some("a".to_owned()), Some(2));
-        let same = plan(Some((9, &old)), Some(&old), Some(4));
+        let same = plan(Some((9, &old)), Some(&old));
         assert_eq!(
             same,
             Plan {
@@ -468,24 +460,22 @@ mod tests {
                 advances: true,
             }
         );
-        let from_redo = plan(Some((9, &old)), Some(&new), Some(4));
+        let changed = plan(Some((9, &old)), Some(&new));
         assert_eq!(
-            from_redo,
+            changed,
             Plan {
-                after: 3,
+                after: -1,
                 reset: true,
                 advances: true,
             }
         );
-        assert_eq!(plan(Some((9, &old)), Some(&new), None).after, -1);
-        assert_eq!(plan(Some((2, &old)), Some(&new), Some(9)).after, 2);
-        assert_eq!(plan(Some((9, &old)), Some(&new), Some(0)).after, -1);
-        let open = plan(Some((9, &old)), None, Some(4));
+        let open = plan(Some((9, &old)), None);
         assert!(!open.advances && open.after == 9);
         assert!(written(&open, Some(15), Some(20)).is_none());
-        assert_eq!(written(&from_redo, None, Some(20)), Some(3));
-        assert_eq!(written(&from_redo, Some(15), Some(20)), Some(15));
-        assert_eq!(plan(None, Some(&new), Some(4)).after, -1);
+        assert_eq!(written(&changed, None, Some(20)), Some(-1));
+        assert_eq!(written(&changed, Some(15), Some(20)), Some(15));
+        assert!(written(&changed, Some(15), None).is_none());
+        assert_eq!(plan(None, Some(&new)).after, -1);
         assert!(written(&same, None, Some(20)).is_none());
     }
 }
