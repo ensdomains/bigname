@@ -60,12 +60,15 @@ pub(super) enum Parents<'a> {
 /// decides the arm of a child it shares. `children`, the child nodes a read wants (lowercase, no
 /// namespace), keeps both arms' candidates of only those children, read by child node rather
 /// than by enumerating the parent's edges; the windows below partition by child, so whole
-/// children in or out leave every rank unchanged.
+/// children in or out leave every rank unchanged. `registration_limit` keeps at most that many
+/// ENSv2 candidates, in no order, so everything after them is bounded too: only a capped count
+/// may set it, and it must report a candidate count above its cap as not computed.
 pub(super) fn push_selected<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     parents: Parents<'a>,
     registry: Option<&'a str>,
     children: Option<&'a [String]>,
+    registration_limit: Option<i64>,
 ) {
     builder.push(
         "parent_surface AS (
@@ -237,6 +240,10 @@ pub(super) fn push_selected<'a>(
         builder.push(" AND lower(child.namehash) = ANY(");
         builder.push_bind(children);
         builder.push(")");
+    }
+    if let Some(limit) = registration_limit {
+        builder.push(" LIMIT ");
+        builder.push_bind(limit);
     }
     builder.push(format!(
         "

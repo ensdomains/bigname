@@ -58,7 +58,10 @@ pub(crate) struct RegistryName {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct RegistryCounts {
-    pub(crate) labels: Option<u64>,
+    /// Serialized absent without `include=counts`, and `null` for a historical selection or
+    /// above the count cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) labels: Option<Option<u64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) roles: Option<u64>,
     /// Serialized absent without `include=counts` and `null` above the count cap.
@@ -94,7 +97,7 @@ pub(crate) async fn get_registry(
     let params = params.into_inner();
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
-    let include_event_count = registry_include_counts(&params.include)?;
+    let include_counts = registry_include_counts(&params.include)?;
     let mut collection = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         params.cursor.as_deref(),
@@ -160,12 +163,12 @@ pub(crate) async fn get_registry(
         as_of_block,
         storage_cursor.as_ref(),
         params.page_size,
-        include_event_count,
+        include_counts,
     )
     .await
     .map_err(|_| internal_error(chain_id_slug, &normalized_address))?;
 
-    let roles = if include_event_count {
+    let roles = if include_counts {
         Some(
             role_counts::registry_role_count(
                 collection.conn().await?,
@@ -179,7 +182,7 @@ pub(crate) async fn get_registry(
         None
     };
     let events_cap = registry_events_count_cap();
-    let events = if include_event_count {
+    let events = if include_counts {
         let count = bigname_storage::count_contract_events(
             collection.conn().await?,
             chain_id_slug,
@@ -226,12 +229,15 @@ pub(crate) async fn get_registry(
             .as_of
             .as_ref()
             .and_then(|positions| positions.get(&numeric_chain_id.to_string()));
-    let labels = if is_current {
+    let labels = if !include_counts {
+        None
+    } else if is_current {
         Some(
             bigname_storage::count_registry_labels_current(
                 collection.conn().await?,
                 chain_id_slug,
                 &normalized_address,
+                super::child_count_cap(),
             )
             .await
             .map_err(super::name_rows_error(
@@ -240,7 +246,7 @@ pub(crate) async fn get_registry(
             ))?,
         )
     } else {
-        None
+        Some(None)
     };
     collection.finish(&state).await?;
     let mut data = build_registry_overview(
@@ -269,7 +275,7 @@ fn build_registry_overview(
     registry: RegistryContractRow,
     chain_id: u64,
     serving: Option<&SubregistryPointer>,
-    labels: Option<i64>,
+    labels: Option<Option<i64>>,
     events: Option<Option<u64>>,
     referenced_by: ReferencedBy,
 ) -> RegistryOverview {
@@ -289,7 +295,7 @@ fn build_registry_overview(
         created_transaction_hash: created.transaction_hash,
         created_basis: created_basis(created.basis).to_owned(),
         counts: RegistryCounts {
-            labels: labels.and_then(|count| u64::try_from(count).ok()),
+            labels: labels.map(|count| count.and_then(|count| u64::try_from(count).ok())),
             roles: None,
             events,
         },

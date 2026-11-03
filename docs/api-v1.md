@@ -790,7 +790,8 @@ Rules:
   child registration rows together, each event once. It is always `null` for unanchored event
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
   readable subname count, applying the same optional prefix and expiry filters
-  as the page before its cursor.
+  as the page before its cursor: exact up to 10,000 subnames and `null`
+  beyond.
   The registry overview's nested `referenced_by` page populates it only with
   `include=counts`.
   The resolver overview's nested `bound_names` page populates it only with
@@ -3505,7 +3506,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object RegistryCounts -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `labels` | nullable integer | always | Exact current label count, or null for a historical selection where a current label count is not meaningful. |
+| `labels` | nullable integer | optional | Current label count; only with include=counts. Exact when the registry holds at most 10,000 registrations under its name, and null otherwise or for a historical selection, where a current label count is not meaningful. |
 | `roles` | integer | optional | Count of observed nonzero declared role assignments; only with include=counts. |
 | `events` | nullable integer | optional | Count of product-visible events emitted by the registry, exact up to 100,000 and null above; only with include=counts. |
 
@@ -3530,7 +3531,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `created_at` | nullable string | always | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `created_transaction_hash` | nullable string | always | Creation or first-pointer transaction; null for a declaration or missing transaction evidence. |
 | `created_basis` | enum `registry_created`, `subregistry_pointer`, `declared` | always | Evidence used for the registry creation fields. |
-| `counts` | object RegistryCounts | always | Current label count and optional role/event totals. |
+| `counts` | object RegistryCounts | always | Label, role and event totals, each only with include=counts. |
 | `referenced_by` | object ReferencedBy | always | Nested page of current names pointing to this registry. |
 
 ### ResolverOverview

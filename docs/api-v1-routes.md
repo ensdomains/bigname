@@ -844,8 +844,8 @@ collection route carry neither header.
   `source`, `include=counts`. `source` accepts `indexed` or `verified`; omitting it is identical
   to `source=indexed`. This name-profile route does not accept `source=auto`.
   `include=counts` adds `subname_count`, the name's direct readable subname
-  count (the same per-parent aggregate `GET /v1/names/{name}/subnames` reports
-  as `page.total_count`), and `record_count`, the known record-selector count
+  count (the per-parent aggregate `GET /v1/names/{name}/subnames` reports as
+  its unfiltered `page.total_count` up to 10,000), and `record_count`, the known record-selector count
   of the current registration's record inventory with the same meaning as on
   address-name rows; `record_count` is omitted when the row has no current
   record inventory. A name served through its ENSv1 registry pointer counts
@@ -2054,12 +2054,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   and order. Cursors are bound to namespace, parent, `q`, `match=contains`
   when it narrows a `q`, `include_expired`, sort, and order; a cursor replayed under different controls returns
   `400 invalid_input`. Legacy publication and expiry evaluation fields are ignored.
-  `page.total_count` is populated with the parent's direct readable subname
-  count — the same bounded per-parent aggregate that already annotates the page,
-  so it costs no extra scan — when the page admits every child, that is
-  when `q` is absent and `include_expired` is not `false`. A narrowed page
-  reports the exact filtered total, computed with the same child-name and expiry
-  predicates as its list, before the cursor.
+  `page.total_count` is the number of children the page's `q` and
+  `include_expired` controls admit, computed with the same child-name and
+  expiry predicates as its list, before the cursor, in the same statement as
+  the page. It is exact up to 10,000 children and `null` above: the count stops
+  after 10,001. The rows and cursors do not depend on it.
 - Snapshot behavior: the parent, child rows and filtered count are read on one
   database snapshot of the captured publication, disclosed in `meta.as_of`. The
   cursor holds only its sort position and query filters; expiry uses each page's
@@ -5273,7 +5272,7 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- | --- |
 | `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.roles and counts.events. counts.events is exact up to 100,000 events and null above. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 100,000 events and null above. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -5326,11 +5325,15 @@ For a registrar lease first identified by a later readable observation, registra
   `SourceManifestUpdated` payloads recorded during that admission to establish the
   registry role. The retained declaration identity and address must match; later re-admission neither changes
   an older interval's role nor fills the gap between admissions.
-  `counts.labels` is the total of the labels route below for the registry's
-  representative pointing name: the name `name` selects, the earliest name
-  whose current subregistry pointer targets the registry. Labels the registry
-  holds under another name that also points at it are not counted. It is `0`
-  when no name points at the registry. `counts.events` is present only with
+  `counts.labels` is present only with `include=counts` and is the total of
+  the labels route below for the registry's representative pointing name: the
+  name `name` selects, the earliest name whose current subregistry pointer
+  targets the registry. Labels the registry holds under another name that also
+  points at it are not counted. It is `0` when no name points at the registry.
+  It is exact when the registry holds at most 10,000 registrations under that
+  name, and `null` otherwise: the count stops reading after 10,001 of them,
+  because a registry such as the `.eth` one holds more than an exact count
+  composes within the request deadline. `counts.events` is present only with
   `include=counts` and counts the product-visible events the contract emitted
   on this chain up to the selected position, in any namespace. For an ENSv2
   registry, whose events are all in `ens`, it equals the `total_count` of
@@ -5380,9 +5383,10 @@ For a registrar lease first identified by a later readable observation, registra
   `counts.labels` is `null` for a historical selection that differs from the
   current published position. The creation, pointer, reference, role and event
   evidence and `counts.labels` are read on one database snapshot of the captured
-  publication: `counts.labels` finds the registry's representative pointing name
-  there and takes that name's labels-route total, or `0` when no name points at
-  the registry. It describes the same publication as `name`, `parent_registry`,
+  publication: with `include=counts`, `counts.labels` finds the registry's
+  representative pointing name there and takes that name's labels-route total,
+  or `0` when no name points at the registry, and `null` above the registration
+  cap. It describes the same publication as `name`, `parent_registry`,
   `referenced_by` and `meta.as_of`; a publication during the read does not
   affect the response.
 - Status semantics: an unknown registry returns `404 not_found` at every
@@ -5465,7 +5469,7 @@ For a registrar lease first identified by a later readable observation, registra
 - Pagination behavior: standard collection pagination by `display_name`
   ascending. `page.total_count` is the exact number of labels the owner filter
   admits, counted before paging; unfiltered, it is the same number as
-  `counts.labels` on the registry route. So `exclude_owner=<address>&page_size=1`
+  `counts.labels` on the registry route whenever that count is not `null`. So `exclude_owner=<address>&page_size=1`
   answers whether the registry holds any label that address does not own from
   `total_count` alone. The cursor binds the chain, the registry and the owner
   filter.

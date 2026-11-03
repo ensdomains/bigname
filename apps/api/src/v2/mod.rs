@@ -2,6 +2,7 @@ mod address_history;
 mod address_names;
 mod cache_headers;
 mod chains;
+mod child_count_cap;
 pub(crate) mod collection_snapshot;
 mod cursor;
 mod diag_events;
@@ -64,6 +65,9 @@ pub(crate) use address_names::{AddressNameGrant, AddressNameResolution, get_addr
 pub(crate) use chains::{
     all_chain_slugs, numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug,
 };
+pub(crate) use child_count_cap::child_count_cap;
+#[cfg(test)]
+pub(crate) use child_count_cap::with_child_count_cap;
 pub(crate) use cursor::{Payload as CursorPayload, decode, encode};
 pub(crate) use diag_events::get_diagnostic_events;
 pub(crate) use diag_namespace_manifests::get_diagnostic_namespace_manifests;
