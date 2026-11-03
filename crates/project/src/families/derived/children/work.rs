@@ -151,6 +151,11 @@ pub(super) async fn list(
 ) -> Result<(Vec<String>, Vec<String>)> {
     if names.len() > 500 {
         diag(transaction, chain_id, block, after, (names, swept)).await;
+        return Err(ProjectError::data_integrity(format!(
+            "TYR455DIAG stop at block {} with {} names",
+            block.number,
+            names.len()
+        )));
     }
     let started = std::time::Instant::now();
     let rows: Vec<(String, String)> = sqlx::query_as(WORK_LIST)
@@ -215,7 +220,7 @@ async fn diag(
         ))
         .execute(&mut **transaction)
         .await;
-        let _ = sqlx::query("/* project:diag.timeout */ SET LOCAL statement_timeout = '90s'")
+        let _ = sqlx::query("/* project:diag.timeout */ SET LOCAL statement_timeout = '300s'")
             .execute(&mut **transaction)
             .await;
         let started = std::time::Instant::now();
