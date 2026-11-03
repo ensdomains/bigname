@@ -5,6 +5,8 @@ mod support;
 mod redo_overtaken_by_reorg;
 #[path = "spine/redo_stopped_recovery.rs"]
 mod redo_stopped_recovery;
+#[path = "spine/walk_index_restore.rs"]
+mod walk_index_restore;
 
 use std::{
     sync::{

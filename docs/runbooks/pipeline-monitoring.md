@@ -165,6 +165,11 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | Exporter health | Whether Prometheus can scrape the runner and whether the latest read of PostgreSQL state succeeded. |
 | RPC chain check | `phase_runner_rpc_chain_id{chain,source}` is the chain id each RPC endpoint reported to its latest [RPC chain check](../deployment.md#rpc-chain-check), or `-1` when none could be read; hydration URLs use `source="hydration"`, which they share with a configured source of that key. `phase_runner_rpc_chain_mismatch{chain,source}` is `1` once an Ingest or Live source failed the check during the run; a failed Verify reference shows as a failed Verify phase instead. |
 
+`phase_runner_walk_index_capacity_blocked{chain}` is `1` while the chain's rebuild of the
+indexes the [walk index set](../../ops/walk-index-set/README.md#the-phase-runners-rebuild)
+scripts drop waits for storage capacity before Project, and `0` otherwise. It is not on a
+dashboard panel.
+
 ## Ingest RPC traffic
 
 Three counters cover only the JSON-RPC traffic the shared Ingest and Live

@@ -529,10 +529,10 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=538
+expected_refusal_assertions=547
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=90
+expected_predecessor_shape_proof_count=91
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
@@ -541,6 +541,7 @@ serving_read_index_migration="$ROOT/migrations/20261028120000_serving_read_index
 search_prefix_index_migration="$ROOT/migrations/20261029120000_search_prefix_bucket_indexes.sql"
 transfer_node_index_migration="$ROOT/migrations/20261102130000_normalized_events_v1_transfer_node_index.sql"
 registry_roles_index_migration="$ROOT/migrations/20261102140000_normalized_events_registry_roles_index.sql"
+resolver_link_order_index_migration="$ROOT/migrations/20261103130000_project_resolver_link_order_index.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.
@@ -859,6 +860,12 @@ check_served_projection_removal() {
                 emit_phase_migration "$registry_roles_index_migration" preceding-shape
             fi
             emit_phase_migration "$registry_roles_index_migration" baseline-first
+            # The resolver link order index: absent from the pre-7c shape, present in the
+            # baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$resolver_link_order_index_migration" preceding-shape
+            fi
+            emit_phase_migration "$resolver_link_order_index_migration" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -1020,7 +1027,8 @@ for migration_file in \
     "$search_prefix_index_migration" \
     "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql" \
     "$transfer_node_index_migration" \
-    "$registry_roles_index_migration"
+    "$registry_roles_index_migration" \
+    "$resolver_link_order_index_migration"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1388,6 +1396,10 @@ emit_phase_migration "$transfer_node_index_migration" baseline-first | run_psql
 # empty table.
 emit_phase_migration "$registry_roles_index_migration" preceding-shape | run_psql
 emit_phase_migration "$registry_roles_index_migration" baseline-first | run_psql
+# The historical projections fixture lacks the resolver link order index, and the table is
+# empty, so the schema-migration builds it.
+emit_phase_migration "$resolver_link_order_index_migration" preceding-shape | run_psql
+emit_phase_migration "$resolver_link_order_index_migration" baseline-first | run_psql
 # The historical normalized-event fixture lacks the registrar lease index. Install
 # the current operational definition before walk-set and exact-adoption checks.
 render_phase_migration "$ROOT/ops/history-registrar-lease-index/install.sql" | run_psql
@@ -5107,6 +5119,7 @@ source "$ROOT/scripts/schema-check/history-registrar-lease.sh"
 source "$ROOT/scripts/schema-check/history-direct-accounts.sh"
 source "$ROOT/scripts/schema-check/history-transfer-node.sh"
 source "$ROOT/scripts/schema-check/registry-roles.sh"
+source "$ROOT/scripts/schema-check/resolver-link-order.sh"
 
 # Recreate the registry token index from its preceding schema shape. Compare
 # the resulting catalog definition to the fresh baseline, then prove a rerun
