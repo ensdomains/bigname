@@ -29,7 +29,10 @@ fn block(number: i64) -> BlockHeader {
 /// `x.eth` observed at block 12, with no raw bytes until then; an unspelled `.eth` name that
 /// carries only `eth` of its labels; three stored rows: one whose name still spells `x` as a
 /// placeholder, one whose name spells nothing but its own unknown label, and one fully spelled
-/// whose ENSv1 edge carries `x`.
+/// whose ENSv1 edge carries `x`; and the block's journal rows of the three family tables the
+/// work list probes, with no row standing in any of them. Around them, 20,000 spelled rows and
+/// 200 rows holding other unknown labels, and 20,000 rows in each probed family table, so the
+/// statistics make a read of the chain's rows cost what it would on a served chain.
 async fn seed(pool: &PgPool) -> Result<()> {
     raw_sql(&format!(
         "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
@@ -61,7 +64,38 @@ async fn seed(pool: &PgPool) -> Result<()> {
                  FALSE, FALSE, FALSE, -1, -1, ARRAY['0xd1']),
                 ('{CHAIN}', 'ens:0xe7', '{SPELLED}', 'ens', 'x.eth', 'x.eth', '0x0e',
                  FALSE, FALSE, FALSE, -1, -1, '{{}}');
-         ANALYZE project_child_listing;",
+         INSERT INTO project_child_listing (chain_id, parent_logical_name_id,
+             child_logical_name_id, namespace, display_key, display_name, namehash,
+             lifecycle_shadow, wrapper_held, released_lease, expires_key, registered_key,
+             unhealed_labelhashes)
+         SELECT '{CHAIN}', 'ens:0xf2', 'ens:0xbulk' || n, 'ens', 'n' || n || '.f',
+                'n' || n || '.f', '0xbulk' || n, FALSE, FALSE, FALSE, -1, -1,
+                CASE WHEN n <= 200 THEN ARRAY['0xff' || n] ELSE '{{}}' END
+         FROM generate_series(1, 20200) n;
+         INSERT INTO project_lifecycle_event (chain_id, state_kind, state_key, block_number,
+             event_identity, event_kind, source_family)
+         SELECT '{CHAIN}', 'resource', 'state:' || n, 1, 'event:' || n, 'NameRegistered',
+                'ens_v1_registrar_l1'
+         FROM generate_series(1, 20000) n;
+         INSERT INTO project_wrapper_state (chain_id, resource_id, block_number, event_identity)
+         SELECT '{CHAIN}', md5(n::text)::uuid, 1, 'wrapper:' || n
+         FROM generate_series(1, 20000) n;
+         INSERT INTO project_name_state (namespace, logical_name_id, chain_id, block_number,
+             event_identity)
+         SELECT 'ens', 'ens:0xstate' || n, '{CHAIN}', 1, 'state:' || n
+         FROM generate_series(1, 20000) n;
+         INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key,
+             before_image)
+         VALUES ('{CHAIN}', 12, '{block12}', 'project_lifecycle_event',
+                 '[\"{CHAIN}\",\"registrar\",\"0x0f\",\"lease:0x0f\"]', NULL),
+                ('{CHAIN}', 12, '{block12}', 'project_wrapper_state',
+                 '[\"{CHAIN}\",\"00000000-0000-0000-0000-00000000000f\"]', NULL),
+                ('{CHAIN}', 12, '{block12}', 'project_name_state',
+                 '[\"{CHAIN}\",\"ens\",\"ens:0x0f\"]', NULL);
+         ANALYZE project_child_listing;
+         ANALYZE project_lifecycle_event;
+         ANALYZE project_wrapper_state;
+         ANALYZE project_name_state;",
         block0 = hash(0),
         block12 = hash(12),
     ))
@@ -75,8 +109,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
 // that only shares `eth`, and no fully spelled row, even one whose edge carries `x`. The lookup
 // reads the stored rows through the unhealed-label index, never by a scan of the family.
 #[tokio::test]
-async fn an_observation_derives_again_only_the_rows_that_spell_its_labels_as_unknown()
--> Result<()> {
+async fn an_observation_derives_again_only_rows_holding_its_labels() -> Result<()> {
     let (database, pool) = database().await?;
     seed(&pool).await?;
     let mut transaction = pool.begin().await?;
@@ -116,6 +149,28 @@ async fn an_observation_derives_again_only_the_rows_that_spell_its_labels_as_unk
         listing.iter().all(|node| node["Node Type"] != "Seq Scan"),
         "the work list scans the listing family: {plan}"
     );
+    // The journal's rows are probed in each family table by its full key, whatever the planner
+    // counts them as: never by the chain alone (the 2,003-label block's plan, TYR-455).
+    for (table, key) in [
+        ("project_lifecycle_event", "event_identity"),
+        ("project_wrapper_state", "resource_id"),
+        ("project_name_state", "logical_name_id"),
+    ] {
+        let probes: Vec<&Value> = scans
+            .iter()
+            .map(|(_, node)| *node)
+            .filter(|node| node["Relation Name"] == table)
+            .collect();
+        ensure!(
+            !probes.is_empty()
+                && probes.iter().all(|node| {
+                    node["Index Cond"]
+                        .as_str()
+                        .is_some_and(|condition| condition.contains(key))
+                }),
+            "{table} is not probed by its key: {plan}"
+        );
+    }
     transaction.rollback().await?;
     database.cleanup().await?;
     Ok(())

@@ -31,8 +31,9 @@ fn condition(scan: &Value) -> Option<&str> {
 
 // The dense touched-children row (TYR-455): a block that touches two children under each of
 // 500 parents, written after the planner statistics were taken, so the planner counts the
-// parents as about one row. The statement reads every wanted child's edges and surface by its
-// node, never by the chain or by the namespace alone for each parent, and returns the 1,000 rows.
+// parents as about one row. The statement reads every parent's surface and name state by its
+// key and every wanted child's edges and surface by its node, never by the chain, a block range
+// or the namespace alone, and returns the 1,000 rows.
 #[tokio::test]
 async fn touched_children_under_many_parents_read_each_child_by_its_node() -> Result<()> {
     let database = TestDatabase::create(
@@ -89,22 +90,33 @@ async fn touched_children_under_many_parents_read_each_child_by_its_node() -> Re
         );
         let mut edges = Vec::new();
         executed(root, "project_child_edge_candidate", &mut edges);
-        let read = edges.iter().filter(|scan| scan["Alias"] == "edge");
         ensure!(
-            read.clone().count() > 0
-                && read
-                    .clone()
+            !edges.is_empty()
+                && edges
+                    .iter()
                     .all(|scan| condition(scan).is_some_and(|text| text.contains("child_node"))),
             "the wanted children's edges are not read by their node: {plan}"
         );
         let mut surfaces = Vec::new();
         executed(root, "name_surfaces", &mut surfaces);
         ensure!(
-            surfaces
-                .iter()
-                .filter(|scan| scan["Alias"] == "child")
-                .all(|scan| condition(scan).is_some_and(|text| text.contains("namehash"))),
-            "the wanted children's surfaces are not read by their node: {plan}"
+            !surfaces.is_empty()
+                && surfaces.iter().all(|scan| {
+                    condition(scan).is_some_and(|text| {
+                        text.contains("logical_name_id") || text.contains("namehash")
+                    })
+                }),
+            "a surface is not read by its id or node: {plan}"
+        );
+        // The migration gate probes each parent's name state by its key, once per parent.
+        let mut states = Vec::new();
+        executed(root, "project_name_state", &mut states);
+        ensure!(
+            states.iter().all(|scan| {
+                condition(scan).is_some_and(|text| text.contains("logical_name_id"))
+                    && scan["Actual Loops"].as_i64().unwrap_or(0) <= PARENTS
+            }),
+            "the parents' name states are not probed by key once each: {plan}"
         );
         Ok(())
     }

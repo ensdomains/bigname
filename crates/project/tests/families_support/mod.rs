@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
 mod child_listing;
-pub mod listing_cases;
 pub mod ens_v2_path;
 mod expiry_policy;
+pub mod listing_cases;
 pub use expiry_policy::expected_registration_expiry;
 
 pub const CHAIN: &str = "ethereum-sepolia";

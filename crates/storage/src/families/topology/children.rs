@@ -106,19 +106,33 @@ pub(super) fn push_selected<'a>(
     children: Option<&'a [String]>,
     relation: Relation<'a>,
 ) {
-    builder.push(
-        "parent_surface AS (
-            SELECT surface.* FROM bigname_phase.name_surfaces surface
-            WHERE surface.logical_name_id = ",
-    );
     match parents {
         Parents::One(parent) => {
+            builder.push(
+                "parent_surface AS (
+                    SELECT surface.* FROM bigname_phase.name_surfaces surface
+                    WHERE surface.logical_name_id = ",
+            );
             builder.push_bind(parent);
         }
         Parents::Many(parents) => {
-            builder.push("ANY(");
+            // Each parent's surface is probed by its key, one parent at a time (`OFFSET 0`), so
+            // the read follows the parents given, never the planner's count of them: the Project
+            // writer's parents include names surfaced in its own block.
+            builder.push(
+                "parent_surface AS MATERIALIZED (
+                    SELECT surface.*
+                    FROM (SELECT DISTINCT wanted.id FROM unnest(",
+            );
             builder.push_bind(parents);
-            builder.push(")");
+            builder.push(
+                "::text[]) wanted (id)) wanted
+                    CROSS JOIN LATERAL (
+                        SELECT surface.* FROM bigname_phase.name_surfaces surface
+                        WHERE surface.logical_name_id = wanted.id
+                        OFFSET 0
+                    ) surface",
+            );
         }
     }
     match relation {
@@ -169,18 +183,24 @@ pub(super) fn push_selected<'a>(
                    lower(surface.namehash) AS node, surface.labelhashes
             FROM parent_surface surface JOIN clock ON clock.chain_id = surface.chain_id{parent_spelling}
             WHERE surface.visibility_state = 'active' AND {parent_readable}
-        ), parent_migration AS (
+        ), parent_migration AS MATERIALIZED (
             -- The ENSv1 migration gate: a migrated parent's migration path and migration
-            -- registry, which decide below which ENSv1 edges the parent still lists.
+            -- registry, which decide below which ENSv1 edges the parent still lists. It is
+            -- derived once per parent, its name state probed by key (`OFFSET 0`), so its cost
+            -- follows the parents and never the planner's count of them or of the edges.
             SELECT parent.logical_name_id AS parent_logical_name_id, state.migration_path,
                    registry.registry_contract_instance_id::text
                        AS migration_registry_contract_instance_id
             FROM parent JOIN clock ON clock.chain_id = parent.chain_id
-            JOIN bigname_phase.project_name_state state
-              ON state.chain_id = parent.chain_id
-             AND state.namespace = parent.namespace
-             AND state.logical_name_id = parent.logical_name_id
-             AND state.migration_position IS NOT NULL
+            CROSS JOIN LATERAL (
+                SELECT state.chain_id, state.migration_path, state.migration_evidence
+                FROM bigname_phase.project_name_state state
+                WHERE state.chain_id = parent.chain_id
+                  AND state.namespace = parent.namespace
+                  AND state.logical_name_id = parent.logical_name_id
+                  AND state.migration_position IS NOT NULL
+                OFFSET 0
+            ) state
             LEFT JOIN bigname_phase.project_parent_subregistry subregistry
               ON subregistry.chain_id = parent.chain_id
              AND subregistry.logical_name_id = parent.logical_name_id
@@ -308,11 +328,6 @@ pub(super) fn push_selected<'a>(
         builder.push(" AND subregistry.subregistry_address = ");
         builder.push_bind(registry);
     }
-    if let Some(children) = children {
-        builder.push(" AND lower(child.namehash) = ANY(");
-        builder.push_bind(children);
-        builder.push(")");
-    }
     builder.push(format!(
         "
         ), v1_edges AS (
@@ -376,12 +391,6 @@ pub(super) fn push_selected<'a>(
     if registry.is_some() {
         // Another arm decides only children that also have an ENSv2 candidate here.
         builder.push(" AND edge.child_node IN (SELECT lower(v2.namehash) FROM v2_candidates v2)");
-    }
-    if let Some(children) = children {
-        // `project_child_edge_candidate_child_idx` serves this by chain, namespace and node.
-        builder.push(" AND edge.child_node = ANY(");
-        builder.push_bind(children);
-        builder.push(")");
     }
     builder.push(format!(
         "

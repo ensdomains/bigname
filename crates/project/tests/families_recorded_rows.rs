@@ -37,7 +37,7 @@ const TARGET: i64 = 300;
 /// family marker and the history catalogue marker are taken without their generation and
 /// without the content hash of the build that wrote them, which differs between builds by
 /// design.
-const RECORDED: &str = "4af2ef2605f65cc97a6a24819829712d848876d6f94f86baeae37b0fe720a691";
+const RECORDED: &str = "5719ce58bfb88a37809cf3e4fb0c4664b2d908c595976a0b2713d6a926e1fd6d";
 const MAINNET: &str = "ethereum-mainnet";
 /// The same digest for the seed alone on `MAINNET`.
 const RECORDED_MAINNET: &str = "012a05d6d8e4276e8d59046e08d64fe23da1aa3af17c1240d32843c2d4f258aa";

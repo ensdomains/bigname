@@ -380,7 +380,7 @@ async fn child_counts_do_not_probe_the_lifecycle_table() -> Result<()> {
             ),
         ] {
             ensure!(
-                !query.sql().contains("child_node = ANY("),
+                !query.sql().contains("wanted_node"),
                 "{name} narrows its children"
             );
             raw_sql(&format!("PREPARE {name} ({types}) AS {}", query.sql()))
@@ -435,14 +435,14 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
         ensure!(
             !page_query(PARENT, &filter, None, None, 6)
                 .sql()
-                .contains("child_node = ANY(")
+                .contains("wanted_node")
         );
         let parents = vec![PARENT.to_owned()];
         let candidates = vec![child.clone()];
         let nodes = vec![node];
         let query = owned_children_query(owner, &candidates, &nodes, &parents, 100);
         raw_sql(&format!(
-            "PREPARE owned (text[], text, text[], text[], text[], text, text, bigint) AS {}",
+            "PREPARE owned (text[], text, text[], text[], text, text, bigint) AS {}",
             query.sql()
         ))
         .execute(&mut *conn)
@@ -453,8 +453,7 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
                 .await?;
             let plan: Value = sqlx::query_scalar(&format!(
                 "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE owned (ARRAY['{PARENT}'],
-                     '{hash}', ARRAY['{node}'], ARRAY['{node}'], ARRAY['{child}'], '{owner}',
-                     '{owner}', 100)",
+                     '{hash}', ARRAY['{node}'], ARRAY['{child}'], '{owner}', '{owner}', 100)",
                 node = nodes[0],
                 hash = bigname_content_hash::PROJECTION_CONTENT_HASH
             ))
@@ -467,7 +466,7 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
                     scan["Index Name"] == "project_child_edge_candidate_child_idx"
                         && scan["Index Cond"]
                             .as_str()
-                            .is_some_and(|condition| condition.contains("child_node = ANY"))
+                            .is_some_and(|condition| condition.contains("child_node ="))
                 }),
                 "{mode}: no edge scan by candidate node: {plan}"
             );
