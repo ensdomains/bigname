@@ -77,13 +77,6 @@ const CUTOFF: &str = "/* project:families.derived.child_listing_source_cutoff */
               AND observed.chain_id = $1 AND observed.block_number > $2
               AND observed.consumer_visibility = 'activated'
               AND observed.logical_name_id IS NOT NULL
-              AND EXISTS (
-                  SELECT 1 FROM chain_lineage lineage
-                  WHERE lineage.chain_id = observed.chain_id
-                    AND lineage.block_hash = observed.block_hash
-                    AND lineage.block_number = observed.block_number
-                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-              )
             ORDER BY observed.block_number
             LIMIT $3
         ) event
@@ -106,13 +99,6 @@ const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders 
               AND observed.block_number > $3 AND observed.block_number <= $4
               AND observed.consumer_visibility = 'activated'
               AND observed.logical_name_id IS NOT NULL
-              AND EXISTS (
-                  SELECT 1 FROM chain_lineage lineage
-                  WHERE lineage.chain_id = observed.chain_id
-                    AND lineage.block_hash = observed.block_hash
-                    AND lineage.block_number = observed.block_number
-                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-              )
             OFFSET 0
         ) event
         CROSS JOIN LATERAL (
@@ -160,13 +146,6 @@ const TOP: &str = "/* project:families.derived.child_listing_source_top */
           AND observed.chain_id = $1
           AND observed.consumer_visibility = 'activated'
           AND observed.logical_name_id IS NOT NULL
-          AND EXISTS (
-              SELECT 1 FROM chain_lineage lineage
-              WHERE lineage.chain_id = observed.chain_id
-                AND lineage.block_hash = observed.block_hash
-                AND lineage.block_number = observed.block_number
-                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-          )
         ORDER BY observed.block_number DESC
         LIMIT 1
     ) event";
