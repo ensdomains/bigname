@@ -10,16 +10,18 @@ async fn with_opt_in_cap<F: std::future::Future>(cap: usize, future: F) -> F::Ou
 }
 
 /// The payload of `uri` read with no candidate cap and an opt-in cap of `opt_in`, with the
-/// paths it took and the size of every composition batch.
+/// paths it took and the size of every composition batch. The request is boxed, so the test's
+/// own future stays small enough for the test thread's stack.
 async fn opt_in_page(
     database: &TestDatabase,
     uri: &str,
     opt_in: usize,
 ) -> Result<(Value, Vec<&'static str>, Vec<usize>)> {
-    let ((payload, paths), batches) = with_batches(with_exact_total_cap(
+    let request = Box::pin(with_paths(bulk_payload(database, uri)));
+    let ((payload, paths), batches) = Box::pin(with_batches(with_exact_total_cap(
         0,
-        with_opt_in_cap(opt_in, with_paths(bulk_payload(database, uri))),
-    ))
+        with_opt_in_cap(opt_in, request),
+    )))
     .await;
     Ok((payload?, paths, batches))
 }
@@ -33,20 +35,22 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
     let every = OPT_IN_NAMES;
     let over = OPT_IN_NAMES - 1;
 
-    // Row 2: the walk without the flag serves a null total and composes about a page.
+    // The walk without the flag serves a null total and composes about a page.
     let (unasked, paths, batches) = opt_in_page(&database, &names, every).await?;
     assert_eq!(paths, ["walk"]);
     assert_eq!(unasked["page"]["total_count"], Value::Null, "{unasked}");
     assert!(batches.iter().sum::<usize>() <= 32, "{batches:?}");
 
-    // Row 3: at the opt-in cap the flag composes every candidate for an exact count.
+    // At the opt-in cap the flag composes every candidate once for an exact count, then walks
+    // about a page.
     let (exact, paths, batches) = opt_in_page(&database, &counted, every).await?;
     assert_eq!(paths, ["walk"]);
     assert_eq!(exact["page"]["total_count"], json!(OPT_IN_NAMES), "{exact}");
-    assert!(batches.iter().sum::<usize>() >= OPT_IN_NAMES, "{batches:?}");
+    let composed = batches.iter().sum::<usize>();
+    assert!((OPT_IN_NAMES..=OPT_IN_NAMES + 32).contains(&composed), "{batches:?}");
     assert_eq!(page_body(&exact), page_body(&unasked));
 
-    // Row 4: one candidate over it the flag composes nothing for the count, and the page is the
+    // One candidate over it the flag composes nothing for the count, and the page is the
     // one served without the flag.
     let (capped, paths, batches) = opt_in_page(&database, &counted, over).await?;
     assert_eq!(paths, ["walk"]);
@@ -54,14 +58,14 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
     assert!(batches.iter().sum::<usize>() <= 32, "{batches:?}");
     assert_eq!(page_body(&capped), page_body(&unasked));
 
-    // Rows 5 and 7: registration grouping, and the manager's count of `.eth` registrations, are
+    // Registration grouping, and the manager's count of `.eth` registrations, are
     // null over the cap and exact at it, where the exact value is the full read's.
     for query in [
         "dedupe=registration",
         "relation=owner&parent=eth&dedupe=registration",
     ] {
         let uri = format!("{counted}&{query}");
-        let full = bulk_payload(&database, &uri).await?;
+        let full = Box::pin(bulk_payload(&database, &uri)).await?;
         assert!(full["page"]["total_count"].is_u64(), "{query}: {full}");
         let (exact, _, _) = opt_in_page(&database, &uri, every).await?;
         assert_eq!(exact["page"]["total_count"], full["page"]["total_count"], "{query}");
@@ -71,21 +75,20 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
         assert_eq!(page_body(&capped), page_body(&full), "{query}");
     }
 
-    // Row 6: `sort=created_at` still composes every candidate for its order over the cap; only
+    // `sort=created_at` still composes every candidate for its order over the cap; only
     // the count is dropped.
     let (created, _, batches) = opt_in_page(&database, &format!("{counted}&sort=created_at"), over).await?;
     assert_eq!(created["page"]["total_count"], Value::Null, "{created}");
     assert!(batches.iter().sum::<usize>() >= OPT_IN_NAMES, "{batches:?}");
 
-    // Row 9: the candidates are gathered in the requested namespace, which holds them all here.
-    // A namespace holding none of them is read in full with an exact zero.
+    // A namespace holding none of the candidates is read in full with an exact zero.
     let (ens, _, _) = opt_in_page(&database, &format!("{counted}&namespace=ens"), over).await?;
     assert_eq!(ens["page"]["total_count"], Value::Null, "{ens}");
     let (none, paths, _) = opt_in_page(&database, &format!("{counted}&namespace=basenames"), over).await?;
     assert_eq!(paths, ["exact"]);
     assert_eq!(none["page"]["total_count"], json!(0), "{none}");
 
-    // Row 8: the flag stays refused on `relation=resolves_to`.
+    // The flag stays refused on `relation=resolves_to`.
     let (status, refused) = read_family_response(
         &database,
         &format!("/v1/addresses/{BULK_ADDRESS}/names?relation=resolves_to&include=total_count"),
@@ -93,10 +96,35 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
     .await?;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     assert_eq!(refused["error"]["code"], json!("invalid_input"), "{refused}");
+
+    // The candidates are gathered in the requested namespace, so the opt-in cap compares that
+    // namespace's candidates. The address index also lists five names with no `ens` surface:
+    // 70 candidates in all, 65 in `ens`, under an opt-in cap of 65.
+    let others: Vec<String> = (0..5).map(|n| format!("basenames:0x{n:064x}")).collect();
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_address_name_index
+            (address, logical_name_id, relation, chain_id)
+         SELECT $1, id, 'token_holder', 'ethereum-mainnet' FROM unnest($2::text[]) AS id",
+    )
+    .bind(BULK_ADDRESS)
+    .bind(&others)
+    .execute(&database.pool)
+    .await?;
+    let indexed: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT logical_name_id) FROM bigname_phase.project_address_name_index
+         WHERE address = $1",
+    )
+    .bind(BULK_ADDRESS)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(indexed, i64::try_from(OPT_IN_NAMES + others.len())?);
+    let (ens, paths, _) = opt_in_page(&database, &format!("{counted}&namespace=ens"), every).await?;
+    assert_eq!(paths, ["walk"]);
+    assert_eq!(ens["page"]["total_count"], json!(OPT_IN_NAMES), "{ens}");
     database.cleanup().await
 }
 
-/// Row 10: a walk that gives way to the full read over a stale stored sort key serves the count
+/// A walk that gives way to the full read over a stale stored sort key serves the count
 /// only at the opt-in cap, as the walk would have.
 #[tokio::test]
 async fn address_names_opt_in_count_after_a_walk_fallback_follows_its_cap() -> Result<()> {
