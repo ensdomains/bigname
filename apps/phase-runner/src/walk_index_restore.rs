@@ -298,8 +298,9 @@ impl Session {
     /// holds on the table, so an invalid index is never dropped while a build of it, say one a
     /// killed runner or another login left on the server, can still complete. `pg_locks` shows
     /// every login's locks, where `pg_stat_progress_create_index` shows only this login's
-    /// builds. Autovacuum is not waited for: it gives way to a build. `false` when a stop came
-    /// first.
+    /// builds. Autovacuum is not waited for: it gives way to a build, apart from an
+    /// anti-wraparound vacuum, which the build itself then waits behind. `false` when a stop
+    /// came first.
     async fn await_other_builds(&mut self, run: &Restore<'_>) -> RunnerResult<bool> {
         let mut logged = false;
         loop {
@@ -395,11 +396,14 @@ impl Session {
                 .bind(&value)
                 .execute(&mut self.connection)
                 .await
-                .map_err(|error| {
-                    RunnerError::new(
+                .map_err(|error| match error {
+                    sqlx::Error::Database(_) => RunnerError::new(
                         ErrorKind::Configuration,
                         format!("PostgreSQL refused {environment}={value} as {setting}: {error}"),
-                    )
+                    ),
+                    error => {
+                        RunnerError::database("failed to set the index rebuild settings", error)
+                    }
                 })?;
         }
         sqlx::query_as::<_, (String, String)>(
@@ -489,10 +493,26 @@ impl Session {
                     .await;
                     return Ok(false);
                 }
-                _ = progress.tick() => (run.progress)(),
+                _ = progress.tick() => {
+                    if building_on_server(pool, pid).await {
+                        (run.progress)();
+                    }
+                }
             }
         }
     }
+}
+
+/// Whether the rebuild's backend is still running its statement, read through the pool. Loop
+/// progress is recorded only then, so a connection that died without a reply reads as a
+/// stalled loop rather than a build.
+async fn building_on_server(pool: &PgPool, pid: i32) -> bool {
+    let active = sqlx::query_scalar::<_, bool>(
+        "SELECT coalesce(state = 'active', false) FROM pg_stat_activity WHERE pid = $1",
+    )
+    .bind(pid)
+    .fetch_optional(pool);
+    matches!(tokio::time::timeout(POLL, active).await, Ok(Ok(Some(true))))
 }
 
 /// Waits one poll interval, recording loop progress. `false` when a stop came first.

@@ -132,7 +132,8 @@ below. Otherwise it:
    lock, then finds the indexes in place.
 2. Reads the names again, and stops there when another chain or process built them while it
    waited. Otherwise it waits for any other index build, `VACUUM` or `ANALYZE` on the table,
-   from any login, to finish. Autovacuum is not waited for.
+   from any login, to finish. Autovacuum is not waited for: it gives way to the build, apart
+   from an anti-wraparound vacuum, which the build then waits behind.
 3. One index at a time, drops an invalid leftover with `DROP INDEX CONCURRENTLY` and runs
    `install.sql`'s `CREATE INDEX CONCURRENTLY` statement, outside a transaction, with
    `lock_timeout` 0 and each build bounded to six hours. It logs each index it built with its
@@ -157,7 +158,11 @@ stale-loop alert.
   as a login that does not own the table, shows as a restart loop with the same error each
   time.
 - A stop cancels the build on the server and leaves its invalid entry, which the next start
-  drops and builds again. Indexes already built are kept.
+  drops and builds again. Indexes already built are kept. A stop whose budget has already
+  run out sends no cancel, so the build carries on until it ends, and the next start waits
+  for it.
+- While it builds, the runner records loop progress only while the build's backend is
+  active, so a connection that died without a reply raises the stale-loop alert.
 
 `BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM` and
 `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS` set `maintenance_work_mem` and
