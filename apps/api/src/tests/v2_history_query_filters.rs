@@ -4,7 +4,7 @@ async fn history_query_filters_apply_before_pages_counts_and_child_union() -> Re
     let database = TestDatabase::new_migrated().await?;
     hkw_seed(&database).await?;
     for route in hk_routes() {
-        let route = if route.starts_with("/v1/addresses/") {
+        let route = if route.starts_with("/v1/addresses/") || route.starts_with("/v1/events") {
             format!("{route}&include=total_count")
         } else {
             route
