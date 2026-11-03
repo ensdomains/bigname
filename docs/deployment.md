@@ -5220,7 +5220,7 @@ it), the child-registration arm (`child_arm.rs`), the resolver page arms
   and `registry_handoffs.rs`.
 - The fork walk of a non-canonical read in `lineage.rs` keeps its plain joins too. It is off
   the request path, because no route makes a non-canonical read.
-- The address-pair lookup (`pair_lineage` in `address_pairs.rs`) stays as it is, because
+- The address-pair lookup (`pair_lineage` in `count_contract.rs`) stays as it is, because
   outer parameters bind its key.
 - The history source is an input of the
   [projection content hash](glossary.md#projection-content-hash) only, because Project's

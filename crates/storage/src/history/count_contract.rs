@@ -1,9 +1,9 @@
 //! The event predicate Project's stored event counts share with the event reads they count
 //! (`docs/projections.md`, "Event counts"): which rows an emitter or a resolver reads, the fixed
 //! product duplicate filters, the registry-fallback handoff minimum and the proven address pair.
-//! The reads in `duplicates.rs`, `address_pairs.rs`, `paging.rs` and `resolver_source.rs` push
-//! these pieces, and [`block_event_counts_sql`] builds Project's count statement from them, so a
-//! stored count is a count of the rows the read admits.
+//! The reads in `duplicates.rs`, `paging.rs` and `resolver_source.rs` push these pieces, and
+//! [`block_event_counts_sql`] builds Project's count statement from them, so a stored count is a
+//! count of the rows the read admits.
 
 use sqlx::{Postgres, QueryBuilder};
 
