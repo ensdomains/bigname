@@ -56,6 +56,31 @@ use super::{
 
 const BOUND_NAMES_SORT_TOKEN: &str = "name_asc";
 
+#[cfg(test)]
+tokio::task_local! {
+    static BOUND_COUNT_CAP: u64;
+}
+
+/// Runs `future` with `cap` in place of [`RESOLVER_BOUND_COUNT_CAP`].
+#[cfg(test)]
+pub(crate) async fn with_bound_count_cap<F: std::future::Future>(cap: u64, future: F) -> F::Output {
+    BOUND_COUNT_CAP.scope(cap, future).await
+}
+
+/// `include=total_count` on the resolver overview counts at most this many bound names and
+/// reports `bound_names.page.total_count=null` above it. The largest resolvers bind millions of
+/// names, and the count reads one summary row and runs one surface probe for each name it
+/// counts, as a page does for each row. It is the cap of the `/v1/events` emitter opt-in count.
+const RESOLVER_BOUND_COUNT_CAP: u64 = 100_000;
+
+fn bound_count_cap() -> u64 {
+    #[cfg(test)]
+    if let Ok(cap) = BOUND_COUNT_CAP.try_with(|cap| *cap) {
+        return cap;
+    }
+    RESOLVER_BOUND_COUNT_CAP
+}
+
 pub(crate) struct ResolverQueryParams;
 
 impl QueryParamAllowlist for ResolverQueryParams {
@@ -339,6 +364,7 @@ async fn load_bound_name_rows(
     Option<u64>,
 )> {
     let limit = page_size.saturating_add(1) as i64;
+    let cap = bound_count_cap();
     let loaded = bigname_storage::families::name::load_family_bound_names(
         conn,
         chain_id_slug,
@@ -347,6 +373,7 @@ async fn load_bound_name_rows(
         cursor,
         limit,
         total_count,
+        Some(cap),
     )
     .await
     .map_err(crate::v2::name_rows_error(

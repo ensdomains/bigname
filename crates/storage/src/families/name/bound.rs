@@ -179,6 +179,7 @@ async fn binding_supported(
 /// The bound-name listing over the composed rows: up to `limit` names bound to
 /// `resolver_address` on `chain_id`, after `cursor`, in page order, and with `total_count` the
 /// exact number of names in the whole list, counted from the same relation on the same snapshot.
+#[allow(clippy::too_many_arguments)]
 pub async fn load_family_bound_names(
     db: impl Into<crate::ReadDb<'_>>,
     chain_id: &str,
@@ -187,6 +188,7 @@ pub async fn load_family_bound_names(
     cursor: Option<&NameCurrentListCursor>,
     limit: i64,
     total_count: bool,
+    count_cap: Option<u64>,
 ) -> Result<BoundNamesPage> {
     // The cursor's name is the order name of the row it follows.
     let after = cursor
@@ -210,6 +212,7 @@ pub async fn load_family_bound_names(
                 &mut snapshot,
                 (chain_id, resolver_address, namespace),
                 supported,
+                count_cap,
             )
             .await?,
         )
@@ -305,6 +308,7 @@ pub(crate) async fn count(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
     supported: bool,
+    _cap: Option<u64>,
 ) -> Result<u64> {
     let mut scoped = custom_plans(conn).await?;
     let total: i64 = sqlx::query_scalar(&bound_count_sql(supported))
@@ -346,6 +350,7 @@ pub(crate) async fn count_plan(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
     supported: bool,
+    cap: Option<u64>,
 ) -> Result<String> {
     let quoted = |value: Option<&str>| {
         value.map_or("NULL".to_owned(), |value| {
@@ -354,16 +359,17 @@ pub(crate) async fn count_plan(
     };
     let mut scoped = custom_plans(conn).await?;
     sqlx::query(&format!(
-        "PREPARE bound_count_probe (text, text, text) AS {}",
+        "PREPARE bound_count_probe (text, text, text, bigint) AS {}",
         bound_count_sql(supported)
     ))
     .execute(&mut *scoped)
     .await?;
     let plan: Vec<String> = sqlx::query_scalar(&format!(
-        "EXPLAIN EXECUTE bound_count_probe ({}, {}, {})",
+        "EXPLAIN EXECUTE bound_count_probe ({}, {}, {}, {})",
         quoted(Some(chain_id)),
         quoted(Some(resolver_address)),
-        quoted(namespace)
+        quoted(namespace),
+        cap.map_or("NULL".to_owned(), |cap| (cap + 1).to_string())
     ))
     .fetch_all(&mut *scoped)
     .await?;

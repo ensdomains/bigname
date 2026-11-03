@@ -2,10 +2,10 @@
 //! relations without composing every name the address may hold.
 //!
 //! An address with at most `seams::exact_total_cap` candidate names (the names the address
-//! index lists, the ENSv2 registry-role names and the surface-less registry children), or a
-//! request for the exact total, is read as `families::records::address_names` reads it: every
-//! candidate composed, a chunk at a time, with an exact total. Above the cap the page walks the
-//! candidates in the page's own order and its total is null.
+//! index lists, the ENSv2 registry-role names and the surface-less registry children) is read
+//! as `families::records::address_names` reads it: every candidate composed, a chunk at a time,
+//! with an exact total. Above the cap the page walks the candidates in the page's own order and
+//! its total is null.
 //!
 //! The walk orders every candidate by its sort key without composing it: the served name,
 //! `ens_beautify` of the stored surface spelling as composition computes it, or the stored name
@@ -15,8 +15,9 @@
 //! which the name history (`project_name_history`) never backdates. Above the cap it first
 //! composes every candidate a chunk at a time and keeps each kept name's served time, then
 //! walks in that order (`relation::read_every_candidate`). `include=total_count` above the cap
-//! reads every candidate the same way for its count, then walks. Registry children sort by the
-//! name they serve and have no timestamp.
+//! reads every candidate the same way for its count, then walks, when the address has at most
+//! `seams::exact_total_opt_in_cap` candidates. Above that it reads nothing for the count and the
+//! total is null. Registry children sort by the name they serve and have no timestamp.
 //! Postgres orders the keys, so the order is the page statement's under the database
 //! collation. For name grouping the walk starts with about a page and grows its steps
 //! (`batch`). Registration grouping retains the old four-page first step and doubling. It runs
@@ -83,8 +84,9 @@ pub struct AddressNamesPageRequest<'a> {
     pub page_size: u64,
 }
 
-/// The page of `request`, with an exact total when `exact_total` asks for it or the address has
-/// at most the cap of candidate names, else a null total.
+/// The page of `request`, with an exact total when the address has at most the cap of candidate
+/// names, or when `exact_total` asks for it and the address has at most the opt-in cap, else a
+/// null total.
 pub async fn load_family_address_names_capped_page(
     db: impl Into<crate::ReadDb<'_>>,
     request: &AddressNamesPageRequest<'_>,
@@ -116,6 +118,9 @@ pub async fn load_family_address_names_capped_page(
         with_history_evidence: false,
     };
     let capped = candidates.len() > seams::exact_total_cap();
+    // Counting composes every candidate, so the opt-in count runs only up to its own cap. The
+    // candidate set is whole here, before any name is composed.
+    let _ = seams::exact_total_opt_in_cap();
     drop(candidates);
     if capped {
         if let Some(page) = walk_page(
