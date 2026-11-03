@@ -26,6 +26,7 @@ use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result, ensure};
 use bigname_interpret::AdaptiveBatchConfig;
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
+use bigname_test_support::fixture_logs::allow_unmatched_in;
 use phase_runner::{
     CREATE_STAMP, EXTEND_STAMP, INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
     REQUIRED_REDO_PREFIX,
@@ -1047,6 +1048,15 @@ async fn a_retired_match_all_family_redoes_from_its_first_watched_log() -> Resul
         resolver_starts_at(profile, START + 30)
     })
     .await?;
+    let _dropped = allow_unmatched_in(
+        fixture.pool(),
+        &[(
+            UNDECLARED,
+            "the retired family's all-emitter watch was this emitter's only admission, and the \
+             test proves the redo drops its log",
+        )],
+    )
+    .await;
     fixture
         .log(START + 5, 0, UNDECLARED, &addr_changed()?)
         .await?;
@@ -1078,6 +1088,15 @@ async fn a_removed_discovery_rule_redoes_from_its_source_floor() -> Result<()> {
         registry_with_resolver_rule(profile, None, START + 30)
     })
     .await?;
+    let _below_role_start = allow_unmatched_in(
+        fixture.pool(),
+        &[(
+            REGISTRY,
+            "the registry is admitted only by its root below the rule's role start, so its \
+             registry-role logs there are dropped on the full pair too",
+        )],
+    )
+    .await;
     fixture
         .log(START + 10, 0, REGISTRY, &new_resolver(RESOLVER)?)
         .await?;
@@ -1137,6 +1156,15 @@ async fn a_removed_rule_after_a_raised_start_redoes_from_the_kept_floor() -> Res
         registry_with_resolver_rule(profile, Some(floor), floor)
     })
     .await?;
+    let _below_floor = allow_unmatched_in(
+        fixture.pool(),
+        &[(
+            REGISTRY,
+            "the test starts the registry's admission above the fixture's registration, so the \
+             full pair drops that log too",
+        )],
+    )
+    .await;
     fixture
         .log(START + 10, 0, REGISTRY, &new_resolver(RESOLVER)?)
         .await?;
@@ -1241,6 +1269,15 @@ async fn a_removed_rule_redoes_from_an_edge_it_produced_below_the_floor() -> Res
         registry_with_resolver_rule(profile, Some(floor), floor)
     })
     .await?;
+    let _below_floor = allow_unmatched_in(
+        fixture.pool(),
+        &[(
+            REGISTRY,
+            "the test starts the registry's admission above the fixture's registration, so the \
+             full pair drops that log too",
+        )],
+    )
+    .await;
     fixture
         .log(START + 10, 0, REGISTRY, &new_resolver(RESOLVER)?)
         .await?;

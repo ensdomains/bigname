@@ -6,7 +6,17 @@
 //! The stored name is the chain-data spelling ([`Relation::Stored`]), keyed for the name sort by
 //! itself, or by its first characters when it is too long for a btree entry; the timestamps are
 //! the child's name summary's, a missing one stored as [`MISSING_TIMESTAMP`] so that every sort
-//! key is a plain btree column.
+//! key is a plain btree column. The numeric keys are stored with no trailing zeros
+//! (`trim_scale`): whole seconds, as block times are, so a journalled before-image, which undo
+//! reads as JSON numbers, restores the row byte for byte (`bigname_project` `families/store.rs`).
+//! `EXTRACT(EPOCH ...)` alone gives six fractional zeros, which that round trip drops.
+//!
+//! Each row also keeps the label hashes its stored name still spells as `[labelhash]`
+//! (`unhealed_labelhashes`, from the same expressions as the name): a preimage observation derives
+//! again only the rows that hold one of the observed name's labels, on its own chain. A preimage
+//! written outside a block, such as the rainbow import (TYR-373), or observed on another chain,
+//! heals the stored names it would spell only when their rows are derived again for another
+//! reason.
 use sqlx::{Execute, Postgres, QueryBuilder, postgres::PgArguments};
 
 use super::children::{ListingBlock, Parents, Relation, push_listed};
@@ -26,7 +36,7 @@ pub const LISTING_COLUMNS: &str = "chain_id, parent_logical_name_id, child_logic
     namespace, display_key, display_name, namehash, labelhash, owner, registrant, \
     registry_authority, lifecycle_shadow, wrapper_held, released_lease, token_holder, \
     registry_address, summary_owner, registration_status, expires_key, registered_key, \
-    recompose_at";
+    recompose_at, unhealed_labelhashes";
 
 /// `head` (an `INSERT INTO <table> (LISTING_COLUMNS)`, or the start of a statement that reads
 /// the rows as a subquery) followed by the statement that selects the listing rows of `parents`
@@ -61,9 +71,11 @@ pub fn listing_rows<'a>(
                   children.released_lease, children.token_holder,
                   children.label_registry AS registry_address, children.summary_owner,
                   children.registration_status,
-                  COALESCE(children.expires_at, {MISSING_TIMESTAMP}) AS expires_key,
-                  COALESCE(children.registered_at, {MISSING_TIMESTAMP}) AS registered_key,
-                  children.recompose_at
+                  trim_scale(COALESCE(children.expires_at, {MISSING_TIMESTAMP})) AS expires_key,
+                  trim_scale(COALESCE(children.registered_at, {MISSING_TIMESTAMP}))
+                      AS registered_key,
+                  trim_scale(children.recompose_at) AS recompose_at,
+                  children.unhealed_labelhashes
            FROM children"
     ));
     builder

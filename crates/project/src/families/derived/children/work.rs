@@ -18,14 +18,22 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
                          'project_wrapper_state', 'project_lifecycle_event', 'project_name_state',
                          'project_parent_subregistry')
     ),
+    -- Every join from the journal to a family table probes that table's key, one journal row at a
+    -- time (`OFFSET 0` keeps each probe its own subquery). The journal's rows are this block's,
+    -- written in this transaction after the last ANALYZE, so the planner can count them as one
+    -- row and otherwise scan a family table whole for each.
     lifecycle AS (
         SELECT journal.before_image AS row FROM journal
         WHERE journal.family = 'project_lifecycle_event' AND journal.before_image IS NOT NULL
         UNION ALL
-        SELECT to_jsonb(event) FROM journal JOIN project_lifecycle_event event
-          ON journal.family = 'project_lifecycle_event'
-         AND event.chain_id = $1 AND event.state_kind = journal.key ->> 1
-         AND event.state_key = journal.key ->> 2 AND event.event_identity = journal.key ->> 3
+        SELECT probe.row FROM journal
+        CROSS JOIN LATERAL (
+            SELECT to_jsonb(event) AS row FROM project_lifecycle_event event
+            WHERE event.chain_id = $1 AND event.state_kind = journal.key ->> 1
+              AND event.state_key = journal.key ->> 2 AND event.event_identity = journal.key ->> 3
+            OFFSET 0
+        ) probe
+        WHERE journal.family = 'project_lifecycle_event'
     ),
     -- Each observation state is probed on its own, as the summary work list's `revealed` does,
     -- so `normalized_events_projection_idx` bounds the range to the blocks.
@@ -43,22 +51,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         ) revealed_event
         WHERE revealed_event.logical_name_id IS NOT NULL
     ),
-    -- The labels of the observed names: a label observed for one name spells every other name
-    -- that carries it.
+    -- The labels of the observed names, as the stored rows keep them: a label observed for one
+    -- name spells every other name that carries it.
     observed AS MATERIALIZED (
-        SELECT DISTINCT label.labelhash
+        SELECT array_agg(DISTINCT lower(label.labelhash)) AS labelhashes
         FROM revealed
         JOIN name_surfaces surface ON surface.logical_name_id = revealed.logical_name_id
         CROSS JOIN LATERAL unnest(surface.labelhashes) label (labelhash)
-    ),
-    -- The names with no raw bytes that carry an observed label, spelled from the label preimages
-    -- (name_surfaces_search_labelhashes_idx): as a child its own name moves, as a parent the name
-    -- of every child it lists.
-    spelled AS (
-        SELECT surface.logical_name_id
-        FROM name_surfaces surface
-        WHERE surface.raw_name IS NULL AND surface.chain_id = $1
-          AND surface.labelhashes && (SELECT array_agg(observed.labelhash) FROM observed)
     ),
     children AS (
         SELECT name.id FROM unnest($5::text[]) name (id)
@@ -71,9 +70,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         WHERE journal.family = 'project_registry_node_state'
         UNION SELECT journal.before_image ->> 'logical_name_id' FROM journal
         WHERE journal.family = 'project_wrapper_state'
-        UNION SELECT wrapper.logical_name_id FROM journal JOIN project_wrapper_state wrapper
-          ON journal.family = 'project_wrapper_state'
-         AND wrapper.chain_id = $1 AND wrapper.resource_id = (journal.key ->> 1)::uuid
+        UNION SELECT wrapper.logical_name_id FROM journal
+        CROSS JOIN LATERAL (
+            SELECT wrapper.logical_name_id FROM project_wrapper_state wrapper
+            WHERE wrapper.chain_id = $1 AND wrapper.resource_id = (journal.key ->> 1)::uuid
+            OFFSET 0
+        ) wrapper
+        WHERE journal.family = 'project_wrapper_state'
         -- A registrar lease row names its node; the relation reads it by node
         -- (children_page/child_flags.rs), under the registrar's namespace.
         UNION SELECT CASE lifecycle.row ->> 'source_family'
@@ -82,13 +85,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
                      || ':' || lower(lifecycle.row ->> 'namehash')
         FROM lifecycle
         UNION SELECT revealed.logical_name_id FROM revealed
-        UNION SELECT spelled.logical_name_id FROM spelled
-        -- An observed label spells every ENSv1 or Basenames edge child that carries it, under
-        -- any parent, with or without a surface (project_child_edge_candidate_labelhash_idx).
-        UNION SELECT edge.namespace || ':' || edge.child_node
-        FROM (SELECT DISTINCT lower(observed.labelhash) AS labelhash FROM observed) observed
-        JOIN project_child_edge_candidate edge
-          ON edge.chain_id = $1 AND edge.labelhash = observed.labelhash
+        -- A stored row whose name still spells an observed label as `[labelhash]`, its own or
+        -- its parent's, under any parent (project_child_listing_unhealed_idx). Only those rows
+        -- can spell it: a row whose name holds none of the labels keeps its name, and nothing
+        -- is derived by parent.
+        UNION SELECT listing.child_logical_name_id FROM project_child_listing listing
+        WHERE listing.chain_id = $1 AND listing.unhealed_labelhashes <> '{}'
+          AND listing.unhealed_labelhashes && (SELECT observed.labelhashes FROM observed)
         UNION SELECT listing.child_logical_name_id FROM project_child_listing listing
         WHERE listing.chain_id = $1 AND listing.recompose_at <= $4
     ),
@@ -96,9 +99,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         -- The migration columns the gate reads (topology/children.rs, `parent_migration`).
         SELECT journal.key ->> 2 AS id
         FROM journal
-        LEFT JOIN project_name_state state
-          ON state.chain_id = $1 AND state.namespace = journal.key ->> 1
-         AND state.logical_name_id = journal.key ->> 2
+        LEFT JOIN LATERAL (
+            SELECT state.migration_path, state.migration_evidence, state.migration_position
+            FROM project_name_state state
+            WHERE state.chain_id = $1 AND state.namespace = journal.key ->> 1
+              AND state.logical_name_id = journal.key ->> 2
+            OFFSET 0
+        ) state ON true
         WHERE journal.family = 'project_name_state'
           AND jsonb_build_array(
                   COALESCE(journal.before_image, '{}'::jsonb) ->> 'migration_path',
@@ -109,11 +116,6 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         UNION SELECT journal.key ->> 1 FROM journal
         WHERE journal.family = 'project_parent_subregistry'
         UNION SELECT name.id FROM unnest($6::text[]) name (id)
-        -- An observation gives the observed name's surface its raw bytes in place, and a label
-        -- observed for any name spells a parent with none: either moves the parent's spelling,
-        -- which every child it lists ends with.
-        UNION SELECT revealed.logical_name_id FROM revealed
-        UNION SELECT spelled.logical_name_id FROM spelled
         UNION SELECT surface.logical_name_id FROM name_surfaces surface
         WHERE surface.chain_id = $1 AND surface.block_number > $3 AND surface.block_number <= $2
         UNION SELECT pointer.logical_name_id
@@ -172,3 +174,7 @@ pub(super) async fn list(
     }
     Ok((children, parents))
 }
+
+#[cfg(test)]
+#[path = "work_tests.rs"]
+mod tests;

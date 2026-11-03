@@ -159,7 +159,7 @@ async fn write_migration_range(
     )
     .await?;
     let expected_orphaning_epoch = loaded.prior_cache.validated_orphaning_epoch;
-    let prepared = prepare_schema_v2_batch_incremental(
+    let prepared = prepare_checked(
         loaded.input,
         loaded.adapter_session,
         StateCacheCapacity::Entries(65_536),

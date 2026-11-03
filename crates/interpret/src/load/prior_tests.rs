@@ -6,9 +6,8 @@ use bigname_adapters::schema_v2::seam::{
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
     RawLogInput, StateCacheCapacity, begin_schema_v2_adapter_restore,
-    prepare_schema_v2_batch_incremental,
 };
-use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use bigname_test_support::{TestDatabase, TestDatabaseConfig, fixture_logs::prepare_checked};
 use serde_json::json;
 use sqlx::types::Uuid;
 use time::{Duration, OffsetDateTime};
@@ -58,7 +57,7 @@ async fn same_block_restore_replays_normalized_emission_order() -> TestResult {
     }
     .encode_log_data();
     let block_timestamp = OffsetDateTime::UNIX_EPOCH + Duration::seconds(2);
-    let prepared = prepare_schema_v2_batch_incremental(
+    let prepared = prepare_checked(
         BatchInput {
             chain_id: CHAIN.to_owned(),
             manifests: vec![manifest()],
@@ -135,7 +134,7 @@ async fn seed_retained_events(pool: &sqlx::PgPool, token: U256) -> TestResult<Uu
     .bind(CHAIN)
     .execute(pool)
     .await?;
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.to_owned(),
             manifests: vec![manifest()],

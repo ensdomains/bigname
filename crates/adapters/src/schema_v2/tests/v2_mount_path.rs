@@ -153,7 +153,7 @@ fn a_registry_event_loads_the_parent_token_that_mounts_its_registry() -> anyhow:
     assert!(!loaded.v2_keys.contains(&unrelated_key));
     assert!(!loaded.v2_keys.contains(&v2_registry_key(CONTRACT)));
 
-    let output = interpret_schema_v2_batch(input)?;
+    let output = checked_interpret(input)?;
     assert!(
         output
             .name_surfaces

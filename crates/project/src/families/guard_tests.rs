@@ -27,6 +27,7 @@ pub(super) async fn database() -> Result<(TestDatabase, PgPool)> {
         include_str!("../../../storage/schema/baseline/04_manifests.sql"),
         include_str!("../../../storage/schema/baseline/05_normalized_events.sql"),
         include_str!("../../../storage/schema/baseline/06_projections.sql"),
+        include_str!("../../../storage/schema/baseline/07_labels.sql"),
         include_str!("../../../storage/schema/baseline/09_divergence.sql"),
         include_str!("../../../storage/schema/baseline/10_phase_state.sql"),
     ] {

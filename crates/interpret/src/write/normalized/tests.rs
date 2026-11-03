@@ -2,10 +2,9 @@ use alloy_primitives::{Address, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
-    interpret_schema_v2_batch,
     seam::{LOG_INDEX_KEY, TRANSACTION_INDEX_KEY},
 };
-use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use bigname_test_support::{TestDatabase, TestDatabaseConfig, fixture_logs::interpret_checked};
 use serde_json::json;
 use time::OffsetDateTime;
 
@@ -15,8 +14,15 @@ type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 sol! {
     event RegistrarNameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
-    event RegistryNewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
-    event RegistryTransfer(bytes32 indexed node, address owner);
+}
+
+/// The ENSv1 registry events under their declared names, so each topic0 is the one the
+/// registry manifest declares.
+mod registry {
+    alloy_sol_types::sol! {
+        event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
+        event Transfer(bytes32 indexed node, address owner);
+    }
 }
 
 async fn database(name: &str) -> TestResult<TestDatabase> {
@@ -47,13 +53,13 @@ async fn registrar_only_batch_persists_resource_keyed_events_without_a_surface()
         "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae".parse()?;
     let label: alloy_primitives::B256 = U256::from(1).into();
     let node = keccak256([eth_node.as_slice(), label.as_slice()].concat());
-    let registry_encoded = RegistryNewOwner {
+    let registry_encoded = registry::NewOwner {
         node: eth_node,
         label,
         owner: "0x0000000000000000000000000000000000000042".parse()?,
     }
     .encode_log_data();
-    let transfer_encoded = RegistryTransfer {
+    let transfer_encoded = registry::Transfer {
         node,
         owner: "0x0000000000000000000000000000000000000042".parse()?,
     }
@@ -115,7 +121,7 @@ async fn registrar_only_batch_persists_resource_keyed_events_without_a_surface()
             .collect::<Vec<_>>()
     };
     let registrar = "0x0000000000000000000000000000000000000042";
-    let mut output = interpret_schema_v2_batch(BatchInput {
+    let mut output = interpret_checked(BatchInput {
         chain_id: "batch-test".to_owned(),
         manifests: vec![
             manifest(

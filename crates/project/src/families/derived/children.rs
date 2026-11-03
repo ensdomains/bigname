@@ -9,12 +9,18 @@
 //! The work list (`work.rs`) has two arms. A child is derived again, under every parent that can
 //! list it, when the block touched a fact of its own: its name summary, an ENSv1 or Basenames
 //! edge naming it, an ENSv2 registration of it, its registry node, its NameWrapper row or a
-//! registrar lifecycle row of its node, a preimage observation of its name or of one of its
-//! labels, or the second at which the migration gate stops keeping it (`recompose_at`). A
-//! parent's own facts decide every child it lists: its migration state, its ENSv2 subregistry
-//! pointer, its surface, its raw name cleared in place or spelled by an observation, and an
-//! address window of its subregistry. Such a parent is derived whole, by one statement, and
-//! every row of it is journalled.
+//! registrar lifecycle row of its node, a preimage observation of its name, an observation of a
+//! label its stored name still spells as `[labelhash]` (its own or its parent's, kept in
+//! `unhealed_labelhashes` and found by that column's index), or the second at which the
+//! migration gate stops keeping it (`recompose_at`). A parent's own facts decide every child it
+//! lists: its migration state, its ENSv2 subregistry pointer, its surface, its raw name cleared
+//! in place, and an address window of its subregistry. Such a parent is derived whole, by one
+//! statement, and every row of it is journalled. An observation derives no parent whole.
+//!
+//! The limits: a preimage written outside a block, such as the rainbow import (TYR-373), emits no
+//! observation, and an observation heals only its own chain's rows, while `label_preimages` is
+//! shared by every chain. A stored name such a preimage would spell heals only when its row is
+//! derived again for another reason. The served name applies the preimage at read meanwhile.
 //!
 //! Inputs that change in place with no block, such as a lineage readability flip or a migration
 //! registry association recorded after the parent's migration, are covered by the rebuild a hash

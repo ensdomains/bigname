@@ -927,6 +927,10 @@ fn mixed_helper_batch_attributes_children_per_log() -> anyhow::Result<()> {
 
 #[test]
 fn unmigrated_parent_leaves_no_child_evidence() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        "0xeb7c1ebe2190e1ec0697f3a79f8805e5021aad5f",
+        "the child registry is never announced because its parent never migrated, and the test proves its logs leave nothing",
+    )]);
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["H-04"];
     let addresses = &fixture["addresses"];
