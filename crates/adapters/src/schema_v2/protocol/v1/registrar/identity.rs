@@ -35,6 +35,36 @@ pub(super) fn new_registrar_identity(
     (token_lineage_id, resource_id, Some(authority_key))
 }
 
+/// The node of an admitted controller's label-bearing `NameRegistered` or `NameRenewed` that
+/// owns its lease's lifecycle (`RegistrationGranted` declared), and whether it is a registration.
+/// The controller emits it after the BaseRegistrar's numeric event for the same call.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L288-L341 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L366-L368 @ ens_v1@91c966f)
+pub(in crate::schema_v2) fn controller_lifecycle(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> Option<(String, bool)> {
+    let lifecycle = selected
+        .event
+        .normalized_events
+        .iter()
+        .any(|event| event == "RegistrationGranted");
+    let registration = match selected.event.name.as_str() {
+        "NameRegistered" => true,
+        "NameRenewed" => false,
+        _ => return None,
+    };
+    if !lifecycle
+        || selected.source.source_family != "ens_v1_registrar_l1"
+        || selected.emitter_role.as_deref() == Some("registrar")
+    {
+        return None;
+    }
+    super::decode::name(selected, raw)
+        .ok()
+        .map(|(_, labelhash, _)| (registrar_namehash(selected, labelhash), registration))
+}
+
 /// The node of a registration log and, for a numeric BaseRegistrar `NameRegistered`, its
 /// registrant. A controller's `NameRegistered` comes after every registry write of its
 /// registration, so it has no registrant here. Block reconciliation moves the registry-only

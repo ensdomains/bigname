@@ -88,17 +88,24 @@ fragment = "event ControllerRemoved(address indexed controller)"
 emitter_roles = ["registrar"]
 normalized_events = ["PermissionChanged"]
 
+# The numeric registration and renewal are the lease's own lifecycle when no
+# admitted controller event for the node follows them in the transaction, as for
+# the 2020 migration mint and a controller this profile does not admit. A
+# controller registers or renews through the BaseRegistrar before it emits its
+# label-bearing event, and that event owns the lease.
+# (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L288-L341 @ ens_v1@91c966f)
 [[abi.events]]
 name = "NameRegistered"
 fragment = "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
 emitter_roles = ["registrar"]
-normalized_events = ["RegistrationReleased"]
+normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "RegistrationReleased"]
 
 [[abi.events]]
 name = "NameRenewed"
 fragment = "event NameRenewed(uint256 indexed id, uint256 expires)"
 emitter_roles = ["registrar"]
-normalized_events = ["RegistrationRenewed", "ExpiryChanged"]
+normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
 # NameRegistered uses the canonical legacy-controller event shape:
 # (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L35 @ ens_v1@91c966f)

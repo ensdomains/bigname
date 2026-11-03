@@ -49,10 +49,10 @@ const NAME_UNWRAPPED_LOG_INDEX: i64 = 4;
 /// Mainnet has no `ens_v2_migration_l1` manifest yet, so this test loads the checked-in Sepolia
 /// profile and replaces its `ens_v1_registrar_l1` manifest with the checked-in Mainnet one,
 /// re-chained to `ethereum-sepolia` with its start blocks lowered. What that changes is the
-/// evidence shape: on Mainnet the numeric BaseRegistrar `NameRegistered`/`NameRenewed` are
-/// declared as `RegistrationReleased` and `RegistrationRenewed`+`ExpiryChanged`, not as
-/// `RegistrationGranted`, so they are not lifecycle-interpreted; the lifecycle `RegistrationGranted`
-/// comes from the controller's label-bearing `NameRegistered`, which carries `labelhash` but no
+/// evidence shape: on Mainnet the admitted wrapped controller's label-bearing `NameRegistered`
+/// follows the numeric BaseRegistrar `NameRegistered` in the registration transaction, so the
+/// controller event owns the lease and the numeric event derives no lifecycle row. The lifecycle
+/// `RegistrationGranted` comes from the controller event, which carries `labelhash` but no
 /// `token_id`. The test assumes the Sepolia migration controller addresses stand in for the
 /// Mainnet ones; nothing in the writer under test depends on which controller address it is.
 ///
@@ -106,10 +106,12 @@ async fn mainnet_declared_registrar_resolves_the_lease_of_a_wrapper_minted_regis
                 .starts_with("event NameRegistered(uint256 indexed id")
         })
         .expect("the Mainnet registrar declares the numeric NameRegistered");
-    assert_eq!(
-        numeric_registration.normalized_events,
-        ["RegistrationReleased"],
-        "the Mainnet declaration keeps the numeric NameRegistered out of lifecycle interpretation"
+    assert!(
+        numeric_registration
+            .normalized_events
+            .iter()
+            .any(|kind| kind == "RegistrationGranted"),
+        "the Mainnet registrar declares the numeric NameRegistered as a lifecycle event"
     );
     assert!(
         registrar.manifest.contracts.iter().any(|contract| {

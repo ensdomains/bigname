@@ -14,6 +14,8 @@ mod inconsistent_log_skips;
 
 #[path = "tests/lookahead.rs"]
 mod lookahead;
+#[path = "tests/mainnet_numeric_lifecycle.rs"]
+mod mainnet_numeric_lifecycle;
 mod migration;
 
 #[path = "tests/record_id_resolver.rs"]

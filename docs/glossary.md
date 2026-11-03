@@ -777,7 +777,8 @@ NameWrapper straight to the Graveyard, the cleanup transfer itself, admitted
 for a name registered straight into the NameWrapper because its controller
 grant is a registrar lifecycle event of the lease positioned before the
 cleanup. The
-Sepolia profile also indexes the numeric BaseRegistrar lifecycle events.
+Sepolia profile also indexes every numeric BaseRegistrar lifecycle event, and the
+Mainnet profile each one no admitted controller event covers.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
@@ -925,12 +926,11 @@ migration boundary.
 
 the BaseRegistrar lease of an ENSv1 `.eth` second-level name selected through a
 [registry-only handoff](#registry-only-handoff) that records no lease, or in the
-ownerless-registry profile once its registry owner is zero. The January 2020 registrar migration moved names onto the current
-BaseRegistrar with the registrar's own `NameRegistered` and no controller event,
-so bigname holds no grant for them. Their later controller renewals still name
-the lease. The implied lease is the resource of the name's latest own registrar
-lifecycle row at or after its first current-registry record, and the lifecycle
-composes the registration on it (`docs/projections.md`, registry-only bindings).
+ownerless-registry profile once its registry owner is zero. The implied lease is
+the resource of the name's latest own registrar lifecycle row at or after its first
+current-registry record, and the lifecycle composes the registration on it
+(`docs/projections.md`, registry-only bindings). A name the January 2020 registrar
+migration moved has such a row from the migration's own numeric `NameRegistered`.
 
 ## Independently admitted event
 

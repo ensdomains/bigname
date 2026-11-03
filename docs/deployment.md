@@ -5685,3 +5685,48 @@ changes. The resolver's own summary moves to the ENSv2 resolver family and manif
 
 After the redo, check on mainnet that the address's `project_resolver_classification` row is
 `ens_v2_resolver_l1` / `ensv2_resolver`, `unsupported`, with `composite_resolver_not_projected`.
+
+## Numeric BaseRegistrar lifecycle on Mainnet
+
+The build that interprets the BaseRegistrar's own numeric `NameRegistered` and `NameRenewed` on
+the Mainnet profile, except the BaseRegistrar call of an admitted controller event of the same
+kind for the same node later in the transaction ([manifests](manifests.md#ens-mainnet),
+[storage semantics](storage.md)) changes `crates/adapters/src` and
+`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`. It
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes for names:
+
+- A name the January 2020 registrar migration moved has its lease from the migration's own
+  transaction, named by its namehash whether or not its label is known. A later label import or
+  label-bearing event renames it on read and re-keys nothing.
+- A migrated name never renewed since is `expired` in grace and `released` after it, with no
+  `owner` or `manager`, like any other lapsed `.eth` name. Before, it served `active` with its
+  registry owner and no expiry.
+- A migrated name that is still live serves the same `owner`, `manager`, `expires_at` and
+  `registered_at` as before. Its selected binding is now the lease, and its address-name history
+  shows the migration contract as a registrant for the length of the migration transaction.
+- A registration or renewal through a controller this profile does not admit now keeps its lease
+  and expiry.
+- A registration or renewal through an admitted controller is interpreted exactly as before. The
+  controller's event owns it, and the numeric event in its transaction derives nothing.
+- After the ENSv2 activation, a renewal through the ENSv1 renewal bridge has no admitted
+  controller event, so its numeric `NameRenewed` renews the ENSv1 lease, as on Sepolia. The
+  lease's rows change under a name the ENSv2 arm decides, and what that name serves does not.
+- A Graveyard cleanup is still skipped and opens no lease.
+
+The manifest-authority fingerprint changes on Ethereum Mainnet. The registrar manifest now
+declares the lifecycle events of the two numeric events. Synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker), so Mainnet needs the
+token-attested full-range Interpret redo and the downstream stamped Project redo described under
+[phase-runner configuration](#phase-runner-configuration). The same event signatures, emitter and
+start block are watched, so the compiled watch plan is unchanged and no Ingest redo is needed.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The one redo per chain discharges both the hash rotation and the marker. The change
+rides the next re-derivation release and shares that release's one Interpret and Project redo
+pair with its other hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table or setting.
