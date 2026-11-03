@@ -12,6 +12,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
+mod child_listing;
 pub mod ens_v2_path;
 mod expiry_policy;
 pub use expiry_policy::expected_registration_expiry;
@@ -22,13 +23,15 @@ pub const CHAIN: &str = "ethereum-sepolia";
 pub const CONTENT_HASH: &str = bigname_test_support::PROJECTION_CONTENT_HASH;
 
 /// The tables a rebuild composes in its composition pass rather than in its ranges.
-pub const COMPOSED_TABLES: [&str; 13] = [
+pub const COMPOSED_TABLES: [&str; 15] = [
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
     "project_lookup_record",
     "project_lookup_dependency",
     "project_name_summary",
+    "project_child_listing",
+    "project_child_listing_count",
     "project_address_history_anchor",
     "project_history_source",
     "project_history_source_edge",
@@ -97,6 +100,8 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_address_record_id_index",
     "project_name_history",
     "project_name_summary",
+    "project_child_listing",
+    "project_child_listing_count",
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
@@ -213,16 +218,20 @@ impl Fixture {
             &FamilyOptions::new(CONTENT_HASH),
         )
         .await?;
-        self.check_expiry_selector(&outcome, target).await;
+        self.check_publication(chain, &outcome, target).await;
         Ok(outcome)
     }
 
-    /// Every publication a family test makes must leave an exact expiry selector.
-    async fn check_expiry_selector(&self, outcome: &FamilyOutcome, target: i64) {
+    /// Every publication a family test makes must leave an exact expiry selector, and a child
+    /// listing equal to the children relation at the published block.
+    async fn check_publication(&self, chain: &str, outcome: &FamilyOutcome, target: i64) {
         if outcome.marker.is_some() {
             self.assert_expiry_selector()
                 .await
                 .unwrap_or_else(|error| panic!("expiry selector at {target}: {error:#}"));
+            self.assert_child_listing(chain)
+                .await
+                .unwrap_or_else(|error| panic!("child listing at {target}: {error:#}"));
         }
     }
 
@@ -249,7 +258,7 @@ impl Fixture {
         let token = families::input_token(&self.pool, CHAIN).await?;
         let outcome =
             families::apply(&self.pool, CHAIN, &marker(target), mode, &token, options).await?;
-        self.check_expiry_selector(&outcome, target).await;
+        self.check_publication(CHAIN, &outcome, target).await;
         Ok(outcome)
     }
 

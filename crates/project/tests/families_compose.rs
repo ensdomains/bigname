@@ -557,11 +557,15 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
         .iter()
         .filter_map(|run| run.stream.as_i64())
         .collect();
+    // Names, then the child listing's parents (4), then the record streams and the windows.
+    let rank = |stream: i64| [0, 4, 1, 2, 3].iter().position(|each| *each == stream);
     ensure!(
-        streams.windows(2).all(|pair| pair[0] <= pair[1]),
+        streams
+            .windows(2)
+            .all(|pair| rank(pair[0]) <= rank(pair[1])),
         "the streams run in order: {streams:?}"
     );
-    for stream in 0..=3 {
+    for stream in 0..=4 {
         let cursors: Vec<&Value> = passing
             .iter()
             .filter(|run| run.stream.as_i64() == Some(stream))

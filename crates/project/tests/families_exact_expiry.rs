@@ -43,6 +43,9 @@ fn reset_tables() -> BTreeSet<&'static str> {
                     | "project_lookup_inventory"
                     | "project_lookup_record"
                     | "project_lookup_dependency"
+                    // Added later, by 20261103120000_project_child_listing.sql.
+                    | "project_child_listing"
+                    | "project_child_listing_count"
             )
         })
         .chain(CONTROL_TABLES)
