@@ -32,6 +32,7 @@ use sqlx::{Postgres, Transaction};
 use crate::{ProjectError, Result, families::input};
 
 mod sources;
+pub(crate) use sources::seed as seed_sources;
 mod work;
 
 /// Children derived per statement, to bound the working set.

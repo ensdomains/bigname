@@ -8,7 +8,9 @@
 //! (`summary.rs`), then the child listing rows they move (`children.rs`); both are journalled, so
 //! an undo restores them with the other families.
 mod children;
-pub(crate) use children::derive as derive_child_listing;
+pub(crate) use children::{
+    derive as derive_child_listing, seed_sources as seed_child_listing_sources,
+};
 mod summary;
 pub(crate) use summary::{
     CHUNK as SUMMARY_CHUNK, WORK_LIST as SUMMARY_WORK_LIST, compose as compose_summaries,
