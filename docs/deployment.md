@@ -5730,3 +5730,39 @@ rides the next re-derivation release and shares that release's one Interpret and
 pair with its other hash-rotating changes. Do not mark old rows ready under the new hash.
 
 It adds no schema-migration, table or setting.
+
+## The child listing family and its counts
+
+The build that stores each parent's listed children (TYR-455) adds the child listing family,
+`project_child_listing`, and its counts, `project_child_listing_count`
+(see [owned key families](projections.md#owned-key-families)). Project derives a listed child's
+row from the children relation at every publication, journals it with the other families, and
+keeps each parent's count and each (parent, label registry) count from the same diff. The
+composition pass derives every parent's rows in a children stream after the names stream.
+
+- It needs `20261103120000_project_child_listing.sql`. The schema-migration creates the two
+  tables and their indexes, plus `project_parent_subregistry_address_idx` and
+  `project_child_edge_candidate_labelhash_idx`, which the family step's work list reads. It
+  takes the family marker table in `EXCLUSIVE` mode first and builds the two indexes on populated
+  tables in its own transaction, so apply it in the redo's maintenance window. It resets nothing:
+  the new tables start empty and the redo fills them.
+- Apply it before starting the release. The family writer inserts into both tables, so without
+  them the first family block fails.
+- A block that moves a parent's own facts (its migration state, its ENSv2 subregistry pointer,
+  its surface, its spelling, or an address window of its subregistry) derives that parent's every
+  row in one statement and journals every changed row. Above 100,000 rows the runner logs a
+  `WARN` naming the chain, block, parent and row count, so a large undo journal can be traced to
+  its block.
+- The readers do not change in this build. The subname and label lists still compose children
+  at read.
+- The children relation moves from the reader sources to the composition sources, and the
+  family step is in `crates/project/src`, so the build rotates the
+  [projection content hash](glossary.md#projection-content-hash) for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next release that redoes Project and shares that release's
+  Project redo.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo.
