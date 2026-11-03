@@ -54,9 +54,9 @@ const SOURCES: &str = "/* project:families.derived.child_listing_sources */
     ORDER BY head.chain_id";
 
 /// The highest block of chain `$1` among its first `$3` preimage observations above block `$2`
-/// (every one with a null `$3`): the activated rows of a canonical, safe or finalized block, as
-/// the chain's own family step reads them. Each state is probed on its own, so
-/// `normalized_events_projection_idx` reads the blocks in order and stops at the limit.
+/// (every one with a null `$3`): the activated rows of a canonical, safe or finalized block.
+/// Each state is probed on its own, so `normalized_events_projection_idx` reads the blocks in
+/// order and stops at the limit.
 const CUTOFF: &str = "/* project:families.derived.child_listing_source_cutoff */
     SELECT max(first.block_number) FROM (
         SELECT event.block_number

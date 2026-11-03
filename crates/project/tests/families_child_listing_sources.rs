@@ -216,15 +216,44 @@ async fn a_label_observed_on_another_chain_heals_a_holder_at_the_next_block() ->
     fixture.cleanup().await
 }
 
-// Row 2: reading an already-read block of the other chain again derives the rows it healed
-// again and changes nothing: the listing journals nothing, and only the watermark moves back to
-// where it was.
+// Row 2: reading an already-read block of the other chain again derives again the rows that
+// still hold one of its labels and changes nothing. The child `c` of the unspelled parent `p.eth`
+// heals `c` from the observation of a name carrying `c` and `p`, whose preimage stays unknown,
+// so the row keeps `p` and the second read derives it again: the listing journals nothing, and
+// only the watermark moves back to where it was.
 #[tokio::test]
 async fn reading_an_already_read_source_block_again_changes_nothing() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_reread", 20).await?;
-    observed_elsewhere(&fixture).await?;
+    let (c, p, eth) = (labelhash("c"), labelhash("p"), labelhash("eth"));
+    preimage(&fixture, &eth, "eth").await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+             normalizer_version, visibility_state, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1, 'ens', $2, ARRAY[$3, $4], $5, 'active', $6, $7, 0, 'canonical')",
+    )
+    .bind(name(1))
+    .bind(node(1))
+    .bind(&p)
+    .bind(&eth)
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(CHAIN)
+    .bind(hash(0))
+    .execute(&fixture.pool)
+    .await?;
+    edge(&fixture, (10, 0), 1, 11, &c, OWNER).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    ensure!(unhealed(&fixture, &name(11)).await? == [c.clone(), p.clone()]);
+    source(&fixture, 7, &[&c, &p]).await?;
+    observe(&fixture, 5, 7).await?;
+    preimage(&fixture, &c, "c").await?;
     fixture.apply(12, FamilyMode::Normal).await?;
     let healed = listed(&fixture, &name(1)).await?;
+    ensure!(
+        healed[0].1 == format!("c.[{}].eth", &p[2..]),
+        "block 12 heals the child's own label: {healed:?}"
+    );
+    ensure!(unhealed(&fixture, &name(11)).await? == std::slice::from_ref(&p));
     sqlx::query(
         "UPDATE project_child_preimage_watermark SET source_block_number = 4
          WHERE chain_id = $1 AND source_chain_id = $2",
@@ -237,7 +266,7 @@ async fn reading_an_already_read_source_block_again_changes_nothing() -> Result<
     ensure!(listed(&fixture, &name(1)).await? == healed);
     ensure!(
         journalled(&fixture, 13, "project_child_listing").await? == (0, 0),
-        "the second read derives no new row"
+        "the second read derives the row again and changes nothing"
     );
     ensure!(journalled(&fixture, 13, WATERMARK).await? == (1, 1));
     ensure!(watermark(&fixture).await? == Some(5));
@@ -475,5 +504,109 @@ async fn a_block_denser_than_a_read_is_read_whole_and_passed() -> Result<()> {
     // No rebuild comparison: a rebuild reads the source again from block 0 and catches up over
     // the blocks it composes, so its watermark can stand below this one until its next steps.
     assert_served(&fixture, &name(1)).await?;
+    fixture.cleanup().await
+}
+
+// Two other chains: each has a watermark of its own, and a label each observes heals the
+// holder of that label at the next block.
+#[tokio::test]
+async fn each_other_chain_heals_its_own_labels_under_its_own_watermark() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_source_two", 20).await?;
+    let (c, d) = (labelhash("c"), labelhash("d"));
+    fixture.surface(&name(1), &node(1)).await?;
+    edge(&fixture, (10, 0), 1, 11, &c, OWNER).await?;
+    edge(&fixture, (10, 1), 1, 12, &d, OWNER).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    let second = "ethereum-holesky";
+    source(&fixture, 7, &[&c]).await?;
+    chain_with_heads(&fixture, second, Some(20), Some(20)).await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+             normalizer_version, visibility_state, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1, 'ens', $2, ARRAY[$3], $4, 'active', $5, $6, 0, 'canonical')",
+    )
+    .bind(name(8))
+    .bind(node(8))
+    .bind(&d)
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(second)
+    .bind(hash(0))
+    .execute(&fixture.pool)
+    .await?;
+    observe(&fixture, 5, 7).await?;
+    fixture
+        .event(
+            Event::new(
+                "second:9:8",
+                9,
+                0,
+                "PreimageObserved",
+                "ens_v1_registry_l1",
+            )
+            .on(second)
+            .name(&name(8)),
+        )
+        .await?;
+    preimage(&fixture, &c, "c").await?;
+    preimage(&fixture, &d, "d").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let healed = listed(&fixture, &name(1)).await?;
+    ensure!(
+        healed.iter().all(|row| !row.1.starts_with('[')),
+        "both children heal at the next block: {healed:?}"
+    );
+    ensure!(watermark(&fixture).await? == Some(5));
+    ensure!(watermark_of(&fixture, second).await? == Some(9));
+    assert_served(&fixture, &name(1)).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+// The other chain later drops the observation that healed a holder here, as an undo or a reorg
+// of its block does: the preimage stays true and `label_preimages` keeps it, so the holder stays
+// healed.
+#[tokio::test]
+async fn the_other_chain_dropping_the_observation_does_not_unheal() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_source_dropped", 20).await?;
+    observed_elsewhere(&fixture).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let healed = listed(&fixture, &name(1)).await?;
+    reorg(&fixture, 5).await?;
+    fixture.apply(13, FamilyMode::Normal).await?;
+    ensure!(listed(&fixture, &name(1)).await? == healed);
+    ensure!(unhealed(&fixture, &name(11)).await?.is_empty());
+    ensure!(journalled(&fixture, 13, "project_child_listing").await? == (0, 0));
+    assert_served(&fixture, &name(1)).await?;
+    fixture.cleanup().await
+}
+
+// An other chain with no safe or finalized head, which only a fixture or a head row before its
+// first checkpoint has: its observations are read and heal the holder, and no watermark is
+// written, so every step reads them again.
+#[tokio::test]
+async fn a_chain_with_no_finality_marker_heals_and_keeps_no_watermark() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_source_unmarked", 20).await?;
+    let (c, o) = (labelhash("c"), labelhash("o"));
+    fixture.surface(&name(1), &node(1)).await?;
+    edge(&fixture, (10, 0), 1, 11, &c, OWNER).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    chain_with_heads(&fixture, SOURCE, None, None).await?;
+    source_surface(&fixture, 7, &[&c, &o]).await?;
+    observe(&fixture, 5, 7).await?;
+    preimage(&fixture, &c, "c").await?;
+    preimage(&fixture, &o, "o").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let healed = listed(&fixture, &name(1)).await?;
+    ensure!(
+        healed[0].1.starts_with("c."),
+        "the child heals at the next block: {healed:?}"
+    );
+    ensure!(watermark(&fixture).await?.is_none());
+    ensure!(journalled(&fixture, 12, WATERMARK).await? == (0, 0));
+    fixture.apply(13, FamilyMode::Normal).await?;
+    ensure!(watermark(&fixture).await?.is_none());
+    assert_served(&fixture, &name(1)).await?;
+    fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
