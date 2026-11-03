@@ -485,11 +485,17 @@ async fn a_released_lease_serves_released_without_a_resolver_or_records() -> Res
         json!(RENEWED_EXPIRY.to_string()),
         "{data}"
     );
-    assert!(data.get("lapsed_registration").is_none(), "{data}");
+    // The lease's grant names its holder, which the release keeps as the lapsed registration's
+    // owner. A released name has no owner and no manager.
+    assert_eq!(
+        data["lapsed_registration"],
+        json!({"owner": OWNER, "released_at": seconds(RELEASED), "release_kind": "expired"}),
+        "{data}"
+    );
     assert!(data.get("resolver").is_none(), "{data}");
     assert!(data.get("records").is_none(), "{data}");
-    // The fill leaves the composed control as it is.
-    assert_eq!(data["owner"], OWNER, "{data}");
+    assert!(data.get("owner").is_none(), "{data}");
+    assert!(data.get("manager").is_none(), "{data}");
 
     let records = v2_get_json(
         &database,
@@ -856,27 +862,18 @@ async fn a_lease_with_more_events_than_the_history_window_starts_at_its_first_ev
     database.cleanup().await
 }
 
-/// The first-event statement on the long lease reads only the lease's own events. Beside the
-/// name's other events, the table holds registrar events of many other leases, unnamed, below
-/// and above the snapshot, so an index on the event kind, chain and block is unselective after
-/// ANALYZE, as on a real chain. The row pins what bounds the read, not one plan: no sequential
-/// scan, every index read keyed by the lease, and no more rows read than the lease's own events.
-/// Whether the planner reads the lease's history index backward under the limit or reads the
-/// lease's events and sorts them depends on its estimate of how many of them match, so the row
-/// does not pin that choice. Both read at most the lease's events.
-#[tokio::test]
-async fn the_first_lease_event_reads_only_the_leases_own_events() -> Result<()> {
-    let database = new_database().await?;
-    let registry = Uuid::from_u128(0x7b30);
-    let logical = seed_registry_only(&database, "migrated.eth", 0x7b30, false).await?;
-    let lease = Uuid::from_u128(0x7b3f);
-    let events = long_lease();
-    seed_lease(&database, &logical, lease, &events).await?;
-    publish(&database).await?;
+/// Registrar events of many other leases, unnamed, below and above the snapshot, beside 4000
+/// registry events of `logical` on `registry`, then ANALYZE: an index on the event kind, chain
+/// and block is unselective, as on a real chain.
+async fn seed_registrar_noise(
+    database: &TestDatabase,
+    logical: &str,
+    registry: Uuid,
+) -> Result<()> {
     let name_noise: Vec<NormalizedEvent> = (0..4000)
         .map(|log| {
             event(
-                Some(logical.as_str()),
+                Some(logical),
                 registry,
                 "AuthorityTransferred",
                 REGISTRY,
@@ -887,7 +884,7 @@ async fn the_first_lease_event_reads_only_the_leases_own_events() -> Result<()> 
         })
         .collect();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &name_noise).await?;
-    seed_v2_history_blocks(&database, HEAD + 1..=UNPUBLISHED).await?;
+    seed_v2_history_blocks(database, HEAD + 1..=UNPUBLISHED).await?;
     sqlx::raw_sql(&format!(
         "INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
          SELECT md5('legacy-lease-plan-lease:' || n)::uuid, '{CHAIN}', '{block_hash}', {HEAD},
@@ -908,18 +905,13 @@ async fn the_first_lease_event_reads_only_the_leases_own_events() -> Result<()> 
     ))
     .execute(&database.pool)
     .await?;
+    Ok(())
+}
 
-    let plan: Value = sqlx::query_scalar(&format!(
-        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
-        crate::v2::support::FIRST_LEASE_EVENT_SQL
-    ))
-    .bind(lease)
-    .bind(HEAD)
-    .bind(&logical)
-    .bind(CHAIN)
-    .fetch_one(&database.pool)
-    .await?;
-    let nodes = plan_nodes(&plan);
+/// What bounds a statement's read of `lease`, not one plan: no sequential scan, every index
+/// read keyed by the lease, no more than `lease_rows` rows read, and one row returned.
+fn assert_reads_only_the_lease(plan: &Value, lease: Uuid, lease_rows: u64) {
+    let nodes = plan_nodes(plan);
     let mut rows_read = 0;
     for node in &nodes {
         let index = node["Index Name"].as_str().unwrap_or_default();
@@ -951,11 +943,39 @@ async fn the_first_lease_event_reads_only_the_leases_own_events() -> Result<()> 
         "{plan:#}"
     );
     assert!(
-        rows_read <= events.len() as u64,
-        "{rows_read} rows read for {} lease events: {plan:#}",
-        events.len()
+        rows_read <= lease_rows,
+        "{rows_read} rows read for {lease_rows} lease events: {plan:#}"
     );
     assert_eq!(plan[0]["Plan"]["Actual Rows"], json!(1), "{plan:#}");
+}
+
+/// The first-event statement on the long lease reads only the lease's own events, beside the
+/// registrar noise of [`seed_registrar_noise`]. Whether the planner reads the lease's history
+/// index backward under the limit or reads the lease's events and sorts them depends on its
+/// estimate of how many of them match, so the row does not pin that choice. Both read at most
+/// the lease's events.
+#[tokio::test]
+async fn the_first_lease_event_reads_only_the_leases_own_events() -> Result<()> {
+    let database = new_database().await?;
+    let registry = Uuid::from_u128(0x7b30);
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7b30, false).await?;
+    let lease = Uuid::from_u128(0x7b3f);
+    let events = long_lease();
+    seed_lease(&database, &logical, lease, &events).await?;
+    publish(&database).await?;
+    seed_registrar_noise(&database, &logical, registry).await?;
+
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+        crate::v2::support::FIRST_LEASE_EVENT_SQL
+    ))
+    .bind(lease)
+    .bind(HEAD)
+    .bind(&logical)
+    .bind(CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_reads_only_the_lease(&plan, lease, events.len() as u64);
     database.cleanup().await
 }
 
@@ -1106,6 +1126,96 @@ async fn an_ownerless_name_without_a_release_serves_through_its_retained_pointer
         "{records}"
     );
     database.cleanup().await
+}
+
+/// The ownerless fixture whose lease ran out past its grace, by a later `ExpiryChanged` to a past
+/// expiry, with no release row, and with a live ENSv2 reservation of the name when `reserved`.
+/// Asserts the stored row is still the ownerless profile the fill reads.
+async fn lapsed_ownerless(reserved: bool) -> Result<TestDatabase> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_alice_state_inputs(&database, AliceInputState::Ownerless).await?;
+    append_alice_name_input(
+        &database,
+        "ExpiryChanged",
+        REGISTRAR,
+        json!({"authority_kind": "registrar", "expiry": 1_700_000_000}),
+    )
+    .await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+    if reserved {
+        let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+        let mut reservation = history_event(
+            &format!("alice-lapsed-reserved-{ordinal}"),
+            Some(&logical),
+            None,
+            Some("ethereum-mainnet"),
+            Some(21_000_003),
+            Some("0xbinding"),
+            Some("0xalice-current"),
+            Some(ordinal),
+            CanonicalityState::Canonical,
+        );
+        reservation.event_kind = "RegistrationReserved".into();
+        reservation.source_family = "ens_v2_registry_l1".into();
+        reservation.before_state = json!({});
+        reservation.after_state = json!({"source_event": "LabelReserved", "status": "reserved",
+            "expiry": 4_000_000_000_u64, "token_id": "4294967297",
+            "current_token_id": "4294967297",
+            "registry_contract_instance_id": Uuid::from_u128(0x4400).to_string()});
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &[reservation]).await?;
+    }
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    let stored = composed(&database, &logical).await?;
+    assert_eq!(
+        stored.provenance["authority_selection"]["ownerless_registry"], true,
+        "{}",
+        stored.provenance
+    );
+    for field in ["authority_kind", "resource_id", "ens_v1_expiry", "expiry"] {
+        assert!(
+            stored.declared_summary["registration"][field].is_null(),
+            "{field}: {}",
+            stored.declared_summary
+        );
+    }
+    Ok(database)
+}
+
+/// TYR-439, advisor ruling on the P2: an ownerless name whose lease ran out past its grace with
+/// no release row is served as composed. Its stored row carries no ENSv2 term (the ownerless
+/// profile drops it), so the lease alone cannot say whether a live reservation still holds the
+/// name. Name detail and lookup serve it unregistered, with no owner, manager or `authority`, and
+/// its retained registry pointer still serves its resolver and records, with a live reservation
+/// or without one.
+#[tokio::test]
+async fn an_ownerless_name_whose_lease_lapsed_is_served_as_composed() -> Result<()> {
+    for reserved in [false, true] {
+        let database = lapsed_ownerless(reserved).await?;
+        let (detail, records) = ownerless_reads(&database).await?;
+        assert_owner(&detail, None, None, "unregistered");
+        assert!(detail.get("authority").is_none(), "{reserved}: {detail}");
+        let resolver = json!("0x0000000000000000000000000000000000000abc");
+        assert_eq!(
+            detail["resolver"]["address"], resolver,
+            "{reserved}: {detail}"
+        );
+        assert_eq!(
+            records["resolver"]["address"], resolver,
+            "{reserved}: {records}"
+        );
+        assert_eq!(
+            records["records"]["text:description"],
+            json!({"status": "ok", "value": "Alice profile"}),
+            "{reserved}: {records}"
+        );
+        let record = lookup_by_name(&database, "detail", &["alice.eth"])
+            .await?
+            .remove(0);
+        assert_owner(&record, None, None, "unregistered");
+        assert!(record.get("authority").is_none(), "{reserved}: {record}");
+        database.cleanup().await?;
+    }
+    Ok(())
 }
 
 /// The alias walk is decided on the stored composed row, before the fill reads the release. That
@@ -1570,6 +1680,16 @@ async fn the_name_listing_dates_an_undated_lease_and_leaves_a_dated_one() -> Res
 /// An ENSv2 reservation of the name expiring at `LATER_EXPIRY`, as `v2_ens_v1_object.rs` seeds
 /// one on a chain whose root registry is admitted: a stored term the lease does not supply.
 async fn seed_reservation(database: &TestDatabase, logical: &str, seed: u128) -> Result<()> {
+    seed_reservation_until(database, logical, seed, LATER_EXPIRY).await
+}
+
+/// [`seed_reservation`] expiring at `expiry`, written at `RENEWED`.
+async fn seed_reservation_until(
+    database: &TestDatabase,
+    logical: &str,
+    seed: u128,
+    expiry: i64,
+) -> Result<()> {
     let mut reservation = history_event(
         &format!("legacy-lease-reservation-{seed:x}"),
         Some(logical),
@@ -1585,7 +1705,7 @@ async fn seed_reservation(database: &TestDatabase, logical: &str, seed: u128) ->
     reservation.source_family = "ens_v2_registry_l1".into();
     reservation.before_state = json!({});
     reservation.after_state = json!({"source_event": "LabelReserved", "status": "reserved",
-        "expiry": LATER_EXPIRY, "token_id": "4294967297", "current_token_id": "4294967297",
+        "expiry": expiry, "token_id": "4294967297", "current_token_id": "4294967297",
         "registry_contract_instance_id": Uuid::from_u128(seed + 0xa).to_string()});
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[reservation]).await?;
     Ok(())
@@ -1726,5 +1846,655 @@ async fn a_released_filled_name_keeps_its_stored_manager_listing() -> Result<()>
         }
     }
     assert_eq!(walked, full);
+    database.cleanup().await
+}
+
+// TYR-438 and TYR-439: the lease's holder is the name's owner.
+
+const HOLDER: &str = "0x00000000000000000000000000000000000000b7";
+const NEW_REGISTRY_OWNER: &str = "0x00000000000000000000000000000000000000c9";
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+/// The block the lease's token moves to HOLDER at, without `reclaim`.
+const MOVED: i64 = 125;
+/// The block of a later registry write to the name's node.
+const REWRITTEN: i64 = 127;
+/// A lease expiry whose grace ended before the publication's block time.
+const PAST_GRACE_EXPIRY: i64 = 1_690_000_000;
+
+/// A BaseRegistrar token transfer of `lease` to `to` at `block`, named for `logical`, as the
+/// registrar adapter writes it.
+async fn seed_transfer(
+    database: &TestDatabase,
+    logical: &str,
+    lease: Uuid,
+    block: i64,
+    to: &str,
+) -> Result<()> {
+    let transfer = event(
+        Some(logical),
+        lease,
+        "TokenControlTransferred",
+        REGISTRAR,
+        block,
+        50,
+        json!({"source_event": "Transfer", "to": to}),
+    );
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[transfer]).await?;
+    Ok(())
+}
+
+/// The release of `lease` the interpreter settles past its grace at `block`, naming `holder` as
+/// the registrant it ended.
+async fn seed_release(
+    database: &TestDatabase,
+    logical: &str,
+    lease: Uuid,
+    block: i64,
+    holder: &str,
+) -> Result<()> {
+    let mut release = event(
+        Some(logical),
+        lease,
+        "RegistrationReleased",
+        REGISTRAR,
+        block,
+        51,
+        json!({"source_event": "RegistrationReleased", "authority_kind": "registrar",
+            "expiry": RENEWED_EXPIRY}),
+    );
+    release.before_state = json!({"registrant": holder});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[release]).await?;
+    Ok(())
+}
+
+/// A current-registry write of `owner` to `name`'s node at `block`, on its registry resource. A
+/// zero owner clears the record.
+async fn seed_registry_write(
+    database: &TestDatabase,
+    logical: &str,
+    registry: Uuid,
+    name: &str,
+    block: i64,
+    owner: &str,
+) -> Result<()> {
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let mut after = json!({"source_event": "Transfer", "node": node, "owner": owner,
+        "owner_getter": owner, "registry_owner": owner, "emitter_role": "registry"});
+    if owner == ZERO_ADDRESS {
+        after["owner_getter_reason"] = json!("literal_zero");
+    }
+    let write = event(
+        Some(logical),
+        registry,
+        "AuthorityTransferred",
+        REGISTRY,
+        block,
+        52,
+        after,
+    );
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[write]).await?;
+    Ok(())
+}
+
+/// A migrated name (`seed_registry_only`) whose lease the stored registration does not carry:
+/// `lease_events` on its lease, and the token's move to HOLDER at MOVED without `reclaim`.
+/// Returns its logical id and lease.
+async fn seed_moved(
+    database: &TestDatabase,
+    name: &str,
+    seed: u128,
+    lease_events: &[(&str, i64, Option<i64>)],
+) -> Result<(String, Uuid)> {
+    let logical = seed_registry_only(database, name, seed, true).await?;
+    let lease = Uuid::from_u128(seed + 0xf);
+    seed_lease(database, &logical, lease, lease_events).await?;
+    seed_transfer(database, &logical, lease, MOVED, HOLDER).await?;
+    Ok((logical, lease))
+}
+
+/// Clears the registry record of `name` (`seed_registry_only` at `seed`) at REWRITTEN: a zero
+/// registry owner, with its registry-only binding ending there. That is the ownerless-registry
+/// profile, as the ownerless fixture of `v2_name_record.rs` seeds it.
+async fn clear_registry_record(
+    database: &TestDatabase,
+    logical: &str,
+    name: &str,
+    seed: u128,
+) -> Result<()> {
+    let registry = Uuid::from_u128(seed);
+    seed_registry_write(database, logical, registry, name, REWRITTEN, ZERO_ADDRESS).await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp($2::double precision)
+         WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 2))
+    .bind((1_700_000_000 + REWRITTEN) as f64)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+/// Removes the stored bytes of `logical`'s surface, leaving the label-hash path of `name`: a
+/// name whose labels were never learned, served by its label hashes.
+async fn drop_surface_bytes(database: &TestDatabase, logical: &str, name: &str) -> Result<()> {
+    let labelhashes: Vec<String> = name
+        .split('.')
+        .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
+        .collect();
+    let changed = sqlx::query(
+        "UPDATE name_surfaces
+         SET raw_name = NULL, raw_labels = NULL, dns_encoded_name = NULL,
+             preimage_event_identity = NULL, labelhashes = $2
+         WHERE logical_name_id = $1",
+    )
+    .bind(logical)
+    .bind(&labelhashes)
+    .execute(&database.pool)
+    .await?
+    .rows_affected();
+    anyhow::ensure!(changed == 1, "{name} has one surface");
+    Ok(())
+}
+
+/// `names` as lookup `profile` serves them, in input order.
+async fn lookup_by_name(
+    database: &TestDatabase,
+    profile: &str,
+    names: &[&str],
+) -> Result<Vec<Value>> {
+    let inputs: Vec<Value> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| json!({"id": format!("input-{index}"), "name": name}))
+        .collect();
+    let payload = v2_lookup_json(database, json!({"profile": profile, "inputs": inputs})).await?;
+    let results = payload["data"].as_array().context("lookup results")?;
+    assert_eq!(results.len(), names.len(), "{payload:#}");
+    for result in results {
+        assert_eq!(result["status"], "ok", "{payload:#}");
+    }
+    Ok(results
+        .iter()
+        .map(|result| result["record"].clone())
+        .collect())
+}
+
+/// The row of `name`'s node on `address`'s names, for every relation the fill reaches.
+async fn address_names_row(
+    database: &TestDatabase,
+    address: &str,
+    name: &str,
+) -> Result<Option<Value>> {
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let page = v2_get_json(
+        database,
+        &format!("/v1/addresses/{address}/names?namespace=ens&relation=any&page_size=200"),
+    )
+    .await?;
+    Ok(page["data"]
+        .as_array()
+        .context("address-name rows")?
+        .iter()
+        .find(|row| row["namehash"] == json!(node))
+        .cloned())
+}
+
+/// The `owner`, `manager` and `status` a route serves.
+fn assert_owner(row: &Value, owner: Option<&str>, manager: Option<&str>, status: &str) {
+    assert_eq!(
+        row.get("owner").and_then(Value::as_str),
+        owner,
+        "owner: {row}"
+    );
+    assert_eq!(
+        row.get("manager").and_then(Value::as_str),
+        manager,
+        "manager: {row}"
+    );
+    assert_eq!(row["status"], status, "status: {row}");
+}
+
+/// The stored owner of a composed row, before the fill.
+async fn stored_owner(database: &TestDatabase, logical: &str) -> Result<Value> {
+    Ok(composed(database, logical).await?.declared_summary["control"]["owner"].clone())
+}
+
+/// TYR-438: a migrated name whose BaseRegistrar token moved to HOLDER without `reclaim` is owned
+/// by HOLDER, while the registry owner stays its manager. A later `reclaim` by the holder makes it
+/// the manager too, and a registry `Transfer` to another address moves only the manager
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+/// A grant to OWNER earlier in the transfer's own block is ordered by log index, so the transfer
+/// still names HOLDER. Name detail, both lookup profiles and the address-names row agree. The row
+/// stays listed for the address the stored row names until the stored registration carries the
+/// lease.
+#[tokio::test]
+async fn a_legacy_lease_serves_its_token_holder() -> Result<()> {
+    let database = new_database().await?;
+    let cases = [
+        ("moved.eth", 0x7e10_u128, None, OWNER),
+        ("reclaimed.eth", 0x7e20, Some(HOLDER), HOLDER),
+        (
+            "set-owner.eth",
+            0x7e30,
+            Some(NEW_REGISTRY_OWNER),
+            NEW_REGISTRY_OWNER,
+        ),
+        ("same-block.eth", 0x7f10, None, OWNER),
+    ];
+    let mut logicals = Vec::new();
+    for (name, seed, rewrite, _) in cases {
+        let lease_events = if name == "same-block.eth" {
+            vec![("RegistrationGranted", MOVED, Some(RENEWED_EXPIRY))]
+        } else {
+            renewed_lease()
+        };
+        let (logical, _) = seed_moved(&database, name, seed, &lease_events).await?;
+        if let Some(owner) = rewrite {
+            let registry = Uuid::from_u128(seed);
+            seed_registry_write(&database, &logical, registry, name, REWRITTEN, owner).await?;
+        }
+        logicals.push(logical);
+    }
+    publish(&database).await?;
+
+    let names = cases.map(|(name, ..)| name);
+    let detail_records = lookup_by_name(&database, "detail", &names).await?;
+    let feed_records = lookup_by_name(&database, "feed", &names).await?;
+    for (index, (name, _, _, manager)) in cases.into_iter().enumerate() {
+        assert_composed_unleased(&database, &logicals[index]).await?;
+        assert_eq!(
+            stored_owner(&database, &logicals[index]).await?,
+            manager,
+            "{name}"
+        );
+        let data = detail(&database, name).await?;
+        assert_owner(&data, Some(HOLDER), Some(manager), "active");
+        assert_eq!(data["authority"], "ens_v1", "{data}");
+        assert_filled_lease(&data, false);
+        assert_owner(
+            &detail_records[index],
+            Some(HOLDER),
+            Some(manager),
+            "active",
+        );
+        assert_filled_lease(&feed_records[index], false);
+        let row = address_names_row(&database, manager, name)
+            .await?
+            .with_context(|| format!("{name} is listed for {manager}"))?;
+        assert_owner(&row, Some(HOLDER), Some(manager), "active");
+    }
+    database.cleanup().await
+}
+
+/// TYR-438: a name the fill serves as `released` has no owner and no manager, whichever
+/// evidence released it (docs/api-v1.md, `owner`). A lease whose release Interpret wrote keeps
+/// its last holder as the lapsed registration's owner. A lease past its expiry and grace with no
+/// release row yet is `released` by the ENSv1 schedule and serves no owner either. The same lapse
+/// on a name whose labels were never learned, served by its label hashes, is released alike.
+#[tokio::test]
+async fn a_released_status_serves_no_owner_or_manager() -> Result<()> {
+    let database = new_database().await?;
+    let (settled, settled_lease) =
+        seed_moved(&database, "settled.eth", 0x7e40, &renewed_lease()).await?;
+    seed_release(&database, &settled, settled_lease, RELEASED, HOLDER).await?;
+    let lapsed = [("RegistrationGranted", GRANTED, Some(PAST_GRACE_EXPIRY))];
+    let (unsettled, _) = seed_moved(&database, "unsettled.eth", 0x7e50, &lapsed).await?;
+    let (unlearned, _) = seed_moved(&database, "unlearned.eth", 0x7e60, &lapsed).await?;
+    drop_surface_bytes(&database, &unlearned, "unlearned.eth").await?;
+    publish(&database).await?;
+
+    let rendered = composed(&database, &unlearned).await?.normalized_name;
+    let unlearned_label = format!(
+        "[{}]",
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(b"unlearned"))
+    );
+    assert!(
+        rendered.starts_with(&format!("{unlearned_label}.")),
+        "the unlearned name is served by its label hashes: {rendered}"
+    );
+    let path = |name: &str| name.replace('[', "%5B").replace(']', "%5D");
+    let names = [
+        ("settled.eth", "settled.eth".to_owned(), &settled),
+        ("unsettled.eth", "unsettled.eth".to_owned(), &unsettled),
+        ("unlearned.eth", rendered.clone(), &unlearned),
+    ];
+    let inputs = names.each_ref().map(|(_, served, _)| served.as_str());
+    let detail_records = lookup_by_name(&database, "detail", &inputs).await?;
+    let feed_records = lookup_by_name(&database, "feed", &inputs).await?;
+    for (index, (name, served, logical)) in names.iter().enumerate() {
+        assert_composed_unleased(&database, logical).await?;
+        assert_eq!(stored_owner(&database, logical).await?, OWNER, "{name}");
+        let data = detail(&database, &path(served)).await?;
+        let expiry = if *name == "settled.eth" {
+            RENEWED_EXPIRY
+        } else {
+            PAST_GRACE_EXPIRY
+        };
+        for row in [&data, &detail_records[index]] {
+            assert_owner(row, None, None, "released");
+            assert_eq!(row["expires_at"], json!(expiry.to_string()), "{row}");
+            if *name == "settled.eth" {
+                assert_eq!(
+                    row["lapsed_registration"],
+                    json!({"owner": HOLDER, "released_at": seconds(RELEASED),
+                        "release_kind": "expired"}),
+                    "{row}"
+                );
+            } else {
+                assert!(row.get("lapsed_registration").is_none(), "{row}");
+            }
+        }
+        assert_eq!(feed_records[index]["status"], "released", "{name}");
+        let row = address_names_row(&database, OWNER, name)
+            .await?
+            .with_context(|| format!("{name} is listed for {OWNER}"))?;
+        assert_owner(&row, None, None, "released");
+    }
+    database.cleanup().await
+}
+
+/// TYR-438: a migrated name whose lease never released, under an ENSv2 reservation the stored
+/// registration takes its term from, is `released` once that reservation lapses (this chain
+/// admits no registrar grace for it, as `v2_ens_v1_object.rs` explains). It then serves no
+/// owner or manager although its lease's own events never released it.
+#[tokio::test]
+async fn a_lease_lapsed_under_a_reservation_serves_no_owner_or_manager() -> Result<()> {
+    let database = new_database().await?;
+    let name = "lapsed-reserved.eth";
+    let (logical, _) = seed_moved(&database, name, 0x7e70, &renewed_lease()).await?;
+    admit_ens_v2_root_registry(&database, CHAIN).await?;
+    let reserved_until = 1_700_000_000 + REWRITTEN;
+    seed_reservation_until(&database, &logical, 0x7e70, reserved_until).await?;
+    publish(&database).await?;
+    assert_composed_unleased(&database, &logical).await?;
+    let stored = composed(&database, &logical).await?;
+    let registration = &stored.declared_summary["registration"];
+    assert_eq!(
+        registration["lifecycle_status"], "released",
+        "{registration}"
+    );
+    assert_ne!(registration["status"], "released", "{registration}");
+    assert_eq!(
+        stored.declared_summary["control"]["owner"], OWNER,
+        "{}",
+        stored.declared_summary
+    );
+
+    let data = detail(&database, name).await?;
+    let detail_record = lookup_by_name(&database, "detail", &[name])
+        .await?
+        .remove(0);
+    for row in [&data, &detail_record] {
+        assert_owner(row, None, None, "released");
+        assert_eq!(
+            row["expires_at"],
+            json!(reserved_until.to_string()),
+            "{row}"
+        );
+    }
+    let feed = lookup_by_name(&database, "feed", &[name]).await?.remove(0);
+    assert_eq!(feed["status"], "released", "{feed}");
+    let row = address_names_row(&database, OWNER, name)
+        .await?
+        .with_context(|| format!("{name} is listed for {OWNER}"))?;
+    assert_owner(&row, None, None, "released");
+    database.cleanup().await
+}
+
+/// TYR-439: a migrated name whose holder cleared the registry record. A live lease's token
+/// holder is the owner whatever the registry owner is (docs/api-v1.md, `owner`), live or in
+/// grace, and the name serves `ens_v1` authority. The zero registry owner names no account, so
+/// the name serves no manager. A released lease serves no owner and keeps its holder as the
+/// lapsed registration's owner. A cleared record with no lease events, or with none since its
+/// first current-registry record, stays unregistered with no authority. The stored row lists
+/// these names for no address, which the fill does not change.
+#[tokio::test]
+async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
+    let database = new_database().await?;
+    let in_grace = [("RegistrationGranted", GRANTED, Some(LAPSED_EXPIRY))];
+    let cases = [
+        ("cleared-live.eth", 0x7e80_u128),
+        ("cleared-grace.eth", 0x7e90),
+        ("cleared-released.eth", 0x7ea0),
+    ];
+    let mut logicals = Vec::new();
+    for (name, seed) in cases {
+        let events = if name == "cleared-grace.eth" {
+            in_grace.to_vec()
+        } else {
+            renewed_lease()
+        };
+        let (logical, lease) = seed_moved(&database, name, seed, &events).await?;
+        clear_registry_record(&database, &logical, name, seed).await?;
+        if name == "cleared-released.eth" {
+            seed_release(&database, &logical, lease, REWRITTEN + 1, HOLDER).await?;
+        }
+        logicals.push(logical);
+    }
+    let unleased = seed_registry_only(&database, "cleared-unleased.eth", 0x7eb0, true).await?;
+    clear_registry_record(&database, &unleased, "cleared-unleased.eth", 0x7eb0).await?;
+    logicals.push(unleased);
+    seed_v2_history_blocks(&database, HANDOFF - 1..=HANDOFF - 1).await?;
+    let stale = seed_registry_only(&database, "cleared-stale.eth", 0x7f30, true).await?;
+    let stale_lease = Uuid::from_u128(0x7f3f);
+    let stale_events = [("RegistrationGranted", HANDOFF - 1, Some(RENEWED_EXPIRY))];
+    seed_lease(&database, &stale, stale_lease, &stale_events).await?;
+    seed_transfer(&database, &stale, stale_lease, HANDOFF - 1, HOLDER).await?;
+    clear_registry_record(&database, &stale, "cleared-stale.eth", 0x7f30).await?;
+    logicals.push(stale);
+    publish(&database).await?;
+
+    let names = [
+        "cleared-live.eth",
+        "cleared-grace.eth",
+        "cleared-released.eth",
+        "cleared-unleased.eth",
+        "cleared-stale.eth",
+    ];
+    let expected = [
+        (Some(HOLDER), "active", Some("ens_v1")),
+        (Some(HOLDER), "expired", Some("ens_v1")),
+        (None, "released", Some("ens_v1")),
+        (None, "unregistered", None),
+        (None, "unregistered", None),
+    ];
+    let detail_records = lookup_by_name(&database, "detail", &names).await?;
+    let feed_records = lookup_by_name(&database, "feed", &names).await?;
+    for (index, name) in names.into_iter().enumerate() {
+        let stored = composed(&database, &logicals[index]).await?;
+        assert_eq!(
+            stored.provenance["authority_selection"]["ownerless_registry"], true,
+            "{name}: {}",
+            stored.provenance
+        );
+        let (owner, status, authority) = expected[index];
+        let data = detail(&database, name).await?;
+        for row in [&data, &detail_records[index]] {
+            assert_owner(row, owner, None, status);
+            assert_eq!(
+                row.get("authority").and_then(Value::as_str),
+                authority,
+                "{row}"
+            );
+        }
+        assert_eq!(feed_records[index]["status"], status, "{name}");
+        if name == "cleared-released.eth" {
+            assert_eq!(data["lapsed_registration"]["owner"], HOLDER, "{data}");
+        }
+        for address in [HOLDER, OWNER] {
+            assert!(
+                address_names_row(&database, address, name).await?.is_none(),
+                "{name} is listed for {address}"
+            );
+        }
+    }
+    database.cleanup().await
+}
+
+/// TYR-439 with a registrar grant before the clear: the ownerless fixture, whose BaseRegistrar
+/// grant to `0x…aa` the stored registration does not carry. Its zero registry owner does not end
+/// the lease, so name detail and both lookup profiles serve the lease's status and holder,
+/// `ens_v1` authority and no manager.
+#[tokio::test]
+async fn an_ownerless_name_serves_its_lease_and_holder() -> Result<()> {
+    const GRANTEE: &str = "0x00000000000000000000000000000000000000aa";
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_alice_state_inputs(&database, AliceInputState::Ownerless).await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+    let stored = composed(&database, &logical).await?;
+    assert_eq!(
+        stored.provenance["authority_selection"]["ownerless_registry"], true,
+        "{}",
+        stored.provenance
+    );
+
+    let data = detail(&database, "alice.eth").await?;
+    let detail_record = lookup_by_name(&database, "detail", &["alice.eth"])
+        .await?
+        .remove(0);
+    for row in [&data, &detail_record] {
+        assert_owner(row, Some(GRANTEE), None, "active");
+        assert_eq!(row["authority"], "ens_v1", "{row}");
+    }
+    let feed = lookup_by_name(&database, "feed", &["alice.eth"])
+        .await?
+        .remove(0);
+    assert_eq!(feed["status"], "active", "{feed}");
+    database.cleanup().await
+}
+
+/// TYR-438: a token transfer before the name's first current-registry record names no holder,
+/// as the stored composition reads none, so the registry owner stays the owner. A lease with no
+/// lease event since that record is not the name's current lease (#1268), so its moved token
+/// changes nothing either.
+#[tokio::test]
+async fn a_transfer_before_the_first_current_record_names_no_holder() -> Result<()> {
+    let database = new_database().await?;
+    seed_v2_history_blocks(&database, HANDOFF - 1..=HANDOFF - 1).await?;
+    let cases = [
+        (
+            "early.eth",
+            0x7ec0_u128,
+            [
+                ("RegistrationRenewed", RENEWED, Some(RENEWED_EXPIRY)),
+                ("ExpiryChanged", RENEWED, Some(RENEWED_EXPIRY)),
+            ],
+        ),
+        (
+            "stale.eth",
+            0x7f20,
+            [
+                ("RegistrationGranted", HANDOFF - 1, Some(RENEWED_EXPIRY)),
+                ("ExpiryChanged", HANDOFF - 1, Some(RENEWED_EXPIRY)),
+            ],
+        ),
+    ];
+    let mut logicals = Vec::new();
+    for (name, seed, lease_events) in cases {
+        let logical = seed_registry_only(&database, name, seed, true).await?;
+        let lease = Uuid::from_u128(seed + 0xf);
+        seed_lease(&database, &logical, lease, &lease_events).await?;
+        seed_transfer(&database, &logical, lease, HANDOFF - 1, HOLDER).await?;
+        logicals.push(logical);
+    }
+    publish(&database).await?;
+
+    for ((name, ..), logical) in cases.into_iter().zip(&logicals) {
+        let provenance = assert_composed_unleased(&database, logical).await?;
+        assert_eq!(
+            provenance["authority_selection"]["registry_handoff_block_number"], HANDOFF,
+            "{name}"
+        );
+        let data = detail(&database, name).await?;
+        let detail_record = lookup_by_name(&database, "detail", &[name])
+            .await?
+            .remove(0);
+        for row in [&data, &detail_record] {
+            assert_owner(row, Some(OWNER), Some(OWNER), "active");
+            assert_eq!(
+                row["expires_at"],
+                json!(RENEWED_EXPIRY.to_string()),
+                "{row}"
+            );
+        }
+        let feed = lookup_by_name(&database, "feed", &[name]).await?.remove(0);
+        assert_eq!(feed["status"], "active", "{feed}");
+        let row = address_names_row(&database, OWNER, name)
+            .await?
+            .with_context(|| format!("{name} is listed for {OWNER}"))?;
+        assert_owner(&row, Some(OWNER), Some(OWNER), "active");
+    }
+    database.cleanup().await
+}
+
+/// TYR-438: a lease renewed 150 times and then moved still finds its holder and its latest
+/// expiry. So does a lease moved before its 150 renewals, whose transfer is older than more lease
+/// events than the fill's events window holds: the holder is read in its own statement.
+#[tokio::test]
+async fn a_heavily_renewed_legacy_lease_still_finds_its_holder() -> Result<()> {
+    let database = new_database().await?;
+    let cases = [
+        ("renewed-often.eth", 0x7ed0_u128, REWRITTEN),
+        ("moved-early.eth", 0x7ee0, GRANTED + 1),
+    ];
+    for (name, seed, moved) in cases {
+        let logical = seed_registry_only(&database, name, seed, true).await?;
+        let lease = Uuid::from_u128(seed + 0xf);
+        seed_lease(&database, &logical, lease, &long_lease()).await?;
+        seed_transfer(&database, &logical, lease, moved, HOLDER).await?;
+    }
+    publish(&database).await?;
+
+    let latest = json!((FIRST_EXPIRY + 150).to_string());
+    let names = cases.map(|(name, ..)| name);
+    let detail_records = lookup_by_name(&database, "detail", &names).await?;
+    let feed_records = lookup_by_name(&database, "feed", &names).await?;
+    for (index, name) in names.into_iter().enumerate() {
+        let data = detail(&database, name).await?;
+        for row in [&data, &detail_records[index]] {
+            assert_owner(row, Some(HOLDER), Some(OWNER), "active");
+            assert_eq!(row["expires_at"], latest, "{row}");
+        }
+        assert_eq!(feed_records[index]["expires_at"], latest, "{name}");
+        let row = address_names_row(&database, OWNER, name)
+            .await?
+            .with_context(|| format!("{name} is listed for {OWNER}"))?;
+        assert_owner(&row, Some(HOLDER), Some(OWNER), "active");
+    }
+    database.cleanup().await
+}
+
+/// The holder statement on a lease moved before its 150 renewals reads only the lease's own
+/// events, beside the registrar noise of [`seed_registrar_noise`], and names the transfer's
+/// recipient.
+#[tokio::test]
+async fn the_lease_holder_read_reads_only_the_leases_own_events() -> Result<()> {
+    let database = new_database().await?;
+    let registry = Uuid::from_u128(0x7ef0);
+    let logical = seed_registry_only(&database, "migrated.eth", 0x7ef0, true).await?;
+    let lease = Uuid::from_u128(0x7eff);
+    let events = long_lease();
+    seed_lease(&database, &logical, lease, &events).await?;
+    seed_transfer(&database, &logical, lease, GRANTED + 1, HOLDER).await?;
+    publish(&database).await?;
+    seed_registrar_noise(&database, &logical, registry).await?;
+
+    let sql = crate::v2::support::LEASE_HOLDER_SQL;
+    let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {sql}"))
+        .bind(lease)
+        .bind(HEAD)
+        .bind(Some(HANDOFF))
+        .bind(CHAIN)
+        .fetch_one(&database.pool)
+        .await?;
+    assert_reads_only_the_lease(&plan, lease, events.len() as u64 + 1);
+    let holder: Option<String> = sqlx::query_scalar(sql)
+        .bind(lease)
+        .bind(HEAD)
+        .bind(Some(HANDOFF))
+        .bind(CHAIN)
+        .fetch_optional(&database.pool)
+        .await?;
+    assert_eq!(holder.as_deref(), Some(HOLDER));
     database.cleanup().await
 }

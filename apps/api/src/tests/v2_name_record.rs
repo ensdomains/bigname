@@ -2128,12 +2128,10 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
                 json!("inventory_not_available")
             );
         } else {
-            assert_eq!(
-                payload["data"]["status"],
-                json!("unregistered")
-            );
             // The stored registration holds no lease, so name detail serves the lease the
-            // name's own registrar grant proves. The status stays as composed.
+            // name's own registrar grant proves. The zero registry owner does not end that
+            // lease: the name serves its status, its holder and `ens_v1` authority.
+            assert_eq!(payload["data"]["status"], json!("active"), "{payload}");
             assert_eq!(
                 payload["data"]["registration_id"],
                 json!(Uuid::from_u128(0x2200).to_string()),
@@ -2142,7 +2140,8 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
             assert_eq!(payload["data"]["registered_at"], json!("1704164645"), "{payload}");
             assert_eq!(payload["data"]["expires_at"], json!("1798859045"), "{payload}");
             assert_eq!(payload["data"]["grace_ends_at"], json!("1806635045"), "{payload}");
-            assert!(payload["data"]["ens_v1"].is_null(), "{payload}");
+            assert_eq!(payload["data"]["ens_v1"]["expires_at"], json!("1798859045"), "{payload}");
+            assert_eq!(payload["data"]["authority"], json!("ens_v1"), "{payload}");
             assert!(
                 payload["data"].get("token_id").is_none(),
                 "ownerless exact-name payload must not imply token control: {payload}"
@@ -2161,7 +2160,7 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
     )
     .await?;
     let lookup_record = &lookup["data"][0]["record"];
-    assert_eq!(lookup_record["status"], json!("unregistered"));
+    assert_eq!(lookup_record["status"], json!("active"), "{lookup}");
     assert!(
         lookup_record.get("token_id").is_none(),
         "ownerless batch lookup must not imply token control: {lookup}"

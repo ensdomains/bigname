@@ -401,8 +401,9 @@ collection route carry neither header.
   that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
   both apply to name results and reverse rows alike and are omitted on feed
   records, on `read_status=unsupported` records, and, for `authority`, on ownerless
-  registry rows. `profile=detail` records whose `authority` is `ens_v1` or
-  `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
+  registry rows that the read-time lease fill under
+  [`registered_at`](api-v1.md#naming-dictionary) serves no lease for.
+  `profile=detail` records whose `authority` is `ens_v1` or `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
   wrapper_fuses?, wrapper_expires_at?, wrapper_expires_at_reason?}`, the ENSv1
   lease date and NameWrapper position) exactly as
   name detail does, and so do feed records, which omit `authority` itself.
@@ -980,7 +981,12 @@ collection route carry neither header.
   registry-only name's `registration_id`. `authority` is omitted for Basenames
   names, on a supported, unregistered ownerless registry row, and on the
   `read_status=unsupported` identity-only object. A zero registry owner does not
-  remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
+  remove `authority` supplied by a retained registrar binding. Nor does it remove the
+  `authority` of an ownerless `.eth` second-level name that the read-time lease fill under
+  [`registered_at`](api-v1.md#naming-dictionary) serves a lease for, while the lease is live
+  or in grace or released by its own release row: it serves its ENSv1 arm's `authority`, the
+  lease's `status` and holder, and no `manager`. `migrated_at` is present only when ENSv2 is
+  the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
   [migration boundary](glossary.md#migration-boundary): it is the decimal Unix-seconds block
   time of that migration event, read through the event's block in the chain
@@ -1126,7 +1132,15 @@ collection route carry neither header.
   absent. Such a row omits `authority` even when an earlier ENSv1 event still
   names the arm, and it matches no `authority` filter value on
   `GET /v1/addresses/{address}/names`; a retained resolver pointer is not
-  evidence of current ownership.
+  evidence of current ownership. A `.eth` second-level name of this profile
+  that the read-time lease fill under
+  [`registered_at`](api-v1.md#naming-dictionary) serves a lease for is the
+  exception on name detail while the lease is live or in grace, or released by
+  its own release row: it serves the lease's `status`, its holder as `owner`,
+  no `manager` and its arm's `authority`, and a lease served as `released`
+  withholds the resolver. Past the lease's grace with no release row it keeps
+  the profile's stored status and control and omits `authority`. It still
+  matches no `authority` filter value on address names.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -3690,9 +3704,18 @@ introduces it rebuilds Project from full history before serving the option; see
   stored registration. A name served with the read-time lease fill described under
   [`registered_at`](api-v1.md#naming-dictionary) can therefore appear out of order
   until the stored registration carries its lease. A name that the fill serves as
-  released keeps the `relations` of its stored row and serves no `manager`, and
-  `page.total_count` still counts it. This holds until the stored registration
-  carries the release.
+  released keeps the `relations` of its stored row and serves no `owner` or `manager`, and
+  `page.total_count` still counts it. A name whose lease's holder the fill serves as `owner`
+  stays listed, with the `relations` of its stored row, for the address the stored row names,
+  and is not listed for the holder. Both hold until the stored registration carries the lease.
+  The `authority` filter matches the stored row's authority, so an ownerless name that the
+  fill serves its arm's `authority` for is not matched by that value. A `.eth` second-level
+  name whose BaseRegistrar rows are not attributed to it, typically one whose label is
+  unknown, is outside the fill and keeps its stored registration and status, so a lapsed lease
+  of such a name can still be served `active`. An ownerless name whose lease is past its
+  grace with no release row also keeps its stored status and control, because its stored row
+  carries no ENSv2 term to show whether a live reservation still holds the name. These limits
+  end at the reconcile release, whose Project redo stores the lease.
   `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `role_holder`; `any` normalizes to all
   three values. Rows match when any listed relation matches. `owner` matches

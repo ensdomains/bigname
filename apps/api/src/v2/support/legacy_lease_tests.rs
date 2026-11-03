@@ -34,6 +34,7 @@ fn event(kind: &str, block_number: i64, resource_id: &str, expiry: Option<i64>) 
         block_number,
         resource_id: resource_id.to_owned(),
         expiry,
+        implies_lease: true,
     }
 }
 
