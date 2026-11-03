@@ -55,6 +55,12 @@ async fn load_history_total_count(
         .map(|cap| i64::try_from(cap.saturating_add(1)))
         .transpose()
         .context("history total_count cap exceeds SQL limit")?;
+    #[cfg(any(test, feature = "test-support"))]
+    if super::query_plan::COUNT_SQL_DUMP_ON.load(std::sync::atomic::Ordering::SeqCst) {
+        let mut render = QueryBuilder::<Postgres>::new("");
+        push_history_count_query(&mut render, filter, canonical_only, limit);
+        super::query_plan::record_count_statement(&mut *connection, render).await?;
+    }
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_history_count_query(&mut builder, filter, canonical_only, limit);
 

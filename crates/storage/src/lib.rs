@@ -80,6 +80,8 @@ pub use evm_primitives::{
 pub use history::{
     AddressHistoryWorkingSet, history_anchor_read_test_hooks, with_address_history_working_set,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use history::{COUNT_SQL_DUMP, COUNT_SQL_DUMP_ON};
 pub use history::{
     ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter,
     HistoryBlockWindow, HistoryCataloguePublication, HistoryCataloguePublicationFence,

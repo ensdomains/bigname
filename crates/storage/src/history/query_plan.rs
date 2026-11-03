@@ -196,3 +196,45 @@ async fn explain_count_query(
     connection.close().await?;
     Ok(plan)
 }
+
+/// Throwaway red-proof seam: while on, every history and contract event count records its
+/// statement text and its bound values rendered as SQL literals.
+pub static COUNT_SQL_DUMP_ON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub static COUNT_SQL_DUMP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub(super) async fn record_count_statement(
+    connection: &mut sqlx::PgConnection,
+    mut query: QueryBuilder<'_, Postgres>,
+) -> Result<()> {
+    let sql = query.sql().to_owned();
+    let mut built = query.build();
+    let arguments = built
+        .take_arguments()
+        .map_err(anyhow::Error::from_boxed)?
+        .unwrap_or_default();
+    let count = arguments.len();
+    let placeholders = (1..=count)
+        .map(|index| format!("quote_nullable(${index})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let literals: Vec<String> = if count == 0 {
+        Vec::new()
+    } else {
+        sqlx::query_scalar_with(&format!("SELECT ARRAY[{placeholders}]"), arguments)
+            .persistent(false)
+            .fetch_one(&mut *connection)
+            .await?
+    };
+    let params = literals
+        .iter()
+        .enumerate()
+        .map(|(index, literal)| format!("-- ${} = {literal}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    COUNT_SQL_DUMP
+        .lock()
+        .expect("count dump lock")
+        .push(format!("{sql}\n{params}"));
+    Ok(())
+}

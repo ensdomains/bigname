@@ -23,6 +23,12 @@ pub async fn count_contract_events(
         .context("contract event count cap exceeds SQL limit")?;
     let mut conn = db.into().acquire().await?;
     let filter = contract_count_filter(chain_id, address, event_kinds, as_of_block);
+    #[cfg(any(test, feature = "test-support"))]
+    if super::query_plan::COUNT_SQL_DUMP_ON.load(std::sync::atomic::Ordering::SeqCst) {
+        let mut render = QueryBuilder::<Postgres>::new("");
+        push_history_count_query(&mut render, &filter, true, limit);
+        super::query_plan::record_count_statement(&mut *conn, render).await?;
+    }
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_history_count_query(&mut builder, &filter, true, limit);
     let count = builder
