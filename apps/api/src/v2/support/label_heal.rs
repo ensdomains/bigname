@@ -5,7 +5,8 @@
 //! `keccak256(text)`, wherever that labelhash appears. A served name brackets a label bigname
 //! holds no usable preimage for (docs/glossary.md, "Rendered name"), and the placeholder is
 //! reserved syntax that no normalized label takes, so replacing a placeholder whose labelhash
-//! the request proves is exact. A bracketed label of the request proves nothing.
+//! the request proves is exact. A bracketed label of the request proves nothing, except a
+//! bracketed `eth` or `base`, which the route reads as text.
 //!
 //! Only the name strings of the response change. Cursors are built from the stored rows, and
 //! order, totals and `meta` read nothing this touches.

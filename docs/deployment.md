@@ -1392,7 +1392,8 @@ The API then serves exactly as before and counts each refusal. It logs one
 warning for the first refusal of each kind, and a warning at each doubling of
 the count of other failures. A refused label is offered again by a later
 request, within the same bounds, so a grant applied to a running API takes
-effect without a restart. The counter is `label_candidate_writes_total`, by `outcome`:
+effect without a restart. An API that always reads from a hot standby can set
+`BIGNAME_API_LABEL_STAGING_PER_SECOND=0` to skip those attempts. The counter is `label_candidate_writes_total`, by `outcome`:
 `staged`, `duplicate`, `throttled`, `denied`, `read_only`, `disabled`, or
 `failed`. These settings bound the writes of one process:
 

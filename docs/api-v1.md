@@ -1428,17 +1428,20 @@ gets. Every other route, history included, serves the rendered name as before.
 After such a response is complete, the API also stages each label it showed
 this way as a candidate for the
 [rainbow-table preimage import](storage.md#rainbow-table-preimage-import), in
-`bigname_phase.ens_names`. The records route stages the labels the name row it
-read serves as placeholders, though its response carries no name. This is the
-API's only database write. No serving path reads that table, so a staged label
-changes no answer by itself. Once the operator's import proof-checks and stores
-it, every route shows the text with no request proof. The import keeps a
-preimage bigname already stores. One stored as not normalized under an older
-normalizer stays bracketed on other routes until
-`phase-runner redo --phase recompute-flags` repairs it
-([deployment](deployment.md)). The write is best effort
-and never changes or delays the response
-([deployment](deployment.md#api-label-candidates)).
+`bigname_phase.ens_names`:
+
+- The records route stages the labels the name row it read serves as
+  placeholders, though its response carries no name.
+- This is the API's only database write. It is best effort and never changes
+  or delays the response
+  ([deployment](deployment.md#api-label-candidates)).
+- No serving path reads that table, so a staged label changes no answer by
+  itself. Once the operator's import proof-checks and stores it, every route
+  shows the text with no request proof.
+- The import keeps a preimage bigname already stores. One stored as not
+  normalized under an older normalizer stays bracketed on other routes until
+  `phase-runner redo --phase recompute-flags` repairs it
+  ([chain intake, "Redo and rewind"](chain-intake.md#redo-and-rewind)).
 
 ### Manager
 
