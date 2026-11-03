@@ -4461,7 +4461,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests the exact number of bound names. Without it bound_names.page.total_count is null.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests the number of bound names, exact up to 100,000 and null above. Without it bound_names.page.total_count is null.",
             "schema": {
               "type": "array",
               "items": {

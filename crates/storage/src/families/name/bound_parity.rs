@@ -68,6 +68,7 @@ pub async fn assert_bound_names_match_the_walk(
         None,
         1,
         false,
+        None,
     )
     .await?;
     ensure!(
@@ -83,6 +84,7 @@ pub async fn assert_bound_names_match_the_walk(
         None,
         i64::try_from(whole.len())? + 1,
         false,
+        None,
     )
     .await?;
     if listed.rows != whole {
@@ -137,6 +139,7 @@ pub async fn assert_bound_names_match_the_walk(
                 cursor.as_ref(),
                 size + 1,
                 true,
+                None,
             )
             .await?;
             ensure!(
@@ -179,6 +182,7 @@ pub async fn assert_bound_names_match_the_walk(
             Some(&cursor_after(last)),
             2,
             true,
+            None,
         )
         .await?;
         ensure!(

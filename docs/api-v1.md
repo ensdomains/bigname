@@ -795,8 +795,8 @@ Rules:
   The registry overview's nested `referenced_by` page populates it only with
   `include=counts`.
   The resolver overview's nested `bound_names` page populates it only with
-  `include=total_count`, with the exact number of bound names on the page's
-  snapshot.
+  `include=total_count`, with the number of bound names on the page's
+  snapshot: exact up to 100,000 and `null` beyond.
   Other routes populate it only where a precomputed count makes it
   cheap or where they explicitly document `include=total_count`; they must not
   otherwise run unconditional full counts on the request path.

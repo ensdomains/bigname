@@ -4862,7 +4862,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
-| `include` | query | array of enum `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests the exact number of bound names. Without it bound_names.page.total_count is null. |
+| `include` | query | array of enum `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests the number of bound names, exact up to 100,000 and null above. Without it bound_names.page.total_count is null. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address} -->
@@ -4958,10 +4958,13 @@ For a registrar lease first identified by a later readable observation, registra
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
   `bound_names.page.total_count` is `null` unless the request has
-  `include=total_count`. Then it is the exact number of names in the whole
+  `include=total_count`. Then it is the number of names in the whole
   listing, counted from the same filtered names as the page on the same
   database snapshot, so it is the same on every page of an unchanged
-  publication, whatever the cursor.
+  publication, whatever the cursor. It is exact up to 100,000 names and
+  `null` above that, on every page. The count reads the listing in page order
+  and stops after 100,001 names. The rows, cursor and `has_more` do not depend
+  on it.
 - Snapshot behavior: the resolver overview and bound names read
   `bigname_phase` projections from one completed projection-phase generation. A row
   target may precede the selected position when the row was unchanged by later
