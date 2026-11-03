@@ -5123,8 +5123,9 @@ async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order
     .await?;
     assert_eq!(
         v2_subname_names(&payload),
-        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"],
-        "descending timestamp order lists rows without an expiry last"
+        vec!["alpha.parent.eth", "gamma.parent.eth", "beta.parent.eth"],
+        "descending timestamp order is the ascending order reversed, ties included, so rows \
+         without an expiry are last"
     );
 
     let payload = v2_subnames_payload_for_database(
@@ -5143,7 +5144,7 @@ async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order
     .await?;
     assert_eq!(
         v2_subname_names(&payload),
-        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+        vec!["alpha.parent.eth", "gamma.parent.eth", "beta.parent.eth"]
     );
 
     let payload = v2_subnames_payload_for_database(
@@ -5171,7 +5172,7 @@ async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order
     }
     assert_eq!(
         registered_walk,
-        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+        vec!["alpha.parent.eth", "gamma.parent.eth", "beta.parent.eth"]
     );
 
     for uri in [
@@ -5305,7 +5306,7 @@ async fn v2_get_subnames_include_expired_false_omits_past_expiry_rows() -> Resul
     .await?;
     assert_eq!(
         v2_subname_names(&payload),
-        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"]
+        vec!["alpha.parent.eth", "gamma.parent.eth", "beta.parent.eth"]
     );
 
     let payload = v2_subnames_payload_for_database(
