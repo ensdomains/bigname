@@ -62,8 +62,8 @@ jobs and their aggregates are skipped there, and a skipped check satisfies the
 ruleset. Two queued pull requests that pass separately but break each other in
 those suites are not caught by the queue, and nothing reruns those suites on
 `main`. A later pull request's full run against the updated `main` may surface
-the break, in that unrelated pull request. Native event conditions keep the
-subsequent push from running the same tests and static checks again.
+the break, in that unrelated pull request. Conditions on the ref keep the
+subsequent push to `main` from running the same tests and static checks again.
 
 The main-branch follow-up still uploads the site and refreshes the shared Cargo
 and shutdown-image caches. A cache miss can compile dependencies or build an
@@ -76,6 +76,22 @@ use or any required validation gate is removed.
 `scripts/test-container-shutdown --build-only` builds the image and exports its
 cache without running the shutdown scenario. CI uses this only to refresh a
 missing main-branch cache after the required queue validation.
+
+## CI without a pull request
+
+A push to a branch whose name starts with `ci/` runs the full suite, with the
+same jobs and steps as a pull request. Use it to run CI on a commit that is not
+ready for review, such as a failing test pushed ahead of its fix. Its checks
+report on the commit, and no pull request is needed.
+
+- Name the branch `ci/<ticket>-<purpose>`, for example `ci/tyr442-smoke`.
+- A newer push to the same branch cancels the older run.
+- The run restores the caches `main` saved and saves no cache entry of its own.
+  The repository's 10 GB cache limit would otherwise evict `main`'s entries.
+- The Rust source size ratchet compares allowances against the commit where the
+  branch left `main`, the merge base, because a push has no base branch.
+- No branch ruleset covers `ci/` branches, so they can be pushed and deleted
+  freely. Delete the branch once its run has been recorded.
 
 ## Database-backed tests
 
