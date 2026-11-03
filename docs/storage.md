@@ -736,6 +736,15 @@ Family indexes serve these concrete readers:
   `project_registry_binding_observation_target_idx`, the
   `project_registry_binding_observation` primary key and
   `project_binding_candidate_resource_idx`.
+- The resolver links page (`storage:families.topology.resolver_links`, for
+  `GET /v1/resolvers/{chain_id}/{address}/links`) walks `project_resolver_link_order_idx`,
+  `(chain_id, resolver_address, lpad(record_id, 78, '0'), node)` over the links with a
+  non-zero record, in page order from the keyset cursor, and stops at the page size. Only the
+  page's links are rendered with their names and link events. The total counts the resolver's
+  links on the same snapshot, so it reads all of them. Schema-migration
+  `20261103130000_project_resolver_link_order_index.sql` adds the index.
+  `crates/storage/src/families/topology/collections_tests.rs` checks the plan under both plan
+  modes and compares every page with the statement it replaced.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
   the registry operator read will use and no reader uses yet:
   `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
