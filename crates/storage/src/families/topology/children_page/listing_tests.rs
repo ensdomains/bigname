@@ -315,6 +315,14 @@ async fn a_filtered_total_counts_the_name_index_only() -> Result<()> {
         };
         let page = checked_page(&mut conn, PARENT, &fenced, None, None, CHILDREN as u64).await?;
         ensure!(page.total_count == CHILDREN as u64, "{}", page.total_count);
+        // `checked_page` stores the listing again, so its pages are vacuumed again for the
+        // index-only scan, and the sequential scan a 2,000-row table invites is ruled out.
+        raw_sql("VACUUM ANALYZE project_child_listing")
+            .execute(&mut *conn)
+            .await?;
+        raw_sql("SET enable_seqscan = off")
+            .execute(&mut *conn)
+            .await?;
         let query = count_query(PARENT, &fenced, None);
         raw_sql(&format!("PREPARE fenced (text, text) AS {}", query.sql()))
             .execute(&mut *conn)
@@ -333,6 +341,7 @@ async fn a_filtered_total_counts_the_name_index_only() -> Result<()> {
                 "{mode}: {plan}"
             );
         }
+        raw_sql("RESET enable_seqscan").execute(&mut *conn).await?;
         ensure!(count(&mut conn, PARENT, None).await? == CHILDREN as u64);
         Ok(())
     }

@@ -2,7 +2,7 @@
 //! every family test already checks the listing against the children relation composed at the
 //! published block, and the counts against the listing (`families_support/child_listing.rs`);
 //! these cases drive the inputs the work list keys on and check the rows, their journal, an
-//! undo and a rebuild, and today's read-time answer (`load_children_shadow_page`).
+//! undo and a rebuild, and the page the reader serves from them (`load_children_shadow_page`).
 mod families_support;
 
 use anyhow::{Result, ensure};
@@ -89,8 +89,8 @@ async fn counted(fixture: &Fixture, parent: &str) -> Result<Vec<(String, i64)>> 
     .await?)
 }
 
-/// Today's read-time answer for `parent`: every child the served relation lists, as (child,
-/// served name), in child order, and its exact total.
+/// The page the reader serves for `parent`: every child, as (child, served name), in child
+/// order, and its exact total.
 async fn served(fixture: &Fixture, parent: &str) -> Result<(Vec<(String, String)>, u64)> {
     let page = load_children_shadow_page(
         &fixture.pool,
@@ -109,7 +109,7 @@ async fn served(fixture: &Fixture, parent: &str) -> Result<(Vec<(String, String)
     Ok((rows, page.total_count))
 }
 
-/// The stored rows of `parent` equal today's read-time rows, names included, and its stored
+/// The stored rows of `parent` equal the rows the reader serves, names included, and its stored
 /// count equals the served total.
 async fn assert_served(fixture: &Fixture, parent: &str) -> Result<()> {
     let stored: Vec<(String, String)> = listed(fixture, parent)
