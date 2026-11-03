@@ -246,7 +246,14 @@ fn written(plan: &Plan, cutoff: Option<i64>, floor: Option<i64>) -> Option<i64> 
         .or(plan.reset.then_some(plan.after))
 }
 
-type SourceRow = (String, Option<i64>, bool, Option<i64>, Option<String>, Option<i64>);
+type SourceRow = (
+    String,
+    Option<i64>,
+    bool,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+);
 
 async fn sources(
     transaction: &mut Transaction<'_, Postgres>,
@@ -273,7 +280,10 @@ pub(super) async fn read(
         let stored = has_row.then_some((block.unwrap_or(-1), &revision));
         let token = input::token_in(transaction, &source).await?;
         let current = token.revision();
-        let redo_from = token.project_redo_mode.as_ref().and(token.project_redo_from);
+        let redo_from = token
+            .project_redo_mode
+            .as_ref()
+            .and(token.project_redo_from);
         let plan = plan(stored, current.as_ref(), redo_from);
         let after = plan.after;
         let limit = (!whole_tail(after, floor)).then_some(SOURCE_EVENTS);

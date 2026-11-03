@@ -527,15 +527,9 @@ async fn each_other_chain_heals_its_own_labels_under_its_own_watermark() -> Resu
     observe(&fixture, 5, 7).await?;
     fixture
         .event(
-            Event::new(
-                "second:9:8",
-                9,
-                0,
-                "PreimageObserved",
-                "ens_v1_registry_l1",
-            )
-            .on(second)
-            .name(&name(8)),
+            Event::new("second:9:8", 9, 0, "PreimageObserved", "ens_v1_registry_l1")
+                .on(second)
+                .name(&name(8)),
         )
         .await?;
     preimage(&fixture, &c, "c").await?;
