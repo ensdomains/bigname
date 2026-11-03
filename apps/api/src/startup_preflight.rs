@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use bigname_lookup::{ChainRpcUrls, RpcChainCheckError, verify_chain_rpc_url};
 use sqlx::PgPool;
 
+use crate::cli::WalkIndexSetCheck;
+
 pub(crate) async fn ensure_verified_lookup_ddl_available(pool: &PgPool) -> Result<()> {
     let phase_schema_exists = bigname_storage::phase_schema_exists(pool)
         .await
@@ -25,6 +27,15 @@ pub(crate) async fn ensure_verified_lookup_ddl_available(pool: &PgPool) -> Resul
     }
 
     Ok(())
+}
+
+/// Not implemented on this branch: the tests in `tests/walk_index_set_check.rs` run against
+/// this no-op so that each row fails on the behaviour it asserts.
+pub(crate) async fn ensure_walk_index_set(
+    _pool: &PgPool,
+    _check: WalkIndexSetCheck,
+) -> Result<usize> {
+    Ok(0)
 }
 
 /// Refuses to serve when a configured RPC endpoint answers for another chain. An endpoint that

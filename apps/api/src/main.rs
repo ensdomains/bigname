@@ -72,6 +72,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
     )
     .await?;
     startup_preflight::ensure_verified_lookup_ddl_available(&pool).await?;
+    let walk_index_set_unusable =
+        startup_preflight::ensure_walk_index_set(&pool, args.walk_index_set_check).await?;
     let health_pool = bigname_storage::connect_phase_reserved_readiness_pool(
         &args.database,
         "bigname-api-health",
@@ -141,6 +143,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         verified_rate_limit_burst = args.bounds.verified_rate_limit_burst,
         verified_rate_limit_max_clients = args.bounds.verified_rate_limit_max_clients,
         trust_x_forwarded_for = args.bounds.trust_x_forwarded_for,
+        walk_index_set_check = args.walk_index_set_check.as_str(),
+        walk_index_set_unusable,
         "API booted"
     );
 

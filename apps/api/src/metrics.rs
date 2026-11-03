@@ -22,6 +22,7 @@ struct ApiMetrics {
     ccip_gateway_destination_refused: IntCounterVec,
     http_requests_in_flight: IntGauge,
     verified_execution_in_flight: IntGauge,
+    walk_index_set_unusable: IntGauge,
 }
 
 impl ApiMetrics {
@@ -64,6 +65,11 @@ impl ApiMetrics {
             "verified_execution_in_flight",
             "Verified requests currently holding a verified-execution permit.",
         )?;
+        let walk_index_set_unusable = registry.int_gauge(
+            "walk_index_set_unusable",
+            "Indexes ops/walk-index-set/drop.sql drops that the startup check found missing, not \
+             valid and ready, or under a name another relation holds.",
+        )?;
         Ok(Self {
             registry,
             http_requests,
@@ -73,6 +79,7 @@ impl ApiMetrics {
             ccip_gateway_destination_refused,
             http_requests_in_flight,
             verified_execution_in_flight,
+            walk_index_set_unusable,
         })
     }
 }
@@ -121,6 +128,13 @@ pub(crate) fn observe_gateway_destination_refusal(class: bigname_lookup::Gateway
         class = class.as_str(),
         "CCIP-Read gateway destination refused"
     );
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_walk_index_set_unusable(count: usize) {
+    api_metrics()
+        .walk_index_set_unusable
+        .set(i64::try_from(count).unwrap_or(i64::MAX));
 }
 
 pub(crate) async fn bind(bind_addr: SocketAddr) -> anyhow::Result<MetricsServer> {

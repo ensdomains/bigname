@@ -10,6 +10,8 @@ mod openapi_responses;
 mod openapi_surface;
 #[path = "tests/seeder_equality.rs"]
 mod seeder_equality;
+#[path = "tests/walk_index_set_check.rs"]
+mod walk_index_set_check;
 
 #[tokio::test]
 async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<()> {
