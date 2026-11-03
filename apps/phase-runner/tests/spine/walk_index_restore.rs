@@ -862,8 +862,8 @@ async fn a_stop_during_the_restore_cancels_the_build_and_leaves_a_rebuildable_le
     let mut others = index_oids(scratch.pool()).await?;
     others.remove(DROPPED);
 
-    // The second runner shares the first one's database, as a chain re-entering Project in the
-    // same process does after a Verify failure cancelled its token: the cancel latched nothing.
+    // The second runner shares the first one's database, as another Project entry in the same
+    // process does after a Verify failure cancelled a chain's token: the cancel latched nothing.
     project_redo(
         &loopback_runner(&scratch, "walk-index-stopped-second-runner")?,
         chain_id,
