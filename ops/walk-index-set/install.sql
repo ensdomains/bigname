@@ -77,6 +77,8 @@ BEGIN
              $def$CREATE INDEX normalized_events_project_name_node_idx ON bigname_phase.normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (((namespace || ':'::text) || lower((after_state ->> 'node'::text))) IS NOT NULL))$def$),
             ('normalized_events_project_name_child_idx',
              $def$CREATE INDEX normalized_events_project_name_child_idx ON bigname_phase.normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'child_node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE (((event_kind = ANY (ARRAY['SubregistryChanged'::text, 'AliasChanged'::text])) OR ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])))) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (((namespace || ':'::text) || lower((after_state ->> 'child_node'::text))) IS NOT NULL))$def$),
+            ('normalized_events_v1_transfer_node_idx',
+             $def$CREATE INDEX normalized_events_v1_transfer_node_idx ON bigname_phase.normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])) AND ((after_state ->> 'source_event'::text) = 'Transfer'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_address_registrant_match_idx',
              $def$CREATE INDEX normalized_events_address_registrant_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE ((event_kind = 'RegistrationGranted'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_address_token_holder_match_idx',
@@ -85,6 +87,8 @@ BEGIN
              $def$CREATE INDEX normalized_events_address_registry_owner_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_address_root_permission_idx',
              $def$CREATE INDEX normalized_events_address_root_permission_idx ON bigname_phase.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'RootPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_registry_roles_idx',
+             $def$CREATE INDEX normalized_events_registry_roles_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), resource_id, lower((after_state ->> 'subject'::text)), block_number DESC, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((source_family = ANY (ARRAY['ens_v2_root_l1'::text, 'ens_v2_registry_l1'::text])) AND (event_kind = ANY (ARRAY['PermissionChanged'::text, 'RootPermissionChanged'::text])) AND ((after_state ->> 'source_event'::text) = 'EACRolesChanged'::text) AND (resource_id IS NOT NULL) AND ((after_state ->> 'subject'::text) IS NOT NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_project_node_history_idx',
              $def$CREATE INDEX normalized_events_project_node_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'node'::text)), block_number DESC NULLS LAST, block_hash DESC NULLS LAST, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC) WHERE ((logical_name_id IS NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state ->> 'node'::text) IS NOT NULL) AND (((event_kind = ANY (ARRAY['RecordChanged'::text, 'RecordVersionChanged'::text])) AND (source_family = ANY (ARRAY['ens_v1_resolver_l1'::text, 'ens_v2_resolver_l1'::text, 'basenames_base_resolver'::text]))) OR ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])))))$def$),
             ('normalized_events_project_v1_pointer_addressed_node_idx',
@@ -369,6 +373,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_name_child_idx
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND (namespace || ':' || lower(after_state ->> 'child_node')) IS NOT NULL;
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v1_transfer_node_idx
+    ON bigname_phase.normalized_events (chain_id, (namespace || ':' || lower(after_state ->> 'node')), block_number)
+    INCLUDE (normalized_event_id)
+    WHERE event_kind = 'AuthorityTransferred'
+      AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+      AND after_state ->> 'source_event' = 'Transfer'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_registrant_match_idx
     ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'registrant', '')))
     WHERE event_kind = 'RegistrationGranted'
@@ -395,6 +407,25 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_root_permissio
         normalized_event_id DESC
     )
     WHERE event_kind = 'RootPermissionChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_registry_roles_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(raw_fact_ref ->> 'emitting_address'),
+        resource_id,
+        lower(after_state ->> 'subject'),
+        block_number DESC,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND event_kind IN ('PermissionChanged', 'RootPermissionChanged')
+      AND after_state ->> 'source_event' = 'EACRolesChanged'
+      AND resource_id IS NOT NULL
+      AND after_state ->> 'subject' IS NOT NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
@@ -506,10 +537,12 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_pointer_before_resolver_history_idx'),
     to_regclass('bigname_phase.normalized_events_project_name_node_idx'),
     to_regclass('bigname_phase.normalized_events_project_name_child_idx'),
+    to_regclass('bigname_phase.normalized_events_v1_transfer_node_idx'),
     to_regclass('bigname_phase.normalized_events_address_registrant_match_idx'),
     to_regclass('bigname_phase.normalized_events_address_token_holder_match_idx'),
     to_regclass('bigname_phase.normalized_events_address_registry_owner_match_idx'),
     to_regclass('bigname_phase.normalized_events_address_root_permission_idx'),
+    to_regclass('bigname_phase.normalized_events_registry_roles_idx'),
     to_regclass('bigname_phase.normalized_events_project_node_history_idx'),
     to_regclass('bigname_phase.normalized_events_project_v1_pointer_addressed_node_idx')
 ) ORDER BY index_name;

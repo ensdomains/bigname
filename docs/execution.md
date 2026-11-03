@@ -114,9 +114,12 @@ arm-scoped. The supported topology classes are:
   `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
   `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f)`.
 
-Ancestor-selected paths, linked-subregistry ancestor selection,
-transport-assisted ENS paths, and CCIP-participating ENS paths remain explicit
-`unsupported` unless a retained route contract says otherwise.
+Ancestor-selected paths, linked-subregistry ancestor selection, and
+transport-assisted ENS paths remain explicit `unsupported` unless a retained
+route contract says otherwise. On every admitted ENS path, an `OffchainLookup`
+revert from the Universal Resolver is followed through the
+[CCIP-Read gateway transport](#ccip-read-gateway-transport), as it is for
+Basenames and the ENS/60 forward leg.
 
 Basenames verified resolution admits the exact-surface transport-assisted
 direct path through the manifest-selected L1 Resolver. That contract may use
@@ -136,8 +139,9 @@ selectors in the same request.
 
 For Universal Resolver ancestor discovery, `ResolverNotFound(bytes)` is a live
 `not_found` with reason `resolver_not_found` only when its embedded DNS name
-equals the request name. Other reverts fail execution, and `OffchainLookup`
-stays unsupported because ENS verified record resolution does not follow CCIP-Read.
+equals the request name. Other reverts fail execution. An `OffchainLookup`
+revert is followed through the gateway transport below, and the callback's
+answer names its effective resolver like a direct answer does.
 Every successfully decoded call for one name at one block must identify the
 same effective resolver. A `ResolverNotFound` outcome cannot coexist with a
 successfully decoded effective resolver; either inconsistency fails the request
@@ -154,6 +158,32 @@ reaches the network:
 
 - **Scheme.** Only `http` and `https` are attempted. Anything else fails the
   gateway before a request is sent.
+- **Destination.** A gateway is never fetched from a refused address. The
+  client judges the addresses it is about to connect to: the host itself when
+  the URL names an IP address, including hex, octal and shorthand IPv4 forms,
+  and every address a hostname resolves to otherwise. One refused address
+  refuses the whole name. A name that resolves differently on each query is
+  judged on each resolution, and the connection goes only to the addresses
+  just judged. The built-in refused ranges are:
+  - loopback: `127.0.0.0/8` and `::1/128`
+  - private: `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`
+  - link-local: `169.254.0.0/16` and `fe80::/10`
+  - shared address space: `100.64.0.0/10`
+  - unique local: `fc00::/7`
+  - unspecified: `0.0.0.0/8` and `::/128`
+  - multicast: `224.0.0.0/4` and `ff00::/8`
+  - reserved: `240.0.0.0/4`
+  - IPv4-compatible: `::/96`
+  - NAT64 local-use: `64:ff9b:1::/48`
+  - Teredo: `2001::/32`
+  - IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`) and 6to4
+    (`2002::/16`) addresses, judged by the IPv4 address they carry
+
+  `BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS` adds ranges on top of these. It is
+  empty by default. A refusal fails the record in band as
+  `gateway_destination_refused`. No later URL is tried, and one refused inner
+  request fails a whole `x-batch-gateway:true` query. The client ignores proxy
+  environment variables, so no proxy connects on its behalf.
 - **Redirects.** Not followed. A `3xx` is reported as an unsuccessful gateway
   status, so a URL that satisfied any origin check cannot bounce the request to
   a different host.
@@ -164,8 +194,9 @@ reaches the network:
   CCIP-Read step the resolver's URL list is tried in order, at most four URLs,
   and a timed-out or unreachable URL falls through to the next; a resolution
   follows at most four steps, each followed by one JSON-RPC callback bounded by
-  `BIGNAME_API_RPC_TIMEOUT_MS`. The `x-batch-gateway:true` form is followed
-  for at most 8 inner requests, runs at most 4 of them at a time in request
+  `BIGNAME_API_RPC_TIMEOUT_MS`. A fourth callback that still reverts with
+  `OffchainLookup` fails the record in band as `ccip_read_failed`. The
+  `x-batch-gateway:true` form is followed for at most 8 inner requests, runs at most 4 of them at a time in request
   order, and lets their decoded responses total at most the same 1 MiB; a
   longer batch fails the record in band before any request is launched, and a
   batch whose responses pass that total fails it during the fan-out. A batch
@@ -191,9 +222,8 @@ reaches the network:
   one record is therefore 6 s of gateway time in total plus up to four
   callbacks at the RPC timeout.
 
-**What is deliberately not enforced in process: destination host or IP.** The
-gateway may resolve to any address the container can route to, including link
-local and cluster internal ranges. Who chooses that destination differs by path.
+**Who chooses the gateway URL.** The destination rule above bounds where a
+gateway URL can point, not who points it. That differs by path.
 
 For Basenames the URL set is a single gateway URL read from the L1 resolver's
 contract-level `url` storage
@@ -251,11 +281,15 @@ controller, or the owner of an `Ownable` contract at that address
 — chooses only which name the forward leg looks up; in practice that is enough,
 because it can point the claim at a name whose resolver it also controls.
 bigname applies no allowlist to the resolver address or the gateway host before
-following; the only pre-fetch check is that the `OffchainLookup.sender` equals
-the Universal Resolver. Egress restriction for that case belongs to network
-policy around the API container, not to this client, and no such policy is
-described in the deployment docs today. Treat it as a prerequisite before `/v2`
-is admitted at the public edge, and see
+following. The pre-fetch checks are that the `OffchainLookup.sender` equals the
+Universal Resolver, and the destination rule above, which keeps the fetch off
+loopback, private, link-local and the other refused ranges. Network policy
+around the API container remains the second layer for any other egress
+restriction, and no such policy is described in the deployment docs today. ENS
+verified record reads make the same Universal Resolver `resolve(name, data)`
+call with the same following, so the same parties choose their gateway URLs
+and the same checks apply. Treat that network layer as a prerequisite before
+`/v2` is admitted at the public edge, and see
 [`production.md`](production.md) for the current edge posture.
 
 ## Primary-name lookup

@@ -295,6 +295,83 @@ async fn missing_hydration_rpc_fails_before_a_rebuild_publishes() -> Result<()> 
     db.cleanup().await
 }
 
+/// A hydrated string with a NUL byte, which PostgreSQL cannot store, fails the head block's
+/// write and rolls the block back. Every retry would read the same answer at the same head, so the
+/// supervised runner stops the chain on it once with a data-integrity error, and so does a run
+/// with retries off. A reverse name and a text record each reach the refusal. It is PostgreSQL's
+/// own, so a change of its wording fails here.
+#[tokio::test]
+async fn a_hydrated_nul_byte_is_not_retried() -> Result<()> {
+    for (label, text) in [
+        ("live_family_nul_reverse", false),
+        ("live_family_nul_text", true),
+    ] {
+        let db = setup(label, 2).await?;
+        if text {
+            seed_text(db.pool()).await?;
+        } else {
+            seed_reverse(db.pool(), ADDRESS).await?;
+        }
+        let rpc =
+            HydrationRpc::spawn(BTreeMap::from([(block_hash(1, 1), "a\0b.eth".into())])).await?;
+        publish(db.pool(), ETHEREUM, 1, 1, 0, 0).await?;
+        for retry_family_failures in [true, false] {
+            let error = ProjectPhase::with_hydration(db.pool().clone(), urls(&rpc.endpoint)?)
+                .with_family_settings(FamilySettings {
+                    retry_family_failures,
+                    ..FamilySettings::default()
+                })
+                .run_batch(PhaseContext {
+                    chain_id: ETHEREUM.into(),
+                    phase: PhaseName::Project,
+                    mode: RunMode::Normal,
+                    redo_attempt: None,
+                    sources: Arc::from([]),
+                    available_heads: Some(HeadMarkers {
+                        latest: BlockMarker::new(1, block_hash(1, 1))?,
+                        safe: None,
+                        finalized: None,
+                    }),
+                    live_handoff: None,
+                    resume: PhaseResume {
+                        current: Some(BlockMarker::new(0, block_hash(1, 0))?),
+                        ..Default::default()
+                    },
+                })
+                .await
+                .err()
+                .context("the NUL byte published")?;
+            let message = error.to_string();
+            assert_eq!(
+                (error.kind(), error.is_retryable()),
+                (ErrorKind::DataIntegrity, false),
+                "{label} under retry {retry_family_failures}: {message}"
+            );
+            let refusal = message.rsplit("error returned from database: ").next();
+            assert!(
+                matches!(
+                    refusal,
+                    Some(
+                        "unsupported Unicode escape sequence"
+                            | "invalid byte sequence for encoding \"UTF8\": 0x00"
+                    )
+                ),
+                "{message}"
+            );
+            let marker: i64 = sqlx::query_scalar(
+                "SELECT current_block_number FROM project_family_marker WHERE chain_id=$1",
+            )
+            .bind(ETHEREUM)
+            .fetch_one(db.pool())
+            .await?;
+            assert_eq!(marker, 0, "the refused block published nothing");
+        }
+        rpc.server.abort();
+        db.cleanup().await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn project_redo_behind_the_canonical_head_defers_hydration() -> Result<()> {
     let db = setup("live_family_redo_rpc_free", 2).await?;

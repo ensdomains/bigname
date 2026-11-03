@@ -2892,6 +2892,30 @@ async fn append_name_resolver_input(
     rebuild_fixture_families(&database.pool, chain, block, &hash).await
 }
 
+/// Drops every ENSv1 registry `ResolverChanged` of the ENS name `name` and rebuilds the families,
+/// so its row serves no resolver and records no pointer write. A pointer written to zero would
+/// make the row a registry clear, which an auto read answers from the index.
+async fn drop_name_resolver_inputs(database: &TestDatabase, name: &str) -> Result<()> {
+    let logical = bigname_storage::logical_name_id_for_name("ens", name);
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind("ethereum-mainnet")
+    .fetch_one(&database.pool)
+    .await?;
+    let dropped = sqlx::query(
+        "DELETE FROM bigname_phase.normalized_events
+         WHERE logical_name_id = $1 AND event_kind = 'ResolverChanged'
+           AND source_family = 'ens_v1_registry_l1'",
+    )
+    .bind(&logical)
+    .execute(&database.pool)
+    .await?
+    .rows_affected();
+    anyhow::ensure!(dropped > 0, "{name} has no ENSv1 registry ResolverChanged");
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+}
+
 /// Add observations to the direct ENS resolver used by seed_schema_v2_ens_record_lookup.
 async fn insert_record_lookup_fixture_writes(
     database: &TestDatabase,

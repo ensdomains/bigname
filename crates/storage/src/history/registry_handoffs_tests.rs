@@ -8,6 +8,8 @@ use super::*;
 const CHAIN: &str = "ethereum-mainnet";
 const OLD: &str = "0x0000000000000000000000000000000000000001";
 const CURRENT: &str = "0x0000000000000000000000000000000000000002";
+/// The partial index the two `AuthorityTransferred`/`Transfer` owner arms read.
+const TRANSFER_INDEX: &str = "normalized_events_v1_transfer_node_idx";
 
 #[tokio::test]
 async fn handoff_uses_earliest_exact_owner_log_and_readable_earlier_old_witness() -> Result<()> {
@@ -212,7 +214,7 @@ async fn handoff_probes_are_indexed_by_chain_and_exact_node() -> Result<()> {
                     let expected = if scan.to_string().contains("SubregistryChanged") {
                         "normalized_events_project_name_child_idx"
                     } else {
-                        "normalized_events_project_name_node_idx"
+                        TRANSFER_INDEX
                     };
                     assert_eq!(scan["Index Name"], expected, "{name}: {scan}");
                     owner_indexes.push(expected);
@@ -226,6 +228,78 @@ async fn handoff_probes_are_indexed_by_chain_and_exact_node() -> Result<()> {
     }.await;
     database.cleanup().await?;
     result
+}
+
+/// A top-level node such as `eth` is the parent of every second-level name. Each child's
+/// registry `NewOwner` log is stored under the parent's `node` twice, as a
+/// `SubregistryChanged` and as an `AuthorityTransferred` event, both with source event
+/// `NewOwner`. None of them is a `Transfer`. The Transfer arms must read an index whose key
+/// under the parent holds only the parent's own `Transfer` events, so they never visit the
+/// children's rows.
+#[tokio::test]
+async fn handoff_transfer_arms_skip_new_owner_rows_filed_under_a_top_level_node() -> Result<()> {
+    let database =
+        TestDatabase::create(TestDatabaseConfig::new("history_registry_handoff_parent")).await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        install(&mut connection).await?;
+        let parent = 7;
+        let old = insert(&mut connection, parent, "registry_old", 10, 0, 0, false).await?;
+        let first = insert(&mut connection, parent, "registry", 20, 0, 1, true).await?;
+        let parent_node = format!("0x{parent:064x}");
+        sqlx::raw_sql(&format!("INSERT INTO normalized_events(event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref)
+            SELECT 'child-'||kind||'-'||n,'ens',kind,'ens_v1_registry_l1',1,'ethereum-mainnet','block-10',10,'children',n,log,'ens_v1_unwrapped_authority','canonical',jsonb_build_object('source_event','NewOwner','emitter_role','registry','node','{parent_node}','child_node','0x'||lpad(to_hex(n+1000),64,'0'),'owner','0x0000000000000000000000000000000000000011','authority_kind','registry_only','authority_key','0x'||lpad(to_hex(n+1000),64,'0')),jsonb_build_object('emitting_address','{CURRENT}')
+            FROM generate_series(1,20000) n CROSS JOIN (VALUES ('SubregistryChanged',0),('AuthorityTransferred',1)) AS kinds(kind,log);
+            INSERT INTO normalized_events(event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref)
+            SELECT 'transfer-'||n,'ens','AuthorityTransferred','ens_v1_registry_l1',1,'ethereum-mainnet','block-10',10,'transfers',n,0,'ens_v1_unwrapped_authority','canonical',jsonb_build_object('source_event','Transfer','emitter_role','registry','node','0x'||lpad(to_hex(n+100000),64,'0'),'owner','0x0000000000000000000000000000000000000011','authority_kind','registry_only','authority_key','0x'||lpad(to_hex(n+100000),64,'0')),jsonb_build_object('emitting_address','{CURRENT}')
+            FROM generate_series(1,2000) n;
+            ANALYZE normalized_events; ANALYZE chain_lineage; SET jit=off;"))
+            .execute(&mut *connection).await?;
+        let bounds = BTreeMap::from([(CHAIN.to_owned(), 20)]);
+        let evidence = load_history_registry_handoffs(&mut connection, std::slice::from_ref(&first), &bounds).await?;
+        assert_eq!(evidence, BTreeMap::from([(first.normalized_event_id, HistoryRegistryHandoff {
+            from_registry: OLD.into(), to_registry: CURRENT.into(), old_event_id: old.normalized_event_id,
+        })]));
+        let targets = json!([target(&first, &bounds).unwrap()]);
+        let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}", handoff_sql()))
+            .bind(targets).fetch_one(&mut *connection).await?;
+        assert_eq!(plan[0]["Plan"]["Actual Rows"], 1);
+        let mut scans = Vec::new();
+        normalized_scans(&plan[0]["Plan"], &mut scans);
+        let mut transfer_scans = 0;
+        for scan in scans {
+            assert_ne!(scan["Node Type"], "Seq Scan", "unbounded scan: {scan}");
+            let transfer_arm = scan["Alias"].as_str().is_some_and(|alias| alias.starts_with("observed"))
+                && !scan.to_string().contains("SubregistryChanged");
+            if transfer_arm {
+                assert_eq!(scan_index_name(scan), TRANSFER_INDEX, "{scan}");
+                // The parent's one Transfer is the old registry's, so the current owner arm
+                // reads it and drops it by role. Any more is a child's NewOwner row.
+                let removed = scan["Rows Removed by Filter"].as_u64().unwrap_or(0);
+                assert!(removed <= 1, "the Transfer arm read the children's NewOwner rows: {scan}");
+                transfer_scans += 1;
+            }
+        }
+        assert_eq!(transfer_scans, 2, "the current and old owner Transfer arms must both be planned");
+        Ok(())
+    }.await;
+    database.cleanup().await?;
+    result
+}
+
+/// The index a scan of `normalized_events` reads, through its bitmap index scan when the
+/// planner chose a bitmap heap scan.
+fn scan_index_name(scan: &Value) -> &str {
+    scan["Index Name"]
+        .as_str()
+        .or_else(|| {
+            scan["Plans"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|child| child["Index Name"].as_str())
+        })
+        .unwrap_or("")
 }
 
 async fn insert_clear(

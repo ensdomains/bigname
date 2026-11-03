@@ -179,3 +179,179 @@ fn the_registry_read_decides_each_input_class() {
         assert_eq!(decide(&row), expected, "{class}");
     }
 }
+
+/// A row that composes its node's ENSv1 registry clear: the latest pointer write serves no
+/// resolver and the stored registry pointer is null.
+fn cleared() -> NameCurrentRow {
+    let mut row = row(Value::Null, Value::Null);
+    row.declared_summary["resolver"] =
+        json!({"chain_id": null, "address": null, "latest_event_kind": "ResolverChanged"});
+    row
+}
+
+#[test]
+fn the_registry_clear_predicate_decides_each_input_class() {
+    let with = |change: fn(&mut NameCurrentRow)| {
+        let mut row = cleared();
+        change(&mut row);
+        row
+    };
+    let cases: Vec<(&str, NameCurrentRow, bool)> = vec![
+        ("ENSv1 registry clear", cleared(), true),
+        (
+            "ens_v0 arm",
+            with(|row| row.provenance["authority_selection"]["authority_arm"] = json!("ens_v0")),
+            true,
+        ),
+        (
+            "registrar pointer family",
+            with(|row| {
+                row.provenance["resolver_pointer_source_family"] = json!("ens_v1_registrar_l1")
+            }),
+            true,
+        ),
+        (
+            "wrapper pointer family",
+            with(|row| {
+                row.provenance["resolver_pointer_source_family"] = json!("ens_v1_wrapper_l1")
+            }),
+            true,
+        ),
+        (
+            "no pointer write observed",
+            with(|row| {
+                row.declared_summary["resolver"]["latest_event_kind"] = Value::Null;
+                row.provenance
+                    .as_object_mut()
+                    .expect("provenance object")
+                    .remove("resolver_pointer_source_family");
+            }),
+            false,
+        ),
+        (
+            "no latest_event_kind",
+            with(|row| row.declared_summary["resolver"]["latest_event_kind"] = Value::Null),
+            false,
+        ),
+        (
+            "cleared ENSv1 pointer under an ENSv2 arm",
+            with(|row| {
+                row.provenance["authority_selection"]["authority_arm"] = json!("ens_v2");
+                row.provenance["resolver_pointer_source_family"] = json!("ens_v2_registry_l1");
+            }),
+            false,
+        ),
+        (
+            "ENSv2 arm with an ENSv1 family",
+            with(|row| row.provenance["authority_selection"]["authority_arm"] = json!("ens_v2")),
+            false,
+        ),
+        (
+            "ENSv2 pointer family",
+            with(|row| {
+                row.provenance["resolver_pointer_source_family"] = json!("ens_v2_registry_l1")
+            }),
+            false,
+        ),
+        (
+            "Basenames pointer family",
+            with(|row| {
+                row.provenance["resolver_pointer_source_family"] = json!("basenames_base_registry")
+            }),
+            false,
+        ),
+        (
+            "withheld, path has no resolver",
+            with(|row| {
+                row.declared_summary["unresolvable_reason"] = json!("ens_v2_path_no_resolver")
+            }),
+            false,
+        ),
+        (
+            "withheld, no live ENSv2 entry",
+            with(|row| row.declared_summary["unresolvable_reason"] = json!("no_live_ens_v2_entry")),
+            false,
+        ),
+        (
+            "path target not projected",
+            with(|row| {
+                row.declared_summary["resolution_unsupported_reason"] =
+                    json!("ens_v2_path_target_not_projected")
+            }),
+            false,
+        ),
+        (
+            "withheld live pointer: the registry names a resolver",
+            with(|row| row.declared_summary["ens_v1_resolver"] = pointer(REGISTRY)),
+            false,
+        ),
+        (
+            "no stored registry pointer",
+            with(|row| {
+                row.declared_summary
+                    .as_object_mut()
+                    .expect("summary object")
+                    .remove("ens_v1_resolver");
+            }),
+            false,
+        ),
+        (
+            "served address",
+            with(|row| {
+                row.declared_summary["resolver"]["chain_id"] = json!("ethereum-mainnet");
+                row.declared_summary["resolver"]["address"] = json!(SERVED);
+            }),
+            false,
+        ),
+        (
+            "unsupported resolver",
+            with(|row| row.declared_summary["resolver"]["status"] = json!("unsupported")),
+            false,
+        ),
+        (
+            "a DNS name",
+            with(|row| row.normalized_name = "nick.xyz".to_owned()),
+            false,
+        ),
+        (
+            "a subname",
+            with(|row| row.normalized_name = "sub.brantly.eth".to_owned()),
+            true,
+        ),
+        (
+            "ownerless registry-only subname whose path has no resolver (54.99club.eth shape)",
+            with(|row| {
+                row.normalized_name = "54.99club.eth".to_owned();
+                row.declared_summary["registration"] =
+                    json!({"status": "active", "authority_kind": "registry_only"});
+                row.declared_summary["unresolvable_reason"] = json!("ens_v2_path_no_resolver");
+            }),
+            false,
+        ),
+        (
+            "coverage keeps the resolver out",
+            with(|row| {
+                row.coverage = json!({"unsupported_reason": "current_authority_not_projected"})
+            }),
+            false,
+        ),
+        (
+            "released registration",
+            with(|row| row.declared_summary["registration"] = json!({"status": "released"})),
+            false,
+        ),
+        (
+            "no resolver block",
+            with(|row| {
+                row.declared_summary
+                    .as_object_mut()
+                    .expect("summary object")
+                    .remove("resolver");
+            }),
+            false,
+        ),
+    ];
+    for (class, row, expected) in cases {
+        assert_eq!(composed_ens_v1_registry_clear(&row), expected, "{class}");
+    }
+}

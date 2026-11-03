@@ -122,7 +122,7 @@ async fn contract_event_count_matches_feed_total_count() -> Result<()> {
         .expect("count summary")
         .total_count;
         assert_eq!(feed, 3);
-        let overview = super::count_contract_events(pool, CHAIN, EMITTER, &kinds, Some(AS_OF)).await?;
+        let overview = super::count_contract_events(pool, CHAIN, EMITTER, &kinds, Some(AS_OF), None).await?;
         assert_eq!(overview, feed, "overview counts.events differs from the feed total_count");
 
         let basenames_feed = load_event_history_page(
@@ -152,7 +152,7 @@ async fn contract_event_count_matches_feed_total_count() -> Result<()> {
         .total_count;
         assert_eq!(basenames_feed, 2);
         let basenames =
-            super::count_contract_events(pool, BASE, BASENAMES, &kinds, Some(AS_OF)).await?;
+            super::count_contract_events(pool, BASE, BASENAMES, &kinds, Some(AS_OF), None).await?;
         assert_eq!(basenames, basenames_feed, "a registry outside the ens namespace counted 0");
         Ok(())
     }

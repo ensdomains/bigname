@@ -160,7 +160,6 @@ where
             node,
             entrypoint_address: request.universal_resolver_address,
             block: &block,
-            follow_ccip: true,
             result_abi: ResolutionResultAbi::EnsUniversalResolver,
             resolver_not_found_is_not_found: true,
             rpc: &rpc,
