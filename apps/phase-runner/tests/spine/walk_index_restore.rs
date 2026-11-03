@@ -635,7 +635,6 @@ async fn restore_warns_about_a_chain_still_in_an_interpret_redo() -> Result<()> 
 
 const NON_OWNER: &str = "bigname_walk_index_non_owner_test";
 const NON_OWNER_PASSWORD: &str = "bigname-walk-index-non-owner-test";
-const NON_OWNER_LOCK: i64 = 7_312_026_110_300_457;
 
 /// A login with every row privilege on the phase schema that owns none of its tables, so it
 /// can run the phase runner's writes but cannot build an index on `normalized_events`.
@@ -645,11 +644,9 @@ async fn non_owner_database(scratch: &ScratchDatabase) -> Result<RunnerDatabase>
         .get_database()
         .context("scratch database name")?
         .replace('"', "\"\"");
+    // Roles are shared by every scratch database: a test that loses the race to create it
+    // takes the duplicate error and carries on.
     let mut transaction = scratch.pool().begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(NON_OWNER_LOCK)
-        .execute(&mut *transaction)
-        .await?;
     sqlx::raw_sql(&format!(
         "DO $role$
          BEGIN

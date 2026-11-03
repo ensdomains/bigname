@@ -158,7 +158,8 @@ stale-loop alert.
   as a login that does not own the table, shows as a restart loop with the same error each
   time.
 - A stop cancels the build on the server and leaves its invalid entry, which the next start
-  drops and builds again. Indexes already built are kept. A stop whose budget has already
+  drops and builds again. After a one-shot Interpret redo, the next start is the matching
+  Project redo, not the Interpret redo's command again. Indexes already built are kept. A stop whose budget has already
   run out sends no cancel, so the build carries on until it ends, and the next start waits
   for it.
 - While it builds, the runner records loop progress only while the build's backend is

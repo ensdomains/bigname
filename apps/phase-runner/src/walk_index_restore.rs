@@ -33,7 +33,8 @@ const PROGRESS: Duration = Duration::from_secs(30);
 const BUILD_TIMEOUT: &str = "6h";
 const RECOVERY: &str = "Project does not start until every one is in place; confirm in \
                         pg_stat_activity that no CREATE INDEX on normalized_events is still \
-                        running, then restart the runner, which drops an invalid leftover and \
+                        running, then restart the runner, or after a one-shot Interpret redo \
+                        run the matching Project redo, which drops an invalid leftover and \
                         builds it again";
 
 /// Session settings for the rebuild. Unset keeps the server's value.
@@ -397,10 +398,18 @@ impl Session {
                 .execute(&mut self.connection)
                 .await
                 .map_err(|error| match error {
-                    sqlx::Error::Database(_) => RunnerError::new(
-                        ErrorKind::Configuration,
-                        format!("PostgreSQL refused {environment}={value} as {setting}: {error}"),
-                    ),
+                    sqlx::Error::Database(ref refused)
+                        if refused
+                            .code()
+                            .is_some_and(|code| matches!(&*code, "22023" | "22003")) =>
+                    {
+                        RunnerError::new(
+                            ErrorKind::Configuration,
+                            format!(
+                                "PostgreSQL refused {environment}={value} as {setting}: {error}"
+                            ),
+                        )
+                    }
                     error => {
                         RunnerError::database("failed to set the index rebuild settings", error)
                     }
@@ -416,7 +425,8 @@ impl Session {
     }
 
     /// Refreshes the planner statistics, which expression and partial indexes lack until the
-    /// table is analyzed. A failure is a warning: Interpret and the next restore analyze again.
+    /// table is analyzed. A failure or a stop is a warning that asks for an `ANALYZE` by hand: a
+    /// later restore finds every index in place and does not analyze.
     async fn analyze(&mut self, pool: &PgPool, run: &Restore<'_>) -> RunnerResult<bool> {
         let analyzed = match sqlx::query(
             "SELECT set_config('lock_timeout', '10s', false),
@@ -431,17 +441,19 @@ impl Session {
             }
             Err(error) => Err(error),
         };
-        match analyzed {
-            Ok(done) => Ok(done),
-            Err(error) => {
-                warn!(
-                    chain_id = run.chain_id,
-                    error = %error,
-                    "could not refresh normalized_events statistics after building its indexes"
-                );
-                Ok(true)
-            }
+        let (done, error) = match analyzed {
+            Ok(done) => (done, None),
+            Err(error) => (true, Some(error.to_string())),
+        };
+        if !done || error.is_some() {
+            warn!(
+                chain_id = run.chain_id,
+                error = error.as_deref().unwrap_or("stopped"),
+                "could not refresh normalized_events statistics after building its indexes, and \
+                 no later restore does; run ANALYZE bigname_phase.normalized_events by hand"
+            );
         }
+        Ok(done)
     }
 
     /// Runs one DDL statement. `false` when a stop came first.
@@ -476,7 +488,8 @@ impl Session {
         }
         let pid = self.pid;
         let mut running = std::pin::pin!(sqlx::raw_sql(statement).execute(&mut self.connection));
-        let mut progress = tokio::time::interval(PROGRESS);
+        let mut progress =
+            tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
         progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {

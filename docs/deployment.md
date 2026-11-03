@@ -5305,6 +5305,8 @@ A release that adds an index to the drop list is deployed in this order:
    chain that build holds Project and Live for its length, so prefer building the index by
    hand first with the release's statement while the runner keeps running. The runner then
    finds it in place, builds nothing and logs no build line.
-2. The schema-migrations. A schema-migration that installs such an index adopts the valid
-   index the runner or the operator built, without a build.
+2. The schema-migrations, once the runner has logged that line or the operator's build has
+   finished. A schema-migration that installs such an index adopts the valid index the runner
+   or the operator built, without a build. Run while the build is still going, it finds an
+   invalid index under the name and fails its check.
 3. The API.
