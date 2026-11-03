@@ -67,8 +67,9 @@ impl ApiMetrics {
         )?;
         let walk_index_set_unusable = registry.int_gauge(
             "walk_index_set_unusable",
-            "Indexes ops/walk-index-set/drop.sql drops that the startup check found missing, not \
-             valid and ready, or under a name another relation holds.",
+            "Drop-list indexes (the normalized_events indexes ops/walk-index-set/drop.sql drops) \
+             that the startup check found missing, not valid and ready, or under a name another \
+             relation holds.",
         )?;
         Ok(Self {
             registry,
