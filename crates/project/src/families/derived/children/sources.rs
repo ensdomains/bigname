@@ -54,7 +54,7 @@ const SOURCE_EVENTS: i64 = 1000;
 /// Interpret revision it was read under.
 const SOURCES: &str = "/* project:families.derived.child_listing_sources */
     SELECT head.chain_id,
-           COALESCE(head.finalized_block_number, head.safe_block_number),
+           COALESCE(head.safe_block_number, head.finalized_block_number),
            watermark.chain_id IS NOT NULL,
            watermark.source_block_number,
            watermark.source_input_content_hash,
