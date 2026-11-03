@@ -5735,7 +5735,7 @@ It adds no schema-migration, table or setting.
 
 The build that stores each parent's listed children (TYR-455) adds the child listing family,
 `project_child_listing`, and its counts, `project_child_listing_count`
-(see [owned key families](projections.md#owned-key-families)). Project derives a listed child's
+(see [child listing](projections.md#child-listing)). Project derives a listed child's
 row from the children relation at every publication, journals it with the other families, and
 keeps each parent's count and each (parent, label registry) count from the same diff. The
 composition pass derives every parent's rows in a children stream after the names stream.
@@ -5753,8 +5753,24 @@ composition pass derives every parent's rows in a children stream after the name
   row in one statement and journals every changed row. Above 100,000 rows the runner logs a
   `WARN` naming the chain, block, parent and row count, so a large undo journal can be traced to
   its block.
-- The readers do not change in this build. The subname and label lists still compose children
-  at read.
+- The subnames page, the registry labels page and the child counts read the stored rows.
+  The API startup preflight requires both tables, so an API of this build refuses to start on a
+  schema without them.
+- Wire changes:
+  - The `name` sort, and every tie, orders the stored name byte by byte (C collation), where
+    the database collation ordered it before. Names whose byte order differs from that
+    collation's, such as ones with hyphens or non-ASCII characters, can change places.
+  - `order=desc` is the exact reverse of `order=asc`. Children with equal timestamps used to
+    run by name ascending in a descending page, and children with equal names by child
+    identity ascending. Both now run descending.
+  - `q` matches the stored name. It differs from the served name only for a label that the
+    rainbow-table import alone spells, which serves healed but sorts and matches by its
+    placeholder.
+  - A name longer than 2,000 bytes sorts by its first 500 characters, then child identity.
+  - A cursor issued before the change is still accepted. It resumes at its last row's position
+    in the new order, so rows the old order placed differently can be skipped or repeated, and
+    one whose last row was such a long name or an import-healed name resumes from a different
+    position. A client walking a list across the release restarts from the first page.
 - The children relation moves from the reader sources to the composition sources, and the
   family step is in `crates/project/src`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The
