@@ -1,5 +1,6 @@
 use alloy_primitives::{Address, B256, U256, hex, keccak256};
 use alloy_sol_types::{SolEvent, sol};
+use bigname_test_support::fixture_logs::allow_unmatched;
 use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -16745,6 +16746,10 @@ fn registry_approval_for_all_emits_account_permission_state() -> anyhow::Result<
 
 #[test]
 fn resolver_approval_cannot_use_match_all_fallback() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        "0x0000000000000000000000000000000000000099",
+        "the test proves an address-scoped approval from an unadmitted resolver does not fall back to match-all",
+    )]);
     let encoded = approvals::Approved {
         owner: CONTRACT.parse()?,
         node: B256::repeat_byte(0x22),
@@ -16832,6 +16837,10 @@ fn approval_admission_rejects_unknown_output_and_malformed_logs() -> anyhow::Res
 
 #[test]
 fn ens_v2_shared_resolver_signature_requires_address_admission() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        "0x0000000000000000000000000000000000000099",
+        "the test proves a shared resolver signature from an unadmitted address is not read",
+    )]);
     let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
@@ -17459,6 +17468,10 @@ fn non_malformed_error_from_undeclared_match_all_selection_is_fatal() -> anyhow:
 fn detached_resolver_loses_address_scoped_admission_in_the_same_batch() -> anyhow::Result<()> {
     const OLD_RESOLVER: &str = "0x0000000000000000000000000000000000000050";
     const NEW_RESOLVER: &str = "0x0000000000000000000000000000000000000051";
+    let _dropped = allow_unmatched(&[(
+        OLD_RESOLVER,
+        "the old resolver's record log follows its detachment in the same batch, and the test proves it is not read",
+    )]);
     let registry_id = Uuid::from_u128(50);
     let old_resolver_id = Uuid::from_u128(51);
     let mut registry_admission = admission(50, "registry");
@@ -18665,6 +18678,7 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
         input.blocks = blocks.into_values().collect();
     }
     let output = super::interpret_schema_v2_batch(input.clone())?;
+    check_fixture_logs(&input, &output);
     // Every fixture input the lookahead covers doubles as a loader-equivalence case:
     // interpreting it from lookahead-scoped state must give exactly the output of full
     // restored state.
@@ -18723,8 +18737,51 @@ fn interpret_test_batch_incremental(
         }
         input.blocks = blocks.into_values().collect();
     }
-    super::prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
-        .finish(Vec::new())
+    checked_finish(input, session)
+}
+
+bigname_test_support::fixture_log_views!(BatchInput, BatchOutput);
+
+/// Fails the test when a raw log of a finished fixture batch was neither selected nor recorded
+/// as a decode skip, unless an allowance names it (`bigname_test_support::fixture_logs`). Every
+/// batch also pins the oracle that decides this to the real selector: on the batch's input
+/// admissions, `Catalog::select` and the oracle must agree on every log.
+fn check_fixture_logs(input: &BatchInput, output: &BatchOutput) {
+    let batch = fixture_batch(input);
+    if let Ok(catalog) = super::catalog::Catalog::new(
+        input.manifests.clone(),
+        input.discovery_rules.clone(),
+        input.admissions.clone(),
+    ) {
+        let verdicts = input
+            .raw_logs
+            .iter()
+            .map(|raw| catalog.select(raw).ok().map(|selected| selected.is_some()))
+            .collect::<Vec<_>>();
+        bigname_test_support::fixture_logs::assert_matches_catalog(&batch, &verdicts);
+    }
+    bigname_test_support::fixture_logs::assert_selectable(&batch, &fixture_outcome(output));
+}
+
+/// `interpret_schema_v2_batch` with [`check_fixture_logs`].
+fn checked_interpret(input: BatchInput) -> anyhow::Result<BatchOutput> {
+    let checked = input.clone();
+    let output = super::interpret_schema_v2_batch(input)?;
+    check_fixture_logs(&checked, &output);
+    Ok(output)
+}
+
+/// One incremental batch with no reloaded state values, with [`check_fixture_logs`].
+fn checked_finish(
+    input: BatchInput,
+    session: Option<AdapterSession>,
+) -> anyhow::Result<(BatchOutput, AdapterSession)> {
+    let checked = input.clone();
+    let (output, session) =
+        super::prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
+            .finish(Vec::new())?;
+    check_fixture_logs(&checked, &output);
+    Ok((output, session))
 }
 
 #[test]
@@ -21456,6 +21513,14 @@ mod zero_owner_migration_fixture;
 mod numeric_short_lease_tests {
     use super::{numeric_short_lease_fixture as fixture, *};
 
+    /// Topics of the captured receipts that no manifest in the fixture declares.
+    const RECEIPT_TOPIC_A: &str =
+        "0x4358b8fcf4f2cad484be30167cddf20e86b2a558bc465c1ca7daf4e6f288ff25";
+    const RECEIPT_TOPIC_B: &str =
+        "0x4acabfe38b19342d926f219b03cae7c02831d64c4449ccd3d6726b8ef1f99630";
+    const CAPTURED_RECEIPT: &str =
+        "captured on-chain receipt; production drops this topic identically";
+
     fn snapshot(output: &BatchOutput) -> &NormalizedEvent {
         output
             .normalized_events
@@ -21470,10 +21535,14 @@ mod numeric_short_lease_tests {
     #[test]
     fn captured_numeric_registration_then_readable_reservation_migrates_without_a_controller()
     -> anyhow::Result<()> {
+        let _receipt = allow_unmatched(&[
+            (RECEIPT_TOPIC_A, CAPTURED_RECEIPT),
+            (RECEIPT_TOPIC_B, CAPTURED_RECEIPT),
+        ]);
         let input = fixture::input()?;
         fixture::assert_receipt_order(&input);
         let expected = fixture::fixture()?;
-        let prefix = interpret_schema_v2_batch(fixture::range(&input, 403, 406))?;
+        let prefix = checked_interpret(fixture::range(&input, 403, 406))?;
         let original = fixture::registrar_grant(&prefix);
         assert!(original.logical_name_id.is_none());
         assert!(
@@ -21482,7 +21551,7 @@ mod numeric_short_lease_tests {
                 .iter()
                 .all(|binding| Some(binding.resource_id) != original.resource_id)
         );
-        let full = interpret_schema_v2_batch(input.clone())?;
+        let full = checked_interpret(input.clone())?;
         assert_eq!(
             fixture::registrar_grant(&full),
             original,
@@ -21560,23 +21629,13 @@ mod numeric_short_lease_tests {
         );
         for split in [403, 406, 407, 414, 415] {
             let before = fixture::range(&input, 403, split);
-            let (head, session) = prepare_schema_v2_batch_incremental(
-                before.clone(),
-                None,
-                StateCacheCapacity::Unlimited,
-            )?
-            .finish(Vec::new())?;
+            let (head, session) = checked_finish(before.clone(), None)?;
             let tail = fixture::range(&input, split + 1, 416);
-            let (continued, _) = prepare_schema_v2_batch_incremental(
-                tail.clone(),
-                Some(session),
-                StateCacheCapacity::Unlimited,
-            )?
-            .finish(Vec::new())?;
+            let (continued, _) = checked_finish(tail.clone(), Some(session))?;
             let mut restored_input = tail;
             restored_input.prior_events =
                 seam::fold_prior_events(Vec::new(), &head.normalized_events, &before.blocks)?;
-            let restored = interpret_schema_v2_batch(restored_input)?;
+            let restored = checked_interpret(restored_input)?;
             assert_eq!(
                 continued, restored,
                 "cold restoration at {split} changed output"
@@ -21596,6 +21655,10 @@ mod numeric_short_lease_tests {
 
     #[test]
     fn later_trigger_time_preserves_original_numeric_registration_time() -> anyhow::Result<()> {
+        let _receipt = allow_unmatched(&[
+            (RECEIPT_TOPIC_A, CAPTURED_RECEIPT),
+            (RECEIPT_TOPIC_B, CAPTURED_RECEIPT),
+        ]);
         let mut input = fixture::input()?;
         // Explicit constructed timing variant; all captured receipt topics/data/order stay unchanged.
         for raw in input
@@ -21612,7 +21675,7 @@ mod numeric_short_lease_tests {
         {
             block.block_timestamp += time::Duration::seconds(5);
         }
-        let output = interpret_schema_v2_batch(fixture::range(&input, 403, 414))?;
+        let output = checked_interpret(fixture::range(&input, 403, 414))?;
         let snapshot = snapshot(&output);
         assert_eq!(
             snapshot.after_state["original_registered_at"],

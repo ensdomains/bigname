@@ -42,4 +42,6 @@ alloy-sol-types.workspace = true
 axum.workspace = true
 bigname-adapters.workspace = true
 bigname-domain.workspace = true
+# Turns on the fixture-log check in Interpret batches that tests run (crates/test-support/src/fixture_logs.rs).
+bigname-interpret = { workspace = true, features = ["test-support"] }
 bigname-test-support.workspace = true

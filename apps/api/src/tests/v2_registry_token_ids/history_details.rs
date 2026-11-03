@@ -244,7 +244,7 @@ async fn v2_history_details_preserve_resolver_role_words_without_display_metadat
             log
         })
         .collect();
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests: vec![manifest.clone()],

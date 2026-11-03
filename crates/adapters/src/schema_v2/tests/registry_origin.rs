@@ -213,6 +213,17 @@ fn origins_of_every_declared_implementation_are_kept() -> anyhow::Result<()> {
 /// declares only under another role.
 #[test]
 fn origins_outside_the_declared_set_are_not_kept() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[
+        (
+            "0x77510ba162dfea3d8989e3f0928a691b345730d2",
+            "the test proves a factory outside the declared set announces nothing",
+        ),
+        (
+            HELPER,
+            "the test proves a ProxyDeployed from the migration helper, declared under another \
+             role, announces nothing",
+        ),
+    ]);
     let starting = |from: i64| {
         vec![
             Declared("verifiable_factory", FACTORY, 1, None),

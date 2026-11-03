@@ -12,8 +12,9 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AdapterSession, AddressAdmissionInput, BatchInput, BatchOutput, ManifestInput, RawBlockInput,
-    RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    RawLogInput, StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 const CHAIN: &str = "ethereum-mainnet";
 pub(super) const REGISTRY_MANIFEST: i64 = 961;
@@ -147,8 +148,7 @@ fn interpret(
         raw_logs,
     };
     let (output, session) =
-        prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
-            .finish(Vec::new())?;
+        prepare_checked(input, session, StateCacheCapacity::Unlimited)?.finish(Vec::new())?;
     assert!(output.decode_skips.is_empty(), "{:?}", output.decode_skips);
     Ok((output, session))
 }

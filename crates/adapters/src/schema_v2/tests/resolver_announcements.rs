@@ -304,6 +304,10 @@ fn upgraded_naming_a_declared_implementation_admits_the_proxy_from_that_block() 
 #[test]
 fn upgraded_naming_an_undeclared_implementation_is_not_selected_from_an_unknown_emitter()
 -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        RESOLVER,
+        "the test proves an announcement of an undeclared implementation from an unknown emitter is not read",
+    )]);
     let output = interpret(vec![
         upgraded(OTHER_IMPLEMENTATION, 1, 0),
         text_changed(1, 1),
@@ -317,6 +321,10 @@ fn upgraded_naming_an_undeclared_implementation_is_not_selected_from_an_unknown_
 
 #[test]
 fn upgraded_before_the_implementation_start_admits_nothing() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        RESOLVER,
+        "the test proves an announcement before the implementation's start admits nothing",
+    )]);
     for block in [4, 5, 6] {
         let output = interpret_test_batch(starting_at(
             5,
@@ -523,6 +531,10 @@ fn a_migration_observation_in_a_block_interpreted_twice_is_counted_once() -> any
 /// current adapter retires another address's entry: every admission's key names its own address.
 #[test]
 fn an_emitter_retired_later_in_a_rerun_block_keeps_its_earlier_log() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        RETIRED,
+        "the test proves the retired emitter's log after its retirement is not read",
+    )]);
     crate::schema_v2::session::reset_block_passes();
     let mut early = text_changed(1, 0);
     early.emitting_address = RETIRED.to_owned();
@@ -609,6 +621,10 @@ fn proxy_deployed(implementation: &str, block: i64, log_index: i64) -> RawLogInp
 /// one before the first announcement, and the one after it is not.
 #[test]
 fn an_entry_retired_in_a_discarded_pass_is_live_until_its_retiring_log() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        RESOLVER,
+        "the test proves the record log after the second announcement, whose manifest reads no records, is not read",
+    )]);
     crate::schema_v2::session::reset_block_passes();
     let mut input = factory_batch(vec![
         text_changed(1, 0),
@@ -639,6 +655,10 @@ fn an_entry_retired_in_a_discarded_pass_is_live_until_its_retiring_log() -> anyh
 
 #[test]
 fn proxy_deployed_naming_an_undeclared_implementation_admits_nothing() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        RESOLVER,
+        "the test proves an announcement of an undeclared implementation admits nothing",
+    )]);
     let deployed = raw_at(
         ProxyDeployed {
             sender: ACCOUNT.parse()?,
@@ -660,6 +680,10 @@ fn proxy_deployed_naming_an_undeclared_implementation_admits_nothing() -> anyhow
 
 #[test]
 fn registry_pointer_does_not_admit_earlier_resolver_logs() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        RESOLVER,
+        "the test proves a registry pointer does not admit the resolver's earlier logs",
+    )]);
     let output = interpret(vec![
         upgraded(OTHER_IMPLEMENTATION, 1, 0),
         roles_changed(1, 1),
@@ -798,6 +822,10 @@ fn resolver_creation_admits_initializer_records_without_a_registry_pointer() -> 
 
 #[test]
 fn resolver_pointer_records_binding_but_does_not_admit_records() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        RESOLVER,
+        "the test proves a resolver pointer does not admit the resolver's record logs",
+    )]);
     let output = interpret_test_batch(creation_input(vec![
         pointer(1, 0),
         record_text(1, 1),

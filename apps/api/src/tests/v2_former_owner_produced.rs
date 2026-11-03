@@ -4,8 +4,8 @@ use alloy_primitives::{U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, RawBlockInput, RawLogInput, StateCacheCapacity,
-    prepare_schema_v2_batch_incremental,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 const CHAIN: &str = "ethereum-mainnet";
 const REGISTRY: &str = "0x657ea849311d3d5823348dded7c2aaafb3ede09e";
@@ -94,7 +94,7 @@ async fn publish_release(database: &TestDatabase, unregister: bool, migrated: bo
             0,
         ));
     }
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests: vec![manifest.clone()],

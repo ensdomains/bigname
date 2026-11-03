@@ -4,8 +4,9 @@ use alloy_primitives::{Address, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, ManifestInput, RawBlockInput, RawLogInput,
-    StateCacheCapacity, prepare_schema_v2_batch_incremental,
+    StateCacheCapacity,
 };
+use bigname_test_support::fixture_logs::prepare_checked;
 
 #[path = "v2_registry_token_ids/compatibility.rs"]
 mod compatibility;
@@ -311,7 +312,7 @@ fn fixture(historical: bool) -> Result<(ManifestInput, BatchOutput, Vec<RawLogIn
         logs.sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
     }
 
-    let (output, _) = prepare_schema_v2_batch_incremental(
+    let (output, _) = prepare_checked(
         BatchInput {
             chain_id: CHAIN.into(),
             manifests: vec![manifest.clone()],
@@ -358,7 +359,22 @@ async fn registry_token_ids_support_historical_preaudit_mint_order() -> Result<(
     assert_lifecycle(true).await
 }
 
+/// The retained pre-audit manifest never declared `TransferSingle`, so a test that interprets the
+/// historical fixture names those logs while it runs.
+fn allow_preaudit_transfers(
+    historical: bool,
+) -> Option<bigname_test_support::fixture_logs::AllowGuard> {
+    historical.then(|| {
+        bigname_test_support::fixture_logs::allow_unmatched(&[(
+            "TransferSingle(address,address,address,uint256,uint256)",
+            "the retained pre-audit manifest never declared it; the test expects HOLDER at block \
+             125",
+        )])
+    })
+}
+
 async fn assert_lifecycle(historical: bool) -> Result<()> {
+    let _preaudit = allow_preaudit_transfers(historical);
     let (manifest, output, logs) = fixture(historical)?;
     let registration = |block| {
         output

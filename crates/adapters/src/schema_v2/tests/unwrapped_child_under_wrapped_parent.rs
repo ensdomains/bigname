@@ -1185,6 +1185,10 @@ fn every_custody_path_into_a_no_lease_unwrap_keeps_the_registry_authority() -> a
 #[test]
 fn eth_second_level_unwrap_without_a_registrar_identity_opens_no_registry_only_interval()
 -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        CONTRACT,
+        "the registrar's admission starts at block 2, so its block 1 transfer is deliberately not read",
+    )]);
     let wrapped = node(&["direct", "eth"]);
     let wrapped_id = format!("ens:{wrapped:#x}");
     let mut manifests = manifests();

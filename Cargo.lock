@@ -1591,6 +1591,7 @@ dependencies = [
  "anyhow",
  "bigname-domain",
  "bigname-manifests",
+ "bigname-test-support",
  "imbl",
  "serde",
  "serde_json",
@@ -1831,11 +1832,17 @@ dependencies = [
 name = "bigname-test-support"
 version = "0.1.0"
 dependencies = [
+ "alloy-json-abi",
+ "alloy-primitives",
  "anyhow",
+ "bigname-adapters",
  "bigname-content-hash",
+ "bigname-manifests",
  "bigname-storage",
+ "serde_json",
  "sqlx",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

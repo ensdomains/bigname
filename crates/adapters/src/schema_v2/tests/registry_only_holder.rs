@@ -775,6 +775,10 @@ fn an_unmasked_owner_word_ends_the_holder() -> anyhow::Result<()> {
 /// resource has no remembered owner when its first registry write is seen.
 #[test]
 fn a_first_registry_write_after_a_wrap_grants_its_owner() -> anyhow::Result<()> {
+    let _dropped = allow_unmatched(&[(
+        REGISTRY,
+        "the registry's admission starts at block 3, so its earlier writes are deliberately not read",
+    )]);
     let resource = registry_only_of(&child_hex());
     let build = |logs: Vec<RawLogInput>| {
         let mut input = batch(logs);

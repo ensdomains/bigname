@@ -25,4 +25,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+bigname-test-support.workspace = true
 syn = { version = "2.0.117", features = ["full", "visit"] }
