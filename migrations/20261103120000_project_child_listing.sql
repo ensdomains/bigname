@@ -1,9 +1,12 @@
 -- The child listing family F17: project_child_listing, one row per child a parent lists at the
 -- publication, with its six read indexes, and project_child_listing_count, the per-parent and
--- per-registry child counts the family step keeps from the same diff. An index on an existing
--- family table serves the step's work list: project_parent_subregistry by subregistry address.
+-- per-registry child counts the family step keeps from the same diff, and
+-- project_child_preimage_watermark, the highest block of every other chain whose preimage
+-- observations each chain has read. An index on an existing family table serves the step's work
+-- list: project_parent_subregistry by subregistry address.
 --
--- The new tables start empty and need no reset. The release that adds them rotates the
+-- The listing tables start empty and the watermarks start at each other chain's highest
+-- observation or finality floor (below), so nothing needs a reset. The release that adds them rotates the
 -- projection content hash, so the runner refuses a normal Project or Live start until a
 -- full-range Project redo, which composes every row at its composition pass; until then the
 -- API serves no family publication of the new build.
@@ -133,6 +136,51 @@ COMMENT ON COLUMN bigname_phase.project_child_listing_count.registry_address IS
     'This value is the registry whose labels the row counts, or the empty string for every child of the parent.';
 COMMENT ON COLUMN bigname_phase.project_child_listing_count.child_count IS
     'This value is the number of listed rows the key covers.';
+CREATE TABLE IF NOT EXISTS bigname_phase.project_child_preimage_watermark (
+    chain_id text NOT NULL,
+    source_chain_id text NOT NULL,
+    source_block_number bigint NOT NULL,
+    PRIMARY KEY (chain_id, source_chain_id),
+    CHECK (source_chain_id <> chain_id),
+    CHECK (source_block_number >= 0)
+);
+COMMENT ON TABLE bigname_phase.project_child_preimage_watermark IS
+    'Project-owned watermarks of family F17: per chain and other chain, the highest block of the other chain, at or below its finalized (else safe) block, whose preimage observations the chain''s family step has read, so its stored child names heal from labels first observed there. The family step advances it in its own block transaction and journals it for undo; a reset clears it, so a rebuild reads every other chain from block 0.';
+COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.chain_id IS
+    'This value is the chain whose child listing the watermark heals.';
+COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.source_chain_id IS
+    'This value is the other chain whose preimage observations are read.';
+COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.source_block_number IS
+    'This value is the highest block of the source chain, at or below its finalized (else safe) block, whose preimage observations have been read.';
+-- Each chain with a family marker starts its watermark for every other chain at that chain's
+-- highest preimage observation, or its finality floor (finalized, else safe) if lower, so the
+-- first family step after this schema-migration reads only observations that follow it and the
+-- ones a reorg can still replace. An other chain with neither marker is not seeded. A rebuild
+-- clears the rows and reads every other chain from 0.
+INSERT INTO bigname_phase.project_child_preimage_watermark
+    (chain_id, source_chain_id, source_block_number)
+SELECT marker.chain_id, head.chain_id,
+       LEAST(observed.block_number,
+             COALESCE(head.finalized_block_number, head.safe_block_number))
+FROM bigname_phase.project_family_marker marker
+JOIN bigname_phase.chain_heads head
+  ON head.chain_id <> marker.chain_id
+ AND COALESCE(head.finalized_block_number, head.safe_block_number) IS NOT NULL
+CROSS JOIN LATERAL (
+    SELECT GREATEST(
+        (SELECT max(event.block_number) FROM bigname_phase.normalized_events event
+         WHERE event.event_kind = 'PreimageObserved' AND event.canonicality_state = 'canonical'
+           AND event.chain_id = head.chain_id AND event.consumer_visibility = 'activated'),
+        (SELECT max(event.block_number) FROM bigname_phase.normalized_events event
+         WHERE event.event_kind = 'PreimageObserved' AND event.canonicality_state = 'safe'
+           AND event.chain_id = head.chain_id AND event.consumer_visibility = 'activated'),
+        (SELECT max(event.block_number) FROM bigname_phase.normalized_events event
+         WHERE event.event_kind = 'PreimageObserved' AND event.canonicality_state = 'finalized'
+           AND event.chain_id = head.chain_id AND event.consumer_visibility = 'activated')
+    ) AS block_number
+) observed
+WHERE observed.block_number IS NOT NULL
+ON CONFLICT (chain_id, source_chain_id) DO NOTHING;
 CREATE INDEX IF NOT EXISTS project_parent_subregistry_address_idx
     ON bigname_phase.project_parent_subregistry (chain_id, subregistry_address);
 END

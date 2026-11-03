@@ -5742,18 +5742,26 @@ composition pass derives every parent's rows in a children stream after the name
 
 - It needs `20261103120000_project_child_listing.sql`. The schema-migration creates the two
   tables and their indexes, plus `project_parent_subregistry_address_idx`, which the family
-  step's work list reads. It takes the family marker table in `EXCLUSIVE` mode first and builds
-  that index on a populated table in its own transaction, so apply it in the redo's maintenance
-  window. It resets nothing: the new tables start empty and the redo fills them.
+  step's work list reads, and `project_child_preimage_watermark`. It takes the family marker
+  table in `EXCLUSIVE` mode first and builds that index on a populated table in its own
+  transaction, so apply it in the redo's maintenance window. It resets nothing: the listing
+  tables start empty and the redo fills them.
 - Each listing row keeps the label hashes its stored name still spells as `[labelhash]`
   (`unhealed_labelhashes`), with a GIN index. A preimage observation derives again only the rows
   that hold one of the observed name's labels, by that index. On mainnet most blocks carry a
   preimage observation and most labels are unhealed, so selecting by label instead would derive
   every unspelled name under a shared label, such as every unspelled `.eth` name, at nearly
   every block.
-- A preimage written outside a block, such as the rainbow import, emits no observation, and an
-  observation heals only its own chain's rows. The stored names such a preimage would spell heal
-  only when their rows are derived again for another reason. The served name applies it at read.
+- A label first learned on another chain reaches the stored name at this chain's next block.
+  An imported label reaches it when the import enqueues its holders. Served names heal at read
+  time.
+- Each chain keeps, per other chain, the highest block whose preimage observations its family
+  step has read (`project_child_preimage_watermark`), journalled with its block. The watermark
+  never passes the other chain's finalized block (its safe block when finalized is unset), so a
+  reorg of that chain is read again. At that block, each step reads the whole unfinalized tail
+  above it. The schema-migration starts each watermark at the other chain's highest observation
+  or its finalized block, whichever is lower, and the redo's reset clears them, so the redo reads
+  every other chain from block 0.
 - Apply it before starting the release. The family writer inserts into both tables, so without
   them the first family block fails.
 - A block that moves a parent's own facts (its migration state, its ENSv2 subregistry pointer,

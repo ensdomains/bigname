@@ -13,10 +13,11 @@
 //! names, resolver changes and a created registry.
 //!
 //! The digest covers every family table. The test requires rows in the tables the path history
-//! is there to fill, and the lookup and summary rows of the subname. Eight tables are empty in
+//! is there to fill, and the lookup and summary rows of the subname. Nine tables are empty in
 //! this history and the digest says nothing about them: the two hydration work tables, the two
 //! address record indexes, the record values by record id, the resolver links, the account
-//! approvals and the Universal Resolver proxies.
+//! approvals, the Universal Resolver proxies and the child listing's preimage watermarks, which
+//! need a second chain.
 //!
 //! Project clears obsolete hydration retry scheduling while it applies each Ethereum Mainnet
 //! block, and only there (`docs/projections.md`, "Follow-only hydration"). So the same seed is
