@@ -457,7 +457,8 @@ fn settle_block_boundary(
             normalized::materialize_boundary(&source, block, events, state, output);
         }
     }
-    Ok(())
+    let drafts = protocol::v2_registry::reachability::reachability_drafts(state)?;
+    discovery::materialize_boundary(catalog, block, drafts, output)
 }
 
 fn authority_boundary_state(authority: Option<&state::V1NameState>) -> serde_json::Value {

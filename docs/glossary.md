@@ -595,7 +595,9 @@ describes the schema-v2 baseline rather than every row that has ever existed.
 an ENSv2 discovery
 edge created when a contract emits `RegistryCreated()`. It makes the emitting
 registry indexable from that event position. It does not assert parent-child
-reachability or attach the registry to a name. `SubregistryUpdated` supplies
+reachability or attach the registry to a name. The registry's resolver pointers
+become `resolver` edges only while it is reachable, which the
+`reachable_from_root` admission of its `resolver` rule records. `SubregistryUpdated` supplies
 that separate relationship. For a registry created through the
 [ENSv1→ENSv2 migration source family](manifests.md#ensv2-migration-family-admission-plan), the
 edge remains ordinary and the watch plan traverses it while a separate

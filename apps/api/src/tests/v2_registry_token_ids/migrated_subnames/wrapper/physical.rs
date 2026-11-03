@@ -595,8 +595,15 @@ async fn empty_clock(database: &TestDatabase, block: i64, clock: u64) -> Result<
     seed_and_run_with(database, &[], block, block, &[], Some(clock as i64)).await
 }
 
+/// `tokio::test` pins a test's future on the 2 MiB test-thread stack. This test's future is the
+/// largest in the module, and its deepest call comes within a few KiB of the limit, so its body
+/// runs boxed.
 #[tokio::test]
 async fn migrated_subname_canonical_expiry_moves_the_registry_to_its_live_mount() -> Result<()> {
+    Box::pin(canonical_expiry_moves_the_registry_to_its_live_mount()).await
+}
+
+async fn canonical_expiry_moves_the_registry_to_its_live_mount() -> Result<()> {
     eprintln!(
         "TYR105 physical fingerprint {}",
         bigname_content_hash::INTERPRETER_CONTENT_HASH

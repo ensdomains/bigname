@@ -206,11 +206,32 @@ impl State {
         });
     }
 
-    /// Whether `registry`'s suffix walk at `at_unix_timestamp` differs from the one its tokens'
-    /// names were last refreshed from. Without a recorded refresh it counts as changed.
-    pub(super) fn v2_registry_walk_changed(&self, registry: &str, at_unix_timestamp: i64) -> bool {
+    /// Whether `registry`'s suffix walk reaches an anchor: the condition under which its tokens
+    /// can have names, and its resolver pointers are discovery edges.
+    pub(in crate::schema_v2) fn v2_registry_reachable(
+        &self,
+        registry: &str,
+        at_unix_timestamp: i64,
+    ) -> bool {
+        let at = self
+            .latest_v2_timestamp
+            .map_or(at_unix_timestamp, |latest| latest.max(at_unix_timestamp));
+        self.v2_topology()
+            .walk(&registry.to_ascii_lowercase(), at)
+            .is_some()
+    }
+
+    /// Whether `registry` reached an anchor when names were last refreshed and whether it does at
+    /// `at_unix_timestamp`, when its suffix walk differs between the two. Without a recorded
+    /// refresh the walk counts as changed from one that reached nothing.
+    pub(super) fn v2_registry_walk_change(
+        &self,
+        registry: &str,
+        at_unix_timestamp: i64,
+    ) -> Option<(bool, bool)> {
+        let after = self.v2_topology().walk(registry, at_unix_timestamp);
         let Some(baseline) = self.v2_topology_baseline.as_ref() else {
-            return true;
+            return Some((false, after.is_some()));
         };
         let before = Topology {
             anchors: &baseline.anchors,
@@ -220,7 +241,6 @@ impl State {
             tokens: &baseline.tokens,
         }
         .walk(registry, baseline.at_unix_timestamp);
-        let after = self.v2_topology().walk(registry, at_unix_timestamp);
-        before != after
+        (before != after).then_some((before.is_some(), after.is_some()))
     }
 }

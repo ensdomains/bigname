@@ -599,3 +599,92 @@ async fn repeated_address_observations_lock_once_per_spelling_and_skip_noop_upda
     database.cleanup().await?;
     Ok(())
 }
+
+/// A block boundary's edge carries raw-block provenance and no log position. It opens before the
+/// block's logs, so a pointer log in the same block caps it there. An edge with neither a
+/// position nor raw-block provenance is still refused.
+#[tokio::test]
+async fn a_raw_block_edge_opens_before_the_blocks_logs() -> TestResult {
+    let database = TestDatabase::create(TestDatabaseConfig::new(
+        "interpret_discovery_raw_block_edge",
+    ))
+    .await?;
+    for sql in [
+        include_str!("../../../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../../storage/schema/baseline/03_identity.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(database.pool()).await?;
+    }
+    let [registry, boundary_target, log_target] = [
+        Uuid::from_u128(701),
+        Uuid::from_u128(702),
+        Uuid::from_u128(703),
+    ];
+    for instance in [registry, boundary_target, log_target] {
+        sqlx::query(
+            "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+             VALUES ($1, 'raw-block-test', 'contract')",
+        )
+        .bind(instance)
+        .execute(database.pool())
+        .await?;
+    }
+    let edge = |target: Uuid, provenance: serde_json::Value| DiscoveryEdge {
+        chain_id: "raw-block-test".to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        from_contract_instance_id: registry,
+        to_contract_instance_id: target,
+        discovery_source: "test".to_owned(),
+        admission_basis: "test".to_owned(),
+        source_manifest_id: 1,
+        observation_key: "key".to_owned(),
+        active_from_block_number: 5,
+        active_from_block_hash: "block-5".to_owned(),
+        canonicality_state: "canonical".to_owned(),
+        provenance,
+    };
+    let mut raw_block = bigname_adapters::schema_v2::seam::raw_block_provenance();
+    raw_block[OBSERVATION_KEY] = json!("key");
+    let output = BatchOutput {
+        discovery_edges: vec![
+            edge(
+                log_target,
+                json!({TRANSACTION_INDEX_KEY: 0, LOG_INDEX_KEY: 0, OBSERVATION_KEY: "key"}),
+            ),
+            edge(boundary_target, raw_block),
+        ],
+        discovery_edge_closures: vec![DiscoveryEdgeClosure {
+            chain_id: "raw-block-test".to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            from_contract_instance_id: registry,
+            observation_key: "key".to_owned(),
+            except_to_contract_instance_id: Some(log_target),
+            active_to_block_number: 5,
+            active_to_block_hash: "block-5".to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+        }],
+        ..BatchOutput::default()
+    };
+    let mut transaction = database.pool().begin().await?;
+    write(&mut transaction, &output, false).await?;
+    transaction.commit().await?;
+    let rows: Vec<(Uuid, Option<i64>)> = sqlx::query_as(
+        "SELECT to_contract_instance_id, active_to_block_number FROM discovery_edges
+         WHERE chain_id = 'raw-block-test' ORDER BY discovery_edge_id",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(rows, vec![(boundary_target, Some(5)), (log_target, None)]);
+
+    let unpositioned = BatchOutput {
+        discovery_edges: vec![edge(boundary_target, json!({OBSERVATION_KEY: "key"}))],
+        ..BatchOutput::default()
+    };
+    let mut transaction = database.pool().begin().await?;
+    assert!(write(&mut transaction, &unpositioned, false).await.is_err());
+    transaction.rollback().await?;
+
+    database.cleanup().await?;
+    Ok(())
+}

@@ -1,4 +1,6 @@
-use bigname_adapters::schema_v2::seam::{LOG_INDEX_KEY, OBSERVATION_KEY, TRANSACTION_INDEX_KEY};
+use bigname_adapters::schema_v2::seam::{
+    LOG_INDEX_KEY, OBSERVATION_KEY, TRANSACTION_INDEX_KEY, is_raw_block_provenance,
+};
 use bigname_adapters::schema_v2::{BatchOutput, DiscoveryEdge, DiscoveryEdgeClosure};
 use sqlx::{Postgres, QueryBuilder, Transaction, types::Uuid};
 
@@ -438,6 +440,9 @@ fn edge_position(edge: &DiscoveryEdge) -> Result<(i64, i64)> {
         (Some(transaction_index), Some(log_index)) if transaction_index >= 0 && log_index >= 0 => {
             Ok((transaction_index, log_index))
         }
+        // A block boundary's edge, such as an ENSv2 registry becoming reachable when an entry
+        // expires, has no log position and sorts before the block's logs.
+        (None, None) if is_raw_block_provenance(&edge.provenance) => Ok((-1, -1)),
         _ => Err(InterpretError::data_integrity(
             "raw-log discovery edge requires non-negative transaction and log positions",
         )),

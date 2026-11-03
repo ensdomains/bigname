@@ -158,10 +158,14 @@ pub(super) struct State {
     v2_resolver_tokens_by_observation: Covered<maps::AddressId, (String, String), OrdSet<String>>,
     v2_resolver_aliases_by_observation:
         Covered<maps::AddressId, (String, String), OrdSet<(String, String)>>,
+    /// The resolver the latest `ResolverUpdated` on each `(registry, observation id)` link wrote,
+    /// none for a clear.
+    v2_resolver_link_writes: Covered<maps::AddressId, (String, String), Option<String>>,
     v2_expiries: maps::V2Expiries,
     v2_dirty_tokens: OrdSet<String>,
     v2_dirty_registries: OrdSet<String>,
     v2_terminal_closure_hits: OrdSet<(String, String)>,
+    v2_reachability_changes: OrdMap<String, (bool, bool)>,
     v2_token_by_upstream_resource_index: Covered<maps::AddressId, (String, String), OrdSet<String>>,
     v2_token_by_name_index: Covered<maps::TokenName, (String, String), OrdSet<String>>,
     v2_tokens_by_current_name_index: Covered<maps::Name, String, OrdSet<String>>,
