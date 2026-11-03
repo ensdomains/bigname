@@ -26,6 +26,13 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 - Short sentences and short paragraphs. No semicolons joining clauses, and no paragraph that packs several points into one block. Use a list for parallel items.
 - Agent messages and review briefs follow the same rules. IDs and shas are fine as addresses.
 
+## CI runs without a pull request
+
+- To get a CI run on a commit that is not ready for review, such as a red test before its fix, push it to a branch named `ci/<ticket>-<purpose>`. It runs the full suite with the same jobs as a pull request (`docs/development.md` "CI without a pull request").
+- Do not open a draft pull request only to get a CI run.
+- Cite the run by its run id where the result is needed as evidence.
+- Delete the branch once the run is cited.
+
 ## Boundaries
 
 - Schema-v2 interpret writes identity rows, discovery edges, normalized
