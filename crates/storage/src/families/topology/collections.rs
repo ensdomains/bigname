@@ -232,12 +232,12 @@ pub async fn load_resolver_roles_shadow(
                     'record_resource_selector', granted -> 'selector',
                     'event_ids', granted -> 'event_ids',
                     'grant_source', granted -> 'grant_source')) AS item
-            FROM jsonb_array_elements($6::jsonb) granted
+            FROM jsonb_array_elements($7::jsonb) granted
         )";
     let page = page(
         &mut snapshot,
         items,
-        (chain_id, &address),
+        (chain_id, &address, None),
         after,
         limit,
         &Value::Array(granted),
@@ -248,13 +248,13 @@ pub async fn load_resolver_roles_shadow(
 }
 
 /// Page `items` (a `WITH items AS (...)` of `(key1, key2, item)`) after `after`, with its exact
-/// total. `$1` is the chain, `$2` the lower-cased resolver, `$3` to `$5` the keyset position and
-/// limit, and `$6` a JSON array the items may read (the arms computed outside SQL); every
-/// statement binds all of them.
+/// total. `$1` is the chain, `$2` the lower-cased resolver, `$3` the namespace (links only) and
+/// `$7` a JSON array the items may read (the arms computed outside SQL); every statement binds
+/// all of them.
 async fn page(
     conn: &mut PgConnection,
     items: &str,
-    (chain_id, resolver_address): (&str, &str),
+    (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
     after: Option<&(String, String)>,
     limit: i64,
     computed: &Value,
@@ -262,15 +262,17 @@ async fn page(
     let query = format!(
         "{items}, selected_page AS (
             SELECT key1, key2, item FROM items
-            WHERE $3::text IS NULL OR (key1, key2) > ($3, $4)
-            ORDER BY key1, key2 LIMIT $5
+            WHERE $4::text IS NULL OR (key1, key2) > ($4, $5)
+            ORDER BY key1, key2 LIMIT $6
         ) SELECT (SELECT count(*) FROM items) AS total,
             COALESCE((SELECT jsonb_agg(jsonb_build_object('key1', key1, 'key2', key2,
-                'item', item) ORDER BY key1, key2) FROM selected_page), '[]'::jsonb) AS rows"
+                'item', item) ORDER BY key1, key2) FROM selected_page), '[]'::jsonb) AS rows,
+            $3::text IS NULL AS unused_namespace, $7::jsonb IS NULL AS unused_computed"
     );
     let row = sqlx::query(&query)
         .bind(chain_id)
         .bind(resolver_address)
+        .bind(namespace)
         .bind(after.map(|key| key.0.as_str()))
         .bind(after.map(|key| key.1.as_str()))
         .bind(limit)
@@ -278,7 +280,24 @@ async fn page(
         .fetch_one(conn)
         .await
         .with_context(|| format!("failed to load a resolver collection of {resolver_address}"))?;
-    collection_page(&row)
+    let total: i64 = row.try_get("total")?;
+    let rows: Value = row.try_get("rows")?;
+    let rows = rows
+        .as_array()
+        .context("resolver collection rows must be an array")?
+        .iter()
+        .map(|row| {
+            Ok((
+                row["key1"].as_str().context("key1")?.to_owned(),
+                row["key2"].as_str().context("key2")?.to_owned(),
+                row["item"].clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(FamilyCollectionPage {
+        rows,
+        total_count: u64::try_from(total).context("negative collection total")?,
+    })
 }
 
 /// A collection statement's `total` and `rows`, a JSON array of `{key1, key2, item}`.
