@@ -208,7 +208,7 @@ fn plan(
         };
     };
     match stored {
-        Some((_, revision)) if revision != current => Plan {
+        Some((_, revision)) if revision != current && revision.1 == Some(-7) => Plan {
             after: redo_from
                 .map_or(-1, |from| from.saturating_sub(1).max(-1))
                 .min(watermark),
