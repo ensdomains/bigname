@@ -79,7 +79,8 @@ pub(crate) use event_data::{
     EventDetail, HistoryInclude, build_event_detail, history_include, raw_event_kind,
 };
 pub(crate) use events::{
-    Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
+    Event, build_event, emitter_exact_count_cap, events_cursor_payload, events_storage_cursor,
+    get_events,
 };
 #[cfg(test)]
 pub(crate) use events::{events_summary_mode, parse_events_filter, with_emitter_count_cap};
@@ -116,6 +117,8 @@ pub(crate) use permission_values::{
 };
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
+#[cfg(test)]
+pub(crate) use registries::registry_events_count_cap;
 pub(crate) use registries::{
     RegistryRef, get_registry, get_registry_labels, load_subregistry_refs, name_chain_id,
     snapshot_block_for_chain,

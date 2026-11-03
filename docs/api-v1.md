@@ -3507,7 +3507,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | --- | --- | --- | --- |
 | `labels` | nullable integer | always | Exact current label count, or null for a historical selection where a current label count is not meaningful. |
 | `roles` | integer | optional | Count of observed nonzero declared role assignments; only with include=counts. |
-| `events` | integer | optional | Count of product-visible events emitted by the registry; only with include=counts. |
+| `events` | nullable integer | optional | Count of product-visible events emitted by the registry, exact up to 100,000 and null above; only with include=counts. |
 
 ### ReferencedBy
 

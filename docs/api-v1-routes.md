@@ -5273,7 +5273,7 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- | --- |
 | `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.roles and counts.events. counts.events is exact up to 100,000 events and null above. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -5335,12 +5335,13 @@ For a registrar lease first identified by a later readable observation, registra
   on this chain up to the selected position, in any namespace. For an ENSv2
   registry, whose events are all in `ens`, it equals the `total_count` of
   `GET /v1/events?contract_address=` at the same chain and block: that feed
-  defaults to the `ens` namespace, which is served on one chain. The feed's
-  opt-in count is capped at 100,000 rows and reports `null` above that, so the
-  equality holds up to the cap. For an address
+  defaults to the `ens` namespace, which is served on one chain. The
+  overview's count and the feed's `include=total_count` count are both exact
+  up to 100,000 events and `null` above that, so they also agree above the
+  cap. For an address
   an operator also admits into another namespace on this chain, the overview
-  counts those events too and the default feed does not. The count reads every
-  event of the contract rather than a projected total. It includes the
+  counts those events too and the default feed does not. The count reads the
+  contract's events rather than a projected total, and stops after 100,001. It includes the
   registry's root role changes (`RootPermissionChanged` `permission` rows),
   which the feed has listed since they became product history.
   `counts.roles`, also present with `include=counts`, is the exact number of

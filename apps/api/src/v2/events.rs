@@ -348,12 +348,12 @@ pub(crate) async fn with_emitter_count_cap<F: std::future::Future>(
 /// `include=total_count` on a `/v1/events` read that only an emitting contract anchors
 /// (`resolver` or `contract_address`, with no `name`, `registration_id` or `address`) counts at
 /// most this many rows and reports `total_count=null` above it. Such a contract can emit more
-/// rows than an exact count reads inside the request deadline. Sized from a staging timing,
-/// 2026-11-02.
+/// rows than an exact count reads inside the request deadline. The registry overview's
+/// `counts.events` uses the same cap. Sized from a staging timing, 2026-11-02.
 const EVENTS_EMITTER_EXACT_COUNT_CAP: u64 = 100_000;
 const _: () = assert!(EVENTS_EMITTER_EXACT_COUNT_CAP > HISTORY_TOTAL_COUNT_CAP);
 
-fn emitter_exact_count_cap() -> u64 {
+pub(crate) fn emitter_exact_count_cap() -> u64 {
     #[cfg(test)]
     if let Ok(cap) = EMITTER_EXACT_COUNT_CAP.try_with(|cap| *cap) {
         return cap;

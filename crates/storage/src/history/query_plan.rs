@@ -5,6 +5,7 @@ use sqlx::{Arguments, Connection, Execute, PgPool, Postgres, QueryBuilder};
 use super::{
     EventHistoryFilter, EventHistoryReadFilter, HistorySummaryMode,
     columns::push_history_select,
+    contract_count::contract_count_filter,
     duplicates::push_product_history_duplicate_filter,
     event_history_read_filter,
     paging::{push_history_filters, push_history_order},
@@ -107,9 +108,44 @@ pub async fn explain_event_history_count_for_test(
         HistorySummaryMode::None | HistorySummaryMode::Full => return Ok(None),
     };
     let filter = event_history_read_filter(pool, filter, true, false).await?;
+    explain_count_query(pool, filter, true, limit, generic_plan)
+        .await
+        .map(Some)
+}
+
+/// `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` of the statement [`super::count_contract_events`]
+/// runs for these arguments, executed as a prepared statement on a generic or a custom plan. A
+/// test-support seam, never a production query path.
+pub async fn explain_contract_event_count_for_test(
+    pool: &PgPool,
+    chain_id: &str,
+    address: &str,
+    event_kinds: &[String],
+    as_of_block: Option<i64>,
+    cap: Option<u64>,
+    generic_plan: bool,
+) -> Result<Value> {
+    let limit = cap
+        .map(|cap| i64::try_from(cap.saturating_add(1)))
+        .transpose()?;
+    let filter = contract_count_filter(chain_id, address, event_kinds, as_of_block);
+    explain_count_query(pool, filter, false, limit, generic_plan).await
+}
+
+async fn explain_count_query(
+    pool: &PgPool,
+    filter: EventHistoryReadFilter,
+    attribute_records: bool,
+    limit: Option<i64>,
+    generic_plan: bool,
+) -> Result<Value> {
     let mut connection = pool.acquire().await?.detach();
     let mut transaction = connection.begin().await?;
-    let filter = filter.with_attributed_records(&mut transaction).await?;
+    let filter = if attribute_records {
+        filter.with_attributed_records(&mut transaction).await?
+    } else {
+        filter
+    };
     let mut query = QueryBuilder::<Postgres>::new("");
     push_history_count_query(&mut query, &filter, true, limit);
     let (setting, expected) = if generic_plan {
@@ -158,5 +194,5 @@ pub async fn explain_event_history_count_for_test(
     );
     transaction.rollback().await?;
     connection.close().await?;
-    Ok(Some(plan))
+    Ok(plan)
 }

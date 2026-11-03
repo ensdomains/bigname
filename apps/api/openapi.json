@@ -3851,7 +3851,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. counts adds counts.roles and counts.events. counts.events is exact up to 100,000 events and null above.",
             "schema": {
               "type": "array",
               "items": {
@@ -8265,8 +8265,11 @@
             "description": "Count of observed nonzero declared role assignments; only with include=counts."
           },
           "events": {
-            "type": "integer",
-            "description": "Count of product-visible events emitted by the registry; only with include=counts."
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Count of product-visible events emitted by the registry, exact up to 100,000 and null above; only with include=counts."
           }
         },
         "additionalProperties": false,
