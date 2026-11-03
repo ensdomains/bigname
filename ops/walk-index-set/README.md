@@ -139,7 +139,10 @@ below. Otherwise it:
    `lock_timeout` 0 and each build bounded to six hours. It logs each index it built with its
    duration.
 4. Analyzes the table, checks every name again and logs
-   `every normalized_events index the walk index set scripts drop is in place`.
+   `every normalized_events index the walk index set scripts drop is in place`. When the
+   `ANALYZE` fails or is stopped it logs
+   `could not refresh normalized_events statistics after building its indexes` instead of
+   retrying it: run `ANALYZE bigname_phase.normalized_events` by hand.
 
 While it waits or builds it records loop progress, so a long build does not raise the
 stale-loop alert.

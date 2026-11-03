@@ -1205,9 +1205,10 @@ in the same step.
    `interpret refreshed normalized_events statistics`: after the first batch
    that writes ENSv2 events, again as they grow, and when the redo completes.
    Run `ANALYZE bigname_phase.normalized_events` by hand only if it logs
-   `interpret could not refresh normalized_events statistics`. While
-   `install.sql` or the runner builds an index that warning is expected, and
-   both end with their own `ANALYZE`.
+   `interpret could not refresh normalized_events statistics`, or if the runner
+   logs `could not refresh normalized_events statistics after building its indexes`.
+   While `install.sql` or the runner builds an index the Interpret warning is
+   expected, and both end with their own `ANALYZE`.
    If the previous release had started a Project redo and left it unfinished,
    for example killed mid-way before this deploy, the Interpret redo that starts
    the new interpreter content hash supersedes it: that Project redo's progress
