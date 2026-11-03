@@ -5753,8 +5753,8 @@ composition pass derives every parent's rows in a children stream after the name
   every unspelled name under a shared label, such as every unspelled `.eth` name, at nearly
   every block.
 - A label first learned on another chain reaches the stored name at this chain's next block.
-  An imported label reaches it when the import enqueues its holders. Served names heal at read
-  time.
+  An imported label reaches it only when its row is derived again for another reason
+  (TYR-373, TYR-374). Served names heal at read time.
 - Each chain keeps, per other chain, the highest block whose preimage observations its family
   step has read (`project_child_preimage_watermark`), journalled with its block. The watermark
   never passes the other chain's finalized block (its safe block when finalized is unset), so a

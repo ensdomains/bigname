@@ -54,9 +54,10 @@ const SOURCES: &str = "/* project:families.derived.child_listing_sources */
     ORDER BY head.chain_id";
 
 /// The highest block of chain `$1` among its first `$3` preimage observations above block `$2`
-/// (every one with a null `$3`): the activated rows of a canonical, safe or finalized block.
-/// Each state is probed on its own, so `normalized_events_projection_idx` reads the blocks in
-/// order and stops at the limit.
+/// (every one with a null `$3`): the activated rows of a canonical, safe or finalized block
+/// whose block is still on the chain's readable lineage, so rows of a fork Ingest has orphaned
+/// and Interpret has not replaced yet are not read. Each state is probed on its own, so
+/// `normalized_events_projection_idx` reads the blocks in order and stops at the limit.
 const CUTOFF: &str = "/* project:families.derived.child_listing_source_cutoff */
     SELECT max(first.block_number) FROM (
         SELECT event.block_number
@@ -69,6 +70,13 @@ const CUTOFF: &str = "/* project:families.derived.child_listing_source_cutoff */
               AND observed.chain_id = $1 AND observed.block_number > $2
               AND observed.consumer_visibility = 'activated'
               AND observed.logical_name_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM chain_lineage lineage
+                  WHERE lineage.chain_id = observed.chain_id
+                    AND lineage.block_hash = observed.block_hash
+                    AND lineage.block_number = observed.block_number
+                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              )
             ORDER BY observed.block_number
             LIMIT $3
         ) event
@@ -91,6 +99,13 @@ const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders 
               AND observed.block_number > $3 AND observed.block_number <= $4
               AND observed.consumer_visibility = 'activated'
               AND observed.logical_name_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM chain_lineage lineage
+                  WHERE lineage.chain_id = observed.chain_id
+                    AND lineage.block_hash = observed.block_hash
+                    AND lineage.block_number = observed.block_number
+                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              )
             OFFSET 0
         ) event
         CROSS JOIN LATERAL (
