@@ -670,3 +670,5 @@ mod v2_ens_v1_registry_read;
 mod v2_ens_v1_registry_read_mainnet;
 #[path = "tests/v2_ens_v1_registry_serving.rs"]
 mod v2_ens_v1_registry_serving;
+#[path = "tests/v2_implied_lease_routes.rs"]
+mod v2_implied_lease_routes;

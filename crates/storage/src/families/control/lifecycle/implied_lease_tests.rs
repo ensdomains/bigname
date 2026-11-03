@@ -482,3 +482,15 @@ fn a_derived_grant_before_the_first_record_keeps_its_start_across_the_migration(
     assert_eq!(on_v1, json!(HANDOFF));
     assert_eq!(on_v2, on_v1);
 }
+
+/// A lease expiry at the signed maximum keeps the exact ENSv1 grace end past it, written as the
+/// decimal the signed range cannot hold, from a number or a decimal string alike.
+#[test]
+fn a_lease_expiry_at_the_signed_maximum_serves_the_exact_grace_end() {
+    use super::expiry::{Grace, grace_ends_at};
+    let exact = (i128::from(i64::MAX) + 90 * 86_400).to_string();
+    assert_eq!(exact, "9223372036862551807");
+    for expiry in [json!(i64::MAX), json!(i64::MAX.to_string())] {
+        assert_eq!(grace_ends_at(Some(&expiry), Grace::EnsV1), json!(exact));
+    }
+}
