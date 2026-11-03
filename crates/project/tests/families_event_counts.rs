@@ -70,7 +70,7 @@ async fn read(fixture: &Fixture, mut filter: EventHistoryFilter, block: i64) -> 
 }
 
 /// The stored counts against the reads at the published block, for every anchor, namespace and
-/// event kind of the chain's events; returns the counts.
+/// event kind of the chain's events. Returns the counts.
 async fn require_reads(fixture: &Fixture, label: &str) -> Result<BTreeMap<Key, i64>> {
     let block = fixture.marker().await?.0.context("a published block")?;
     let counts = stored(fixture).await?;
@@ -213,25 +213,25 @@ async fn update(fixture: &Fixture, sql: &str) -> Result<()> {
 #[tokio::test]
 async fn stored_event_counts_follow_every_publication() -> Result<()> {
     let fixture = Fixture::new("families_event_counts", 5).await?;
-    emitted(&fixture, "a-1", 1, "CounterA").await?;
-    emitted(&fixture, "b-2", 2, "CounterB").await?;
-    emitted(&fixture, "a-2-basenames", 2, "CounterA").await?;
+    emitted(&fixture, "a-1", 1, "AliasChanged").await?;
+    emitted(&fixture, "b-2", 2, "PermissionScopeChanged").await?;
+    emitted(&fixture, "a-2-basenames", 2, "AliasChanged").await?;
     update(
         &fixture,
         "UPDATE normalized_events SET namespace = 'basenames'
          WHERE event_identity = 'a-2-basenames'",
     )
     .await?;
-    emitted(&fixture, "a-3", 3, "CounterA").await?;
+    emitted(&fixture, "a-3", 3, "AliasChanged").await?;
     fixture
         .event(
-            Event::new("own-3", 3, 1, "CounterA", FAMILY)
+            Event::new("own-3", 3, 1, "AliasChanged", FAMILY)
                 .raw(json!({"emitting_address": RESOLVER_1})),
         )
         .await?;
     pointer(&fixture, 3, 2, 1, None, RESOLVER_1).await?;
     pointer(&fixture, 4, 0, 1, Some(RESOLVER_1), RESOLVER_2).await?;
-    emitted(&fixture, "candidate-4", 4, "CounterA").await?;
+    emitted(&fixture, "candidate-4", 4, "AliasChanged").await?;
     update(
         &fixture,
         "UPDATE normalized_events SET consumer_visibility = 'candidate',
@@ -239,8 +239,8 @@ async fn stored_event_counts_follow_every_publication() -> Result<()> {
          WHERE event_identity = 'candidate-4'",
     )
     .await?;
-    emitted(&fixture, "orphaned-5", 5, "CounterA").await?;
-    emitted(&fixture, "unpositioned-5", 5, "CounterB").await?;
+    emitted(&fixture, "orphaned-5", 5, "AliasChanged").await?;
+    emitted(&fixture, "unpositioned-5", 5, "PermissionScopeChanged").await?;
     update(
         &fixture,
         "UPDATE normalized_events SET canonicality_state = 'orphaned'
@@ -254,7 +254,7 @@ async fn stored_event_counts_follow_every_publication() -> Result<()> {
     fixture.apply(1, FamilyMode::Normal).await?;
     let first = require_reads(&fixture, "one event").await?;
     ensure!(
-        first == expected(&[(0, EMITTER, "ens", "CounterA", 1)]),
+        first == expected(&[(0, EMITTER, "ens", "AliasChanged", 1)]),
         "{first:?}"
     );
     for block in 2..=3 {
@@ -266,10 +266,10 @@ async fn stored_event_counts_follow_every_publication() -> Result<()> {
     fixture.apply(4, FamilyMode::Normal).await?;
     let fourth = require_reads(&fixture, "the moved pointer").await?;
     let moved = expected(&[
-        (0, EMITTER, "ens", "CounterA", 2),
-        (0, EMITTER, "ens", "CounterB", 1),
-        (0, EMITTER, "basenames", "CounterA", 1),
-        (0, RESOLVER_1, "ens", "CounterA", 1),
+        (0, EMITTER, "ens", "AliasChanged", 2),
+        (0, EMITTER, "ens", "PermissionScopeChanged", 1),
+        (0, EMITTER, "basenames", "AliasChanged", 1),
+        (0, RESOLVER_1, "ens", "AliasChanged", 1),
         (0, REGISTRY, "ens", "ResolverChanged", 2),
         (1, RESOLVER_1, "ens", "ResolverChanged", 1),
         (1, RESOLVER_2, "ens", "ResolverChanged", 1),
@@ -277,7 +277,7 @@ async fn stored_event_counts_follow_every_publication() -> Result<()> {
     ]);
     ensure!(fourth == moved, "{fourth:?}");
     // The undo restores every count to its image before block 4 and drops the keys block 4
-    // created; the replay counts block 4 once.
+    // created. The replay counts block 4 once.
     ensure!(families::undo_to(&fixture.pool, CHAIN, 3).await? == 1);
     ensure!(fixture.exact().await? == before, "the undo left other rows");
     ensure!(
@@ -296,7 +296,7 @@ async fn stored_event_counts_follow_every_publication() -> Result<()> {
         "DELETE FROM normalized_events WHERE block_number = 5 OR block_number IS NULL",
     )
     .await?;
-    emitted(&fixture, "b-5", 5, "CounterB").await?;
+    emitted(&fixture, "b-5", 5, "PermissionScopeChanged").await?;
     fixture.apply(5, FamilyMode::Normal).await?;
     let replaced = require_reads(&fixture, "the replaced block").await?;
     let mut expect = moved.clone();
@@ -305,9 +305,9 @@ async fn stored_event_counts_follow_every_publication() -> Result<()> {
             0,
             EMITTER.to_owned(),
             "ens".to_owned(),
-            "CounterB".to_owned(),
+            "PermissionScopeChanged".to_owned(),
         ))
-        .context("a CounterB count")? = 2;
+        .context("a PermissionScopeChanged count")? = 2;
     ensure!(replaced == expect, "{replaced:?}");
     fixture.assert_rebuild_equal(5).await?;
     ensure!(require_reads(&fixture, "the rebuilds").await? == expect);
@@ -322,7 +322,7 @@ async fn stored_event_counts_follow_every_publication() -> Result<()> {
 async fn a_pass_over_many_windows_and_runs_counts_every_block_once() -> Result<()> {
     let fixture = Fixture::new("families_event_counts_pass", 12).await?;
     for block in 1..=12 {
-        emitted(&fixture, &format!("a-{block}"), block, "CounterA").await?;
+        emitted(&fixture, &format!("a-{block}"), block, "AliasChanged").await?;
         if block % 3 == 0 {
             let (before, after) = if block % 2 == 0 {
                 (Some(RESOLVER_1), RESOLVER_2)
@@ -347,7 +347,7 @@ async fn a_pass_over_many_windows_and_runs_counts_every_block_once() -> Result<(
             0,
             EMITTER.to_owned(),
             "ens".to_owned(),
-            "CounterA".to_owned()
+            "AliasChanged".to_owned()
         )) == Some(&12),
         "{block_by_block:?}"
     );

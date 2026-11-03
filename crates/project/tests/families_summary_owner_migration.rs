@@ -60,7 +60,7 @@ const CONTROL_TABLES: [&str; 3] = [
 
 /// The family tables added after the last migration with a reset list
 /// (migrations/20261104130000_project_event_count.sql creates them empty). The published reset
-/// lists cannot name them; the family reset (`families::family_tables`) clears them.
+/// lists cannot name them. The family reset (`families::family_tables`) clears them.
 const LATER_TABLES: [&str; 1] = ["project_event_count"];
 
 /// The family reset covers the tables added after the last reset list, so a later reset clears

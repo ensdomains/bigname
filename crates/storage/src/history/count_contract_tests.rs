@@ -197,9 +197,13 @@ fn resolver_changed(
 
 async fn seed(conn: &mut PgConnection) -> Result<()> {
     // Emitter rows across blocks, kinds and namespaces, one with a mixed-case emitter.
-    insert(conn, Row::new("emitted-10", 10, "CounterA", EMITTER_A)).await?;
-    insert(conn, Row::new("emitted-20", 20, "CounterB", EMITTER_A)).await?;
-    let mut basenames = Row::new("emitted-30", 30, "CounterA", EMITTER_A);
+    insert(conn, Row::new("emitted-10", 10, "AliasChanged", EMITTER_A)).await?;
+    insert(
+        conn,
+        Row::new("emitted-20", 20, "PermissionScopeChanged", EMITTER_A),
+    )
+    .await?;
+    let mut basenames = Row::new("emitted-30", 30, "AliasChanged", EMITTER_A);
     basenames.namespace = "basenames";
     insert(conn, basenames).await?;
     insert(
@@ -207,20 +211,28 @@ async fn seed(conn: &mut PgConnection) -> Result<()> {
         Row::new(
             "emitted-40",
             40,
-            "CounterA",
+            "AliasChanged",
             "0x00000000000000000000000000000000000000E1",
         ),
     )
     .await?;
     // The same emitter on another chain, and above the published block.
-    let mut elsewhere = Row::new("emitted-elsewhere", 10, "CounterA", EMITTER_A);
+    let mut elsewhere = Row::new("emitted-elsewhere", 10, "AliasChanged", EMITTER_A);
     elsewhere.chain = OTHER_CHAIN;
     insert(conn, elsewhere).await?;
-    insert(conn, Row::new("emitted-101", 101, "CounterA", EMITTER_A)).await?;
+    insert(
+        conn,
+        Row::new("emitted-101", 101, "AliasChanged", EMITTER_A),
+    )
+    .await?;
     // The three resolver arms: a resolver's own row, a pointer set to it and a pointer moved
     // from it, each on another contract's row. A pointer a resolver sets to itself is its own
     // row only, and a pointer set to the resolver it already held is a set only.
-    insert(conn, Row::new("resolver-own", 20, "CounterA", RESOLVER_1)).await?;
+    insert(
+        conn,
+        Row::new("resolver-own", 20, "AliasChanged", RESOLVER_1),
+    )
+    .await?;
     insert(
         conn,
         resolver_changed("set", 30, REGISTRY, None, RESOLVER_1),
@@ -243,7 +255,7 @@ async fn seed(conn: &mut PgConnection) -> Result<()> {
     .await?;
     // The fixed duplicate rules: a registrar snapshot, a token-state-absent expiry, a derived
     // wrapper mint transfer, a registry-read copy and the second row of a proven address pair.
-    let mut snapshot = Row::new("snapshot", 50, "CounterA", EMITTER_A);
+    let mut snapshot = Row::new("snapshot", 50, "AliasChanged", EMITTER_A);
     snapshot.after = json!({"state_derived": true, "registrar_surface_snapshot": true});
     insert(conn, snapshot).await?;
     let mut expiry = Row::new("tokenless-expiry", 50, "ExpiryChanged", EMITTER_A);
@@ -288,7 +300,7 @@ async fn seed(conn: &mut PgConnection) -> Result<()> {
     }
     // Rows no read counts: a candidate, an orphaned row, a row on an orphaned block and a row
     // without a block.
-    insert(conn, Row::new("candidate", 70, "CounterA", EMITTER_A)).await?;
+    insert(conn, Row::new("candidate", 70, "AliasChanged", EMITTER_A)).await?;
     sqlx::query(
         "UPDATE normalized_events SET consumer_visibility = 'candidate',
              migration_correlation_ids = ARRAY['count-test']
@@ -296,7 +308,7 @@ async fn seed(conn: &mut PgConnection) -> Result<()> {
     )
     .execute(&mut *conn)
     .await?;
-    insert(conn, Row::new("orphaned", 70, "CounterA", EMITTER_A)).await?;
+    insert(conn, Row::new("orphaned", 70, "AliasChanged", EMITTER_A)).await?;
     sqlx::query(
         "UPDATE normalized_events SET canonicality_state = 'orphaned'
          WHERE event_identity = 'orphaned'",
@@ -311,13 +323,13 @@ async fn seed(conn: &mut PgConnection) -> Result<()> {
     .bind(CHAIN)
     .execute(&mut *conn)
     .await?;
-    insert(conn, Row::new("uncle", 71, "CounterA", EMITTER_A)).await?;
+    insert(conn, Row::new("uncle", 71, "AliasChanged", EMITTER_A)).await?;
     sqlx::query(
         "UPDATE normalized_events SET block_hash = 'b71-uncle' WHERE event_identity = 'uncle'",
     )
     .execute(&mut *conn)
     .await?;
-    let mut unpositioned = Row::new("unpositioned", 0, "CounterA", EMITTER_A);
+    let mut unpositioned = Row::new("unpositioned", 0, "AliasChanged", EMITTER_A);
     unpositioned.block = None;
     insert(conn, unpositioned).await?;
     Ok(())
@@ -426,10 +438,10 @@ async fn stored_counts_equal_the_reads_they_count() -> Result<()> {
         ensure!(summed == counts, "ranges {summed:?} against {counts:?}");
         // The rows the seed's classes leave, by trace of the read predicate.
         let expected = [
-            ((EMITTER, EMITTER_A, "ens", "CounterA"), 2),
-            ((EMITTER, EMITTER_A, "ens", "CounterB"), 1),
-            ((EMITTER, EMITTER_A, "basenames", "CounterA"), 1),
-            ((EMITTER, RESOLVER_1, "ens", "CounterA"), 1),
+            ((EMITTER, EMITTER_A, "ens", "AliasChanged"), 2),
+            ((EMITTER, EMITTER_A, "ens", "PermissionScopeChanged"), 1),
+            ((EMITTER, EMITTER_A, "basenames", "AliasChanged"), 1),
+            ((EMITTER, RESOLVER_1, "ens", "AliasChanged"), 1),
             ((EMITTER, RESOLVER_1, "ens", "ResolverChanged"), 1),
             ((EMITTER, REGISTRY, "ens", "ResolverChanged"), 5),
             ((EMITTER, PUBLIC_RESOLVER, "ens", "RecordChanged"), 1),
@@ -544,7 +556,7 @@ async fn the_count_statement_reads_its_block_range_by_index() -> Result<()> {
                  manifest_version, chain_id, block_number, block_hash, transaction_hash,
                  transaction_index, log_index, derivation_kind, canonicality_state, after_state,
                  raw_fact_ref)
-             SELECT 'bulk-' || n, 'ens', 'CounterA', 'ens_v1_registry_l1', 1, $1,
+             SELECT 'bulk-' || n, 'ens', 'AliasChanged', 'ens_v1_registry_l1', 1, $1,
                     1 + n % 999, 'b' || (1 + n % 999), 'tx', 0, n,
                     'ens_v1_unwrapped_authority', 'canonical', '{}',
                     jsonb_build_object('emitting_address', $2::text)
@@ -556,7 +568,12 @@ async fn the_count_statement_reads_its_block_range_by_index() -> Result<()> {
         .await?;
         for log in 0..1800 {
             insert(&mut conn, {
-                let mut row = Row::new(format!("busy-{log}"), 1000, "CounterB", EMITTER_A);
+                let mut row = Row::new(
+                    format!("busy-{log}"),
+                    1000,
+                    "PermissionScopeChanged",
+                    EMITTER_A,
+                );
                 row.log = 100_000 + log;
                 row
             })
@@ -631,7 +648,9 @@ async fn the_count_statement_reads_its_block_range_by_index() -> Result<()> {
                     .await?;
             let busy = counts
                 .iter()
-                .find(|row| row.0 == EMITTER && row.1 == EMITTER_A && row.3 == "CounterB")
+                .find(|row| {
+                    row.0 == EMITTER && row.1 == EMITTER_A && row.3 == "PermissionScopeChanged"
+                })
                 .map(|row| row.4);
             let resolver = counts
                 .iter()
