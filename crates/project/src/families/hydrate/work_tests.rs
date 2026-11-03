@@ -108,7 +108,24 @@ async fn a_classification_change_re_derives_text_hydration_work_only_when_a_side
 -> Result<()> {
     let unsupported = classification("a", "unsupported", Some("resolver_not_declared"), Some(1));
     let supported = classification("a", "supported", None, Some(1));
-    let cases: [(&str, Option<Value>, Option<Value>, bool); 10] = [
+    let cases: [(&str, Option<Value>, Option<Value>, bool); 11] = [
+        // C1: an ENSV2Resolver declaration re-files its address between two unsupported rows.
+        (
+            "the ENSV2Resolver declared, not projected",
+            Some(classification(
+                "ens_v1_resolver_l1",
+                "unsupported",
+                Some("resolver_not_declared"),
+                Some(1),
+            )),
+            Some(classification(
+                "ensv2_resolver",
+                "unsupported",
+                Some("composite_resolver_not_projected"),
+                Some(2),
+            )),
+            false,
+        ),
         (
             "unsupported re-filed with a new reason, manifest and classification",
             Some(classification(

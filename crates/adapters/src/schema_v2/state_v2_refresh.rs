@@ -138,10 +138,19 @@ impl State {
             .collect::<Vec<_>>();
         let mut visited = imbl::ordset::OrdSet::new();
         while let Some(registry) = pending.pop() {
-            if visited.insert(registry.clone()).is_some()
-                || !self.v2_registry_walk_changed(&registry, at_unix_timestamp)
-            {
+            if visited.insert(registry.clone()).is_some() {
                 continue;
+            }
+            let Some((was_reachable, reachable)) =
+                self.v2_registry_walk_change(&registry, at_unix_timestamp)
+            else {
+                continue;
+            };
+            if was_reachable != reachable {
+                self.v2_reachability_changes
+                    .entry(registry.clone())
+                    .or_insert((was_reachable, reachable))
+                    .1 = reachable;
             }
             for key in self.v2_tokens.registry_keys(&registry) {
                 self.v2_dirty_tokens.insert(key.clone());
@@ -154,6 +163,16 @@ impl State {
                 }
             }
         }
+    }
+
+    /// The registries whose reachability changed since the last call, with whether each is
+    /// reachable now. A registry that changed and changed back within one log is left out.
+    pub(in crate::schema_v2) fn take_v2_reachability_changes(&mut self) -> Vec<(String, bool)> {
+        std::mem::take(&mut self.v2_reachability_changes)
+            .into_iter()
+            .filter(|(_, (was_reachable, reachable))| was_reachable != reachable)
+            .map(|(registry, (_, reachable))| (registry, reachable))
+            .collect()
     }
 
     pub(in crate::schema_v2) fn refresh_v2_name_keys(

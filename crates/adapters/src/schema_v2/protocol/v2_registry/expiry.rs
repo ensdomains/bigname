@@ -102,12 +102,14 @@ fn transition_scope(transition: &V2NameTransition) -> String {
 /// An `ExpiryUpdated` for an entry with no token state. `renew` lets a root renewer revive an
 /// entry `unregister` left without a token, and names the entry's current token id. No name or
 /// resource is bound, so the log is kept as the registry's own expiry fact after `output` and
-/// moves no name state.
+/// moves no name state. Like every registry log, it ends with the reachability drafts the log's
+/// refresh left.
 /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L258 @ ens_v2_sepolia_20261001@07e55a05)
 pub(super) fn tokenless(
     selected: &crate::schema_v2::catalog::Selected,
     mut output: super::Interpreted,
     event: &super::ExpiryUpdated,
+    state: &mut crate::schema_v2::state::State,
 ) -> anyhow::Result<super::Interpreted> {
     super::ensure_declared(selected, &["ExpiryChanged"])?;
     output.append(&mut super::single_event(
@@ -123,5 +125,8 @@ pub(super) fn tokenless(
             "registry_contract_instance_id": selected.contract_instance_id.to_string(),
         }),
     ));
+    output
+        .discovery
+        .extend(super::reachability::reachability_drafts(state)?);
     Ok(output)
 }
