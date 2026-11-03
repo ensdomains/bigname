@@ -10,6 +10,10 @@ use serde_json::Value;
 use sqlx::{Row, raw_sql};
 
 use super::*;
+use super::{
+    listing_support::checked_page,
+    served_page::{served_decode, served_page_query},
+};
 
 const CHAIN: &str = "ethereum-sepolia";
 const ETH: &str = "ens:0xe7e7";
@@ -72,8 +76,9 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                     owner: *owner,
                 };
                 let label = format!("{mode} {parent} {registry} {owner:?}");
-                let narrowed = page(&mut conn, parent, &filter, Some(labels), None, 10_000).await?;
-                let query = page_query(parent, &filter, Some(labels), None, 10_001);
+                let narrowed =
+                    checked_page(&mut conn, parent, &filter, Some(labels), None, 10_000).await?;
+                let query = served_page_query(parent, &filter, Some(labels), None, 10_001);
                 let before_sql = unnarrowed(query.sql())?;
                 let mut before = sqlx::query(&before_sql)
                     .bind(*parent)
@@ -94,7 +99,7 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                 };
                 let mut before_rows = Vec::new();
                 for row in &rows {
-                    if let Some((row, _)) = decode(row)? {
+                    if let Some((row, _)) = served_decode(row)? {
                         before_rows.push(row);
                     }
                 }
@@ -103,7 +108,16 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                     "{label}: total {} before {total}",
                     narrowed.total_count
                 );
-                ensure!(narrowed.rows == before_rows, "{label}: the rows differ");
+                // The stored page orders its C-collated key; the relation, the database's
+                // collation. The rows are the same set.
+                let mut stored_rows = narrowed.rows.clone();
+                stored_rows.sort_by(|left, right| {
+                    left.child_logical_name_id.cmp(&right.child_logical_name_id)
+                });
+                before_rows.sort_by(|left, right| {
+                    left.child_logical_name_id.cmp(&right.child_logical_name_id)
+                });
+                ensure!(stored_rows == before_rows, "{label}: the rows differ");
                 if owner.is_none() {
                     ensure!(count(&mut conn, parent, Some(registry.as_str())).await? == total);
                 }
