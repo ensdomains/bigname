@@ -5332,6 +5332,83 @@ steps:
 Then run the schema-migrations again. `ops/walk-index-set/drop.sql` drops the index with the
 other Project and API indexes, and its `install.sql` rebuilds it.
 
+## An ordered index for the resolver links page
+
+The build that adds `project_resolver_link_order_idx` changes how
+`GET /v1/resolvers/{chain_id}/{address}/links` reads a resolver's links
+([table ownership](storage.md#table-ownership)).
+
+- Before, the statement in `crates/storage/src/families/topology/collections.rs` rendered every
+  link of the resolver, with its name and link event, then sorted them all to cut one page. It
+  counted the total from the same rendered rows.
+- The page now walks the new index from the cursor and stops at the page size, and only the
+  page's links are rendered. The total counts the resolver's links directly. Rows, order,
+  cursors and totals do not change.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the changed statement is in a serving reader, not a hashed file. No redo is needed. The
+  change ships as an image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order:
+
+1. Prebuild the index with the statement below.
+2. Apply schema-migration `20261103130000_project_resolver_link_order_index.sql`.
+3. Swap the image.
+
+The schema-migration installs the index. Where an index of that name already exists, valid and
+ready, with the reviewed definition, it adopts it without a build and without a lock, so it is
+a no-op on a database where the index was already built by hand with the statement below. An
+empty `project_resolver_link` builds it directly. A populated table without it is refused, so
+on an initialized database prebuild it concurrently first, outside a transaction. The phase
+runner and API can keep running while it builds. The previous image does not read the index,
+and the family step keeps it current like the table's primary key:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_resolver_link_order_idx
+    ON bigname_phase.project_resolver_link
+        (chain_id, resolver_address, lpad(record_id, 78, '0'), node)
+    WHERE record_id <> '0';
+ANALYZE bigname_phase.project_resolver_link;
+```
+
+`IF NOT EXISTS` matches the index name only, and an interrupted concurrent build leaves an
+invalid index. Check the index after the build:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'project_resolver_link_order_idx';
+RESET search_path;
+```
+
+It must return one row with `relkind` `i`, `indrelid` `bigname_phase.project_resolver_link`,
+and `indisvalid` and `indisready` true. The definition must be exactly this line, which is the
+text the schema-migration compares:
+
+```text
+CREATE INDEX project_resolver_link_order_idx ON bigname_phase.project_resolver_link USING btree (chain_id, resolver_address, lpad(record_id, 78, '0'::text), node) WHERE (record_id <> '0'::text)
+```
+
+The schema-migration refuses a name that is not an index, an index on another table or one
+that is not valid and ready, and another definition. Its error names the index and, for
+another definition, prints the definition it found and the one it expects. The recovery
+steps:
+
+- A name that is not an index: remove or rename that relation, then build the index with the
+  statement above.
+- Any other refusal: confirm in `pg_stat_progress_create_index` that no build of the index is
+  still running, drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.project_resolver_link_order_idx`, then build it again
+  with the statement above.
+
+Then run the schema-migrations again. An image swap without the index serves the same
+responses, but each page sorts every link of the resolver first.
+
 ## The phase runner rebuilds the indexes drop.sql drops before Project
 
 The build that has the phase runner rebuild the `normalized_events` indexes
