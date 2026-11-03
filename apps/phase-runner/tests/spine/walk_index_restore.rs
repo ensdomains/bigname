@@ -14,6 +14,7 @@
 //! | 11 | A supervised walk | Interpret runs without the index, Project's first batch has it | `restore_runs_before_projects_first_batch_and_not_during_interpret` |
 //! | 12 | A one-shot Interpret redo | Absent through Interpret, present for the stamped Project redo | `interpret_redo_walks_without_the_index_and_project_redo_gets_it_back` |
 //! | 13 | Another chain still in an Interpret redo | Built, warned naming that chain | `restore_warns_about_a_chain_still_in_an_interpret_redo` |
+//! | 26 | Another chain on its first Interpret walk, and a chain whose Interpret completed | Built, warned naming only the walking chain and its state | `restore_warns_about_a_chain_still_on_its_first_interpret_walk` |
 //! | 14 | A build that fails | Error names the index and the cause, not retried, Project not started (the supervisor's non-zero exit on a not-retried error is the runner's existing behaviour) | `a_failed_build_stops_project_with_the_error_line` |
 //! | 15 | A stop during a build | Returns within the stop budget, the server build is cancelled, the leftover is rebuilt next time | `a_stop_during_the_restore_cancels_the_build_and_leaves_a_rebuildable_leftover` |
 //! | 20 | The transfer node schema-migration | Adopts the runner's build, and the runner keeps the migration's | `the_transfer_node_migration_and_the_runner_build_each_others_index_once` |
@@ -670,6 +671,51 @@ async fn non_owner_database(scratch: &ScratchDatabase) -> Result<RunnerDatabase>
         4,
     )
     .await?)
+}
+
+#[tokio::test]
+async fn restore_warns_about_a_chain_still_on_its_first_interpret_walk() -> Result<()> {
+    let scratch = ScratchDatabase::create("walk_index_restore_first_walk").await?;
+    let chain_id = "walk-index-first-walk-served";
+    let walking = "walk-index-first-walk-walking";
+    let done = "walk-index-first-walk-done";
+    completed_chain(&scratch, chain_id).await?;
+    completed_chain(&scratch, done).await?;
+    PhaseStore::new(scratch.pool().clone())
+        .initialize_chain(walking)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'running'
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(walking)
+    .execute(scratch.pool())
+    .await?;
+    drop_index(scratch.pool(), DROPPED).await?;
+
+    let (result, logs) = logged(project_redo(
+        &loopback_runner(&scratch, "walk-index-first-walk-runner")?,
+        chain_id,
+        CancellationToken::new(),
+    ))
+    .await;
+    result?;
+
+    assert!(usable(scratch.pool(), DROPPED).await?);
+    let warning = logs
+        .lines()
+        .find(|line| line.contains("WARN") && line.contains("has not completed"))
+        .unwrap_or_else(|| panic!("no warning names the walking chain: {logs}"));
+    assert!(
+        warning.contains(&format!("{walking} (running)")),
+        "{warning}"
+    );
+    assert!(!warning.contains(done), "{warning}");
+    assert!(
+        !warning.contains(&format!("{chain_id} (")),
+        "the restoring chain is not named: {warning}"
+    );
+    scratch.cleanup().await
 }
 
 #[tokio::test]
