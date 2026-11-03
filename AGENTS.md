@@ -50,9 +50,12 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
   through its own schema-migration, changing no row, when it lists each index with
   the statement it serves under [table ownership](docs/storage.md#table-ownership).
 - API code reads phase projections, normalized events, and request-scoped lookup
-  output only, except explicit audit endpoints. API requests never write database
-  state; the lookup library's guarded [resolution divergence
-  ledger](docs/glossary.md#resolution-divergence-ledger) writer is for non-API callers.
+  output only, except explicit audit endpoints. API requests write no database
+  state but one: the label candidates a name request proves, inserted into
+  `bigname_phase.ens_names`, which no serving path reads
+  ([name inputs](docs/api-v1.md#name-inputs)). The lookup library's guarded
+  [resolution divergence ledger](docs/glossary.md#resolution-divergence-ledger)
+  writer is for non-API callers.
   Provider responses are request-scoped: serving paths never persist them as
   reusable outcomes or as a durable step-by-step record of the calls made.
 - Lookup code uses declared topology and manifests, not adapter internals.

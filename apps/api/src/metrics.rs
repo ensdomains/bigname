@@ -20,6 +20,7 @@ struct ApiMetrics {
     verified_execution: IntCounterVec,
     verified_execution_duration: HistogramVec,
     ccip_gateway_destination_refused: IntCounterVec,
+    label_candidate_writes: IntCounterVec,
     http_requests_in_flight: IntGauge,
     verified_execution_in_flight: IntGauge,
 }
@@ -56,6 +57,11 @@ impl ApiMetrics {
             "CCIP-Read lookups refused before any gateway connection, by destination class.",
             &["class"],
         )?;
+        let label_candidate_writes = registry.int_counter_vec(
+            "label_candidate_writes_total",
+            "Responses whose proven labels were offered to bigname_phase.ens_names, by outcome.",
+            &["outcome"],
+        )?;
         let http_requests_in_flight = registry.int_gauge(
             "http_requests_in_flight",
             "HTTP requests currently executing in API middleware.",
@@ -71,6 +77,7 @@ impl ApiMetrics {
             verified_execution,
             verified_execution_duration,
             ccip_gateway_destination_refused,
+            label_candidate_writes,
             http_requests_in_flight,
             verified_execution_in_flight,
         })
@@ -121,6 +128,24 @@ pub(crate) fn observe_gateway_destination_refusal(class: bigname_lookup::Gateway
         class = class.as_str(),
         "CCIP-Read gateway destination refused"
     );
+}
+
+/// One response's label candidates, counted under `outcome` (`crate::label_staging::Outcome`).
+pub(crate) fn observe_label_candidate_write(outcome: &'static str) {
+    api_metrics()
+        .label_candidate_writes
+        .with_label_values(&[outcome])
+        .inc();
+}
+
+/// Every outcome scrapes from startup, at zero until it first happens.
+pub(crate) fn register_label_candidate_outcomes(outcomes: impl IntoIterator<Item = &'static str>) {
+    for outcome in outcomes {
+        api_metrics()
+            .label_candidate_writes
+            .with_label_values(&[outcome])
+            .inc_by(0);
+    }
 }
 
 pub(crate) async fn bind(bind_addr: SocketAddr) -> anyhow::Result<MetricsServer> {
@@ -362,6 +387,35 @@ mod tests {
                 scrape.lines().any(|line| line
                     .starts_with("ccip_gateway_destination_refused_total{")
                     && line.contains(&label)),
+                "the scrape lacks {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn label_candidate_outcomes_scrape_from_startup_and_count() -> Result<()> {
+        let outcomes =
+            crate::label_staging::Outcome::ALL.map(crate::label_staging::Outcome::as_str);
+        register_label_candidate_outcomes(outcomes);
+        let counter = || {
+            api_metrics()
+                .label_candidate_writes
+                .with_label_values(&["denied"])
+                .get()
+        };
+        let before = counter();
+        observe_label_candidate_write("denied");
+        ensure!(counter() > before);
+        let scrape = api_metrics().registry.encode()?;
+        ensure!(scrape.contains("# TYPE label_candidate_writes_total counter"));
+        for outcome in outcomes {
+            let label = format!("outcome=\"{outcome}\"");
+            ensure!(
+                scrape
+                    .lines()
+                    .any(|line| line.starts_with("label_candidate_writes_total{")
+                        && line.contains(&label)),
                 "the scrape lacks {label}"
             );
         }

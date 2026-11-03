@@ -475,7 +475,7 @@ field requires no schema migration or replay.
 | `project_lookup_name`, `project_lookup_relation`, `project_lookup_inventory`, `project_lookup_record`, `project_lookup_dependency` | Project | Journalled current lookup facts, exact relations and per-resource selected records/dependencies; published with the family marker. |
 | `name_search_documents`, `name_search_postings` | Interpret and the verified label-preimage importer | Atomic current spelling and lexical indexes; rebuilt from surface and retained verified label evidence. |
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
-| `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
+| `ens_names` | operator rainbow load, and the API's [label candidates](deployment.md#api-label-candidates) | Unverified rainbow-table candidates consumed by the import command. No serving path reads them. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
@@ -1972,7 +1972,10 @@ candidate, where the generator records `hash =
 keccak256(name)`.[^graph-ens-rainbow-table][^graph-ens-rainbow-hash]
 
 Authority stays split between the two tables. `ens_names` is an unverified
-staging store: every operator-loaded row is only a claim. `label_preimages`
+staging store: every operator-loaded row is only a claim. The API also stages
+there each label a name request proves
+([name inputs](api-v1.md#name-inputs)), and the import checks those rows like
+any other. `label_preimages`
 remains the verified store: a candidate becomes a preimage row only when it is
 exactly one DNS label and re-hashes — keccak256 of the raw label bytes — to the
 row's recorded hash. A rejected candidate leaves no trace beyond the import's
@@ -1993,7 +1996,10 @@ fills a table the importer never reads, and the run reports zero scanned rows
 rather than failing — the phase table exists, it is just empty. Load the dump's
 rows into `bigname_phase.ens_names` without letting the rest of the dump run
 against that table: `\copy` the data section, or extract the dump's `COPY`
-statement and retarget only that. Do not rewrite the dump's schema
+statement and retarget only that. Once API hosts stage label candidates, a
+`COPY` into the table fails on the first hash it already holds. Copy into a
+temporary table and insert from it with `ON CONFLICT DO NOTHING`, or set
+`BIGNAME_API_LABEL_STAGING_PER_SECOND=0` on every API host for the load. Do not rewrite the dump's schema
 qualification globally, because the same rewrite also redirects the dump's
 `DROP TABLE`
 (upstream: .refs/ens_rainbow/src/main.rs:L33 @ ens_rainbow@bc44492)

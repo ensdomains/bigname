@@ -1353,8 +1353,10 @@ one count for every chain, so the same value covers six times as much time on a
 `/v1/status` report `stale` while the API still serves. Same-chain verified
 record and primary-name calls run at the publication's block, and Basenames
 calls at the Ethereum position the projected name carries, so verified answers
-keep serving through the same lag. Every API path is read-only, including verified records, automatic
-live fallback, primary names with an omitted `source`, and diagnostics.
+keep serving through the same lag. Every API path reads only, including verified records, automatic
+live fallback, primary names with an omitted `source`, and diagnostics, with
+one exception: the [label candidates](#api-label-candidates) below, the API's
+only write.
 `BIGNAME_API_DATABASE_URL` may point at a primary or a physical streaming hot
 standby with the reviewed schema installed. Logical replicas are not supported:
 lookup authority checks compare PostgreSQL manifest row versions, which physical
@@ -1372,13 +1374,42 @@ when connected to a writable primary. Existing observations remain available to
 operators and may still be retired by Project or reorg handling. No serving
 path reads them.
 
+<a id="api-label-candidates"></a>
+The API's first and only write path is the label candidate. A name request
+whose plain label hashes to a labelhash the response serves as its placeholder
+proves that label's text, and the response shows it
+([name inputs](api-v1.md#name-inputs)). After the response is complete, the API
+inserts each such `(labelhash, label)` pair into `bigname_phase.ens_names` on
+its own connection, with conflicts ignored and a one-second statement timeout.
+No serving path reads `ens_names`. Only
+`phase-runner label-preimages import-ens-rainbow` reads it, and the import
+proof-checks every row ([storage](storage.md#rainbow-table-preimage-import)).
+So a write changes no served answer until the operator runs the import.
+
+The write is best effort and never delays or fails a response. On a hot
+standby, or for a role without `INSERT` on the table, the database refuses it.
+The API then serves exactly as before, logs one warning per process, and counts
+each refusal. The counter is `label_candidate_writes_total`, by `outcome`:
+`staged`, `duplicate`, `throttled`, `denied`, `read_only`, `disabled`, or
+`failed`. These settings bound the writes of one process:
+
+- `BIGNAME_API_LABEL_STAGING_PER_SECOND`: writes a second, 10 by default. Zero
+  stages nothing, and responses still show proven labels.
+- `BIGNAME_API_LABEL_STAGING_BURST`: the writes allowed at once after a quiet
+  period, 20 by default.
+- `BIGNAME_API_LABEL_STAGING_MAX_IN_FLIGHT`: concurrent writes, 2 by default.
+- `BIGNAME_API_LABEL_STAGING_MAX_LABELS`: labelhashes the process remembers as
+  staged, so it writes each label once, 65,536 by default.
+
 The API role needs `USAGE` on `bigname_phase`, `SELECT` on the serving relations
-below, and `EXECUTE` only on the fixed read-only snapshot guard below. This
-fixed-`search_path`, security-definer function is owned by the schema owner; its
+below, `EXECUTE` only on the fixed read-only snapshot guard below, and `INSERT`
+on `bigname_phase.ens_names` for the label candidates. The snapshot guard is a
+fixed-`search_path`, security-definer function owned by the schema owner. Its
 installer revokes default `PUBLIC` execution. Do not grant the API role
-`CREATE` on `bigname_phase` or `public`, writes on any application relation, or
-execution of the retained diagnostic ledger writer. The nine-argument boolean
-core is private to the schema owner and must not be granted to the API role.
+`CREATE` on `bigname_phase` or `public`, any other write on an application
+relation, or execution of the retained diagnostic ledger writer. The
+nine-argument boolean core is private to the schema owner and must not be
+granted to the API role.
 
 API startup tolerates a wholly absent phase schema so `/v1/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks
@@ -1386,7 +1417,8 @@ every phase-schema relation, function, and type its serving paths read:
 relations by name and `SELECT` privilege, the snapshot guard by exact signature
 and `EXECUTE` privilege, and the `canonicality_state` type. If an object or its
 required privilege is unavailable, the API refuses to start and its diagnostic
-names every unavailable identity.
+names every unavailable identity. Startup does not check the `INSERT` on
+`ens_names`: the API serves without it.
 
 After the phase schema exists, the schema owner provisions the dedicated login
 with these privileges (substitute
@@ -1471,7 +1503,13 @@ TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
     text, bigint, text, jsonb, jsonb, uuid, text, text
 ) TO bigname_api;
+GRANT INSERT ON TABLE bigname_phase.ens_names TO bigname_api;
 ```
+
+For an existing API role, the schema owner applies the `INSERT` grant on
+`bigname_phase.ens_names` on the primary before serving the first API image
+that stages label candidates. An image that runs without it serves exactly as
+before and counts every candidate `denied`.
 
 <a id="address-history-catalogue-role-upgrade"></a>
 For an existing API role, after applying

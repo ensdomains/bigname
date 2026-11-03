@@ -282,7 +282,8 @@ pub(crate) async fn get_subnames(
     )
     .await?;
     Ok(Json(Envelope {
-        data,
+        meta: snapshot.finish(&state).await?,
+        data: super::support::heal_subnames(&state, &normalized, data),
         page: Some(Page {
             cursor: params.cursor.clone(),
             next_cursor,
@@ -290,7 +291,6 @@ pub(crate) async fn get_subnames(
             total_count: Some(storage_page.total_count).filter(|total| *total <= total_cap),
             has_more,
         }),
-        meta: snapshot.finish(&state).await?,
     }))
 }
 

@@ -18,6 +18,7 @@ mod bounds;
 mod cli;
 mod errors;
 mod health;
+mod label_staging;
 mod metrics;
 mod name_filter;
 mod openapi;
@@ -53,6 +54,7 @@ async fn main() -> Result<()> {
 
 async fn serve(args: ServeArgs) -> Result<()> {
     args.bounds.validate()?;
+    args.label_staging.validate()?;
     let gateway_destination_policy = args.gateway_destination_policy()?;
     let ccip_gateway_deny_ranges = gateway_destination_policy.len();
     bigname_lookup::install_gateway_destination_policy(gateway_destination_policy)?;
@@ -106,7 +108,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
     )?;
     let state = AppState::new_with_rpc_urls(pool, chain_rpc_urls)
         .with_phase_heartbeat_max_age_secs(args.phase_heartbeat_max_age_secs)
-        .with_status_freshness_config(status_freshness_config);
+        .with_status_freshness_config(status_freshness_config)
+        .with_label_staging(args.label_staging.clone());
     state
         .status_freshness
         .spawn_refresh(state.lookup_chain_rpc_urls.clone());
@@ -141,6 +144,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         verified_rate_limit_burst = args.bounds.verified_rate_limit_burst,
         verified_rate_limit_max_clients = args.bounds.verified_rate_limit_max_clients,
         trust_x_forwarded_for = args.bounds.trust_x_forwarded_for,
+        label_staging_per_second = args.label_staging.per_second,
         "API booted"
     );
 

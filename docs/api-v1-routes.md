@@ -368,7 +368,10 @@ collection route carry neither header.
   failure_reason?, normalization?, record?, records?, page?}`. `input` echoes
   the caller-supplied input, including `id` when supplied; omitted `id` is not
   synthesized. `kind` is `name` or `address`. Name results use `record` for the
-  single record object. Reverse results use `records` for zero or more record
+  single record object. Every name input proves the labels it spells as text,
+  for every record of the batch: a record's `name` and `display_name` show that
+  text in place of the label's placeholder, an address input's records included
+  ([name inputs](api-v1.md#name-inputs)). Reverse results use `records` for zero or more record
   rows with `is_primary` and `relations` in addition to the shared record
   fields; a `resolves_to` row carries `relations: ["resolves_to"]` and
   `resolution: {coin_type, record_key}`, and its `is_primary` and
@@ -825,6 +828,10 @@ collection route carry neither header.
   served path's record under the requested `name`, `display_name` and `namehash`, with
   `canonical_name` naming the served path. A path that resolves to no token answers as
   before, with the name's own row or `404 not_found`.
+- Proven labels: a label the request spells as text shows as that text in `name`,
+  `display_name` and `canonical_name` wherever the row would serve its labelhash
+  placeholder, and is staged for the preimage import
+  ([name inputs](api-v1.md#name-inputs)).
 - ENSv1 registry resolver: ENSv1 clients read a name's resolver from the ENSv1
   registry (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f).
   A name whose `authority` is `ens_v1` or `ens_v0`, that serves a resolver and
@@ -1265,6 +1272,10 @@ its value map:
   resolver, indexed records and inventory, and `canonical_name` names the served path.
   `source=verified` and the verified keys of `source=auto` read the chain for the
   requested path. A path that resolves to no token answers as before.
+- Proven labels: the response carries no name of the row except `canonical_name`,
+  which shows a label the request spells as text, as on name detail. The labels
+  the row serves as placeholders and the request proves are staged for the
+  preimage import ([name inputs](api-v1.md#name-inputs)).
 - ENSv1 registry resolver: as on [name detail](#get-v1namesname), a name whose
   `authority` is `ens_v1` or `ens_v0` serves the resolver its ENSv1 registry
   pointer names, `ens_v1.resolver`, and that resolver's records for the node,
@@ -2042,8 +2053,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   spelling with the row. Its row never takes the escape form: a label whose
   preimage is not valid text reads as the placeholder. A parent whose surface
   stores no raw label bytes lists and counts its children under its own
-  rendered name, at any depth. Admitted ENSv1 `NewOwner` events create these
-  surfaces when the complete labelhash path is proven back to the root.
+  rendered name, at any depth. A parent label the request spells as text shows
+  as that text in every row's `name` and `display_name`, while a child's own
+  label keeps its placeholder ([name inputs](api-v1.md#name-inputs)). Cursors,
+  order and counts do not change with the spelling. Admitted ENSv1 `NewOwner`
+  events create these surfaces when the complete labelhash path is proven back
+  to the root.
   The escape form is never a name input. Resolver records are not included here;
   use `GET /v1/names/{name}` for `resolver` and grouped `records`, or `GET /v1/names/{name}/records` for per-key record
   answers.
