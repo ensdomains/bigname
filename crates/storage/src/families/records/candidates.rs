@@ -19,7 +19,10 @@
 //! an ENSv1 pointer through that registry pointer when the two disagree (`serving.rs`). A
 //! record-id row likewise reaches the ENSv1 pointers at every node whose registry pointer names
 //! its resolver, and a row written under a name at another node reaches the ENSv1 pointers of
-//! that name's namehash when the namehash's registry pointer names the row's resolver.
+//! that name's namehash when the namehash's registry pointer names the row's resolver. Each of
+//! those registry pointers also reaches the resources the node's `ens_v1` binding candidates
+//! select, because a selected resource with no pointer of its own serves the registry pointer's
+//! records (`serving.rs`, `registry_stand_ins`).
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -65,6 +68,11 @@ pub(crate) struct Candidate {
 /// resource pointers at each pointer's node. That walks the registry pointers at the resolver,
 /// the same class of walk the record-id piece below makes over the resource pointers at it. A
 /// pointer at the registry pointer's own resolver is left to that piece.
+///
+/// `registry_nodes` repeats those four registry joins without the resource pointers, and the
+/// last piece reaches each node's `ens_v1` binding candidates on their name index, the name
+/// being the namespace and the node. A resource with a pointer of its own that a candidate
+/// selects is also reached, and the forward inventory then serves that pointer.
 pub(super) const CANDIDATES: &str = "WITH node_keys AS (
          SELECT chain_id, resolver_address, node,
                 CASE WHEN logical_name_id <> ''
@@ -85,6 +93,43 @@ pub(super) const CANDIDATES: &str = "WITH node_keys AS (
                 key.coin_type
          FROM node_keys key
          JOIN mirrors mirror ON mirror.chain_id = key.chain_id
+     ),
+     registry_nodes AS (
+         SELECT registry.chain_id, registry.namespace, registry.node, key.coin_type
+         FROM bigname_phase.project_address_record_node_index key
+         JOIN bigname_phase.project_registry_pointer registry
+           ON registry.chain_id = key.chain_id
+          AND registry.namespace = split_part(key.logical_name_id, ':', 1)
+          AND registry.node = key.node
+          AND registry.resolver_address = key.resolver_address
+         WHERE key.address = $1 AND key.coin_type = ANY($2::text[]) AND key.logical_name_id <> ''
+         UNION ALL
+         SELECT registry.chain_id, registry.namespace, registry.node, key.coin_type
+         FROM bigname_phase.project_address_record_node_index key
+         JOIN bigname_phase.project_registry_pointer registry
+           ON registry.chain_id = key.chain_id
+          AND registry.namespace = ANY($3::text[])
+          AND registry.node = key.node
+          AND registry.resolver_address = key.resolver_address
+         WHERE key.address = $1 AND key.coin_type = ANY($2::text[]) AND key.logical_name_id = ''
+         UNION ALL
+         SELECT registry.chain_id, registry.namespace, registry.node, key.coin_type
+         FROM bigname_phase.project_address_record_node_index key
+         JOIN bigname_phase.project_registry_pointer registry
+           ON registry.chain_id = key.chain_id
+          AND registry.namespace = split_part(key.logical_name_id, ':', 1)
+          AND registry.node = lower(split_part(key.logical_name_id, ':', 2))
+          AND registry.resolver_address = key.resolver_address
+         WHERE key.address = $1 AND key.coin_type = ANY($2::text[]) AND key.logical_name_id <> ''
+           AND lower(split_part(key.logical_name_id, ':', 2)) <> key.node
+         UNION ALL
+         SELECT registry.chain_id, registry.namespace, registry.node, record.coin_type
+         FROM bigname_phase.project_address_record_id_index record
+         JOIN bigname_phase.project_registry_pointer registry
+           ON registry.chain_id = record.chain_id
+          AND registry.resolver_address = record.resolver_address
+          AND registry.namespace = ANY($3::text[])
+         WHERE record.address = $1 AND record.coin_type = ANY($2::text[])
      ),
      matched AS (
          SELECT pointer.chain_id, pointer.resource_id, admitted.coin_type
@@ -171,6 +216,13 @@ pub(super) const CANDIDATES: &str = "WITH node_keys AS (
            ON pointer.chain_id = record.chain_id
           AND pointer.resolver_address = record.resolver_address
          WHERE record.address = $1 AND record.coin_type = ANY($2::text[])
+         UNION ALL
+         SELECT candidate.chain_id, candidate.resource_id, registry.coin_type
+         FROM registry_nodes registry
+         JOIN bigname_phase.project_binding_candidate candidate
+           ON candidate.chain_id = registry.chain_id
+          AND candidate.logical_name_id = registry.namespace || ':' || registry.node
+          AND candidate.authority_arm = 'ens_v1'
      )
      SELECT chain_id, resource_id, coin_type, true AS indexed
      FROM matched
