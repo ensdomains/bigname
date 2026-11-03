@@ -24,9 +24,11 @@
 //! | 27 | Storage over the batch loop's limit before the first build, on a completed Project row | Nothing built, the WARN with the breach, size and free disk on every poll, gauge 1, row left completed and no loop progress, then built once capacity recovers, gauge 0 | `a_breach_before_the_first_build_waits_without_writing_the_phase_row` |
 //! | 28 | Storage over the limit after the first of two builds | The second waits, then builds | `a_breach_between_two_builds_holds_the_second` |
 //! | 29 | A stop while waiting for capacity | Returns, no build issued, gauge 0, rebuild lock released | `a_stop_while_waiting_for_capacity_exits_without_building` |
-//! | 30 | Storage over the limit with the Project row running, as a restart-loop retry finds it | Paused while waiting, running again before the build, no state error | `a_running_project_row_is_paused_while_the_rebuild_waits` (in `walk_index_restore_capacity.rs`, with 27 to 29, 31 and 32) |
+//! | 30 | Storage over the limit with the Project row running, as a restart-loop retry finds it | Paused while waiting, running again before the build, no state error | `a_running_project_row_is_paused_while_the_rebuild_waits` (in `walk_index_restore_capacity.rs`, with 27 to 29 and 31 to 34) |
 //! | 31 | A stop while a rebuild read waits on an `ACCESS EXCLUSIVE` lock on `chain_phase_state` | Returns within the stop budget, rebuild lock released, nothing left invalid | `a_stop_while_a_rebuild_read_waits_on_a_lock_returns_and_releases_the_rebuild_lock` |
 //! | 32 | An invalid leftover with storage over the limit | Dropped, then the build waits | `an_invalid_leftover_is_dropped_before_the_wait_for_capacity` |
+//! | 33 | The rebuild's session ends while it waits for capacity | A retryable error, a new session waits again, then builds, no failed-build latch | `a_session_lost_while_waiting_for_capacity_is_retried_not_failed` |
+//! | 34 | Storage over the limit with the Project row paused, as a retry after a batch-loop pause finds it | Left paused with no write, records loop progress, Project's start resumes it | `a_paused_project_row_records_progress_and_is_left_paused` |
 //! | D5 | Rebuild settings set, and unset | The build session runs with them, or with the server's | `restore_applies_the_build_settings` |
 
 use std::collections::{BTreeMap, BTreeSet};

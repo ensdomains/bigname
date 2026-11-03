@@ -138,8 +138,9 @@ below. Otherwise it:
 3. One index at a time, drops an invalid leftover with `DROP INDEX CONCURRENTLY`, which frees
    the space it holds, waits for storage capacity, then runs `install.sql`'s
    `CREATE INDEX CONCURRENTLY` statement, outside a transaction, with `lock_timeout` 0 and
-   each build bounded to six hours. It logs each index it built with its duration. The capacity check is the batch loop's, with the same
-   database ceiling and free-disk floor. While a breach lasts it logs
+   each build bounded to six hours. It logs each index it built with its duration. The
+   capacity check is the batch loop's, with the same database ceiling and free-disk floor.
+   While a breach lasts it logs
    `the rebuild of the normalized_events indexes the walk index set scripts drop waits until
    storage capacity recovers` on every poll, with `breach_reasons`, `database_size_bytes` and
    `free_disk_bytes`, and the metric `phase_runner_walk_index_capacity_blocked{chain}` reads 1.
@@ -152,9 +153,11 @@ below. Otherwise it:
 Before the builds its reads run with a ten-second lock timeout and a one-minute statement
 timeout, so a read held behind a lock fails and the restart loop retries it. While it waits for
 the lock or for another build, or builds, it records loop progress, so a long build does not
-raise the stale-loop alert. While it waits for capacity it pings its connection on every poll, pauses a running Project
-row, as the batch loop does, and resumes it once capacity recovers. A running or paused row
-records loop progress. A Project row that is idle or completed, as on a first walk or before a
+raise the stale-loop alert. While it waits for capacity it pings its connection on every poll,
+so a connection that has gone is retried rather than failing the build, pauses a running
+Project row, as the batch loop does, and resumes it once capacity recovers. A row already
+paused is left paused for Project's start to resume. A running or paused row records loop
+progress. A Project row that is idle or completed, as on a first walk or before a
 redo, is left as it is and records none, so a long wait for capacity raises the stale-loop
 alert. The rebuild does not refresh the phase heartbeat, so on a running or paused row a long
 build or wait can also raise the heartbeat-stale alert.
