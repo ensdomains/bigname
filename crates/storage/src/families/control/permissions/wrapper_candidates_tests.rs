@@ -6,12 +6,11 @@
 //!
 //! The fixture is a chain just after the ENSv2 activation: 700 WrapperRegistries under one
 //! parent registry, whose entries 148 owners hold but for three special ones, beside 100,000
-//! entries of other registries
-//! and 100,000 other grants. The approvals table was analyzed before its first
-//! `ens_v2_registry` row, and autovacuum is off on it, so the planner estimates those approvals
-//! at about none. The fixture checks that in `pg_stats` before anything is planned. Sequential
-//! scans stay enabled and no `enable_*` switch is set, so every plan is the planner's own
-//! choice.
+//! entries of other registries and 100,000 other grants. The approvals table was analyzed
+//! before its first `ens_v2_registry` row, and autovacuum is off on it, so the planner
+//! estimates those approvals at about none. The fixture checks that in `pg_stats` before
+//! anything is planned. Sequential scans stay enabled and no `enable_*` switch is set, so
+//! every plan is the planner's own choice.
 //!
 //! Each source is planned on its own, cut out of the statement the reader sends: a source's
 //! plan is that of its leg of the union. Each statement as sent is planned as well.
@@ -623,7 +622,7 @@ async fn wrapper_sources_keep_every_key_of_the_resources() -> Result<()> {
         let mut read_keys = BTreeMap::new();
         for read in &reads {
             // 64 is the reader's batch. 1 continues every read from a cursor, and 501 cuts
-            // those of the two roots with 2,000 keys or more.
+            // inside those of the two roots with 2,000 keys or more.
             let heavy = [root(1), root(4)].contains(&read.resource);
             for limit in if heavy { [64, 501] } else { [64, 1] } {
                 let mut all = Vec::new();
@@ -865,8 +864,7 @@ async fn keys_before(
         sql_before != sql,
         "{read:?}: the statement sends no bound source"
     );
-    let sql = sql_before;
-    sqlx::query_as(&sql)
+    sqlx::query_as(&sql_before)
         .persistent(false)
         .bind(subject)
         .bind(Some(read.resource))
