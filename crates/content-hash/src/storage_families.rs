@@ -139,6 +139,8 @@ pub(crate) const COMPOSITION_FILES: &[Classified] = &[
         PATHS,
     ),
     project("crates/storage/src/families/topology/children.rs", LISTING),
+    project("crates/storage/src/families/topology/children/spelling.rs", LISTING),
+    project("crates/storage/src/families/topology/children/wanted.rs", LISTING),
     project(
         "crates/storage/src/families/topology/children_page/child_flags.rs",
         LISTING,

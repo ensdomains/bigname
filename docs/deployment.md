@@ -5751,8 +5751,9 @@ composition pass derives every parent's rows in a children stream after the name
   preimage observation and most labels are unhealed, so selecting by label instead would derive
   every unspelled name under a shared label, such as every unspelled `.eth` name, at nearly
   every block.
-- A preimage written outside a block, such as the rainbow import, emits no observation, so the
-  stored names it would spell heal only when their rows are derived again for another reason.
+- A preimage written outside a block, such as the rainbow import, emits no observation, and an
+  observation heals only its own chain's rows. The stored names such a preimage would spell heal
+  only when their rows are derived again for another reason. The served name applies it at read.
 - Apply it before starting the release. The family writer inserts into both tables, so without
   them the first family block fails.
 - A block that moves a parent's own facts (its migration state, its ENSv2 subregistry pointer,

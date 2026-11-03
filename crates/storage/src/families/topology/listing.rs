@@ -13,9 +13,10 @@
 //!
 //! Each row also keeps the label hashes its stored name still spells as `[labelhash]`
 //! (`unhealed_labelhashes`, from the same expressions as the name): a preimage observation derives
-//! again only the rows that hold one of the observed name's labels. A preimage written outside a
-//! block, such as the rainbow import (TYR-373), emits no observation, so the stored names it
-//! would spell heal only when their rows are derived again for another reason.
+//! again only the rows that hold one of the observed name's labels, on its own chain. A preimage
+//! written outside a block, such as the rainbow import (TYR-373), or observed on another chain,
+//! heals the stored names it would spell only when their rows are derived again for another
+//! reason.
 use sqlx::{Execute, Postgres, QueryBuilder, postgres::PgArguments};
 
 use super::children::{ListingBlock, Parents, Relation, push_listed};

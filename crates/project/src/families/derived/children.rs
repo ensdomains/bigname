@@ -17,9 +17,10 @@
 //! in place, and an address window of its subregistry. Such a parent is derived whole, by one
 //! statement, and every row of it is journalled. An observation derives no parent whole.
 //!
-//! The limit: a preimage written outside a block, such as the rainbow import (TYR-373), emits no
-//! observation, so a stored name it would spell heals only when its row is derived again for
-//! another reason. The imported spelling is applied at read meanwhile.
+//! The limits: a preimage written outside a block, such as the rainbow import (TYR-373), emits no
+//! observation, and an observation heals only its own chain's rows, while `label_preimages` is
+//! shared by every chain. A stored name such a preimage would spell heals only when its row is
+//! derived again for another reason. The served name applies the preimage at read meanwhile.
 //!
 //! Inputs that change in place with no block, such as a lineage readability flip or a migration
 //! registry association recorded after the parent's migration, are covered by the rebuild a hash

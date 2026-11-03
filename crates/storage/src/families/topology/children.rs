@@ -86,7 +86,6 @@ impl Relation<'_> {
             Self::Stored(_) => " AND preimage.source_kind <> 'ens_rainbow_import'",
         }
     }
-
 }
 
 /// Push `clock`, `parent`, `parent_migration`, `candidates` and `selected` CTE definitions (each

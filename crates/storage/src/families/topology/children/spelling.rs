@@ -96,7 +96,7 @@ macro_rules! child_spelled_name {
 }
 
 /// The served child name: `child_spelled_name`, else the labelhash placeholder under the
-/// parent's spelling (crates/storage/src/children/reads.rs, `CHILD_DISPLAY_NAME_EXPR`).
+/// parent's spelling.
 pub(in crate::families::topology) const CHILD_DISPLAY_NAME: &str = concat!(
     "COALESCE(",
     child_spelled_name!(),
