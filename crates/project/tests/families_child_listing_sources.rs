@@ -32,6 +32,22 @@ async fn chain_with_heads(
     finalized: Option<i64>,
 ) -> Result<()> {
     fixture.lineage(chain, 20).await?;
+    for (state, through) in [("safe", safe), ("finalized", finalized)] {
+        let Some(through) = through else {
+            continue;
+        };
+        sqlx::query(
+            "UPDATE chain_lineage SET canonicality_state = $2::canonicality_state
+             WHERE chain_id = $1 AND block_number <= $3
+               AND canonicality_state IN ('canonical', 'safe')
+               AND canonicality_state::text <> $2",
+        )
+        .bind(chain)
+        .bind(state)
+        .bind(through)
+        .execute(&fixture.pool)
+        .await?;
+    }
     sqlx::query(
         "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number,
              safe_block_hash, safe_block_number, finalized_block_hash, finalized_block_number)
