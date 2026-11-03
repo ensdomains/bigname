@@ -1,4 +1,7 @@
-use std::str::FromStr;
+use std::{
+    str::FromStr,
+    sync::{Arc, OnceLock},
+};
 
 use sqlx::{
     PgPool,
@@ -18,6 +21,8 @@ pub struct RunnerDatabase {
     pool: PgPool,
     connect_options: PgConnectOptions,
     index_build: IndexBuildSettings,
+    /// The first failed rebuild in this process, shared by every clone.
+    index_build_failure: Arc<OnceLock<String>>,
 }
 
 #[derive(Clone)]
@@ -58,6 +63,7 @@ impl RunnerDatabase {
             pool,
             connect_options,
             index_build: IndexBuildSettings::default(),
+            index_build_failure: Arc::default(),
         })
     }
 
@@ -79,6 +85,10 @@ impl RunnerDatabase {
 
     pub(crate) fn index_build_settings(&self) -> &IndexBuildSettings {
         &self.index_build
+    }
+
+    pub(crate) fn index_build_failure(&self) -> &OnceLock<String> {
+        &self.index_build_failure
     }
 }
 

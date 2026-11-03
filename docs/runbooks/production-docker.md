@@ -399,7 +399,8 @@ before the first start. Then:
   `ops/walk-index-set/install.sql`, record its output, and start the runner again. The runner
   then finds every index in place and logs no build line.
 - A build that fails stops the chain with an error naming the index and the cause. The
-  runner does not retry it, and exits non-zero once every chain has stopped.
+  runner does not retry it, and every other chain stops at its Project entry with the same
+  error. The runner exits non-zero once every chain has stopped.
 - Under the container's restart policy a failed build shows as a restart loop in the restart
   count, and each start drops the invalid leftover and builds it again.
 

@@ -32,8 +32,9 @@ const PROGRESS: Duration = Duration::from_secs(30);
 /// as another chain's Interpret batch.
 const BUILD_TIMEOUT: &str = "6h";
 const RECOVERY: &str = "Project does not start until every one is in place; confirm in \
-                        pg_stat_progress_create_index that no build is still running, then \
-                        restart the runner, which drops an invalid leftover and builds it again";
+                        pg_stat_activity that no CREATE INDEX on normalized_events is still \
+                        running, then restart the runner, which drops an invalid leftover and \
+                        builds it again";
 
 /// Session settings for the rebuild. Unset keeps the server's value.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -67,10 +68,18 @@ pub(crate) async fn restore(database: &RunnerDatabase, run: &Restore<'_>) -> Run
         warn_other_definitions(chain_id, &states);
         return Ok(());
     }
+    failed_before(database)?;
     let Some(mut session) = until_cancelled(cancellation, Session::open(database)).await? else {
         return Ok(());
     };
     let result = session.restore(database, run).await;
+    // Only a failed build, drop or final check is a not-retried transient error here.
+    if let Err(error) = &result
+        && error.kind() == ErrorKind::Transient
+        && !error.is_retryable()
+    {
+        let _ = database.index_build_failure().set(error.to_string());
+    }
     // After a stop a cancelled statement may still be owed its reply, so the session is dropped
     // rather than closed. Either way the advisory lock goes with it.
     if !cancellation.is_cancelled() {
@@ -93,6 +102,19 @@ where
                 error,
             )
         })
+}
+
+/// A rebuild that failed in this process is not run again by another chain: each stops at its
+/// Project entry with the same error, so the process exits and a restart drops the leftover.
+fn failed_before(database: &RunnerDatabase) -> RunnerResult<()> {
+    match database.index_build_failure().get() {
+        Some(failure) => Err(RunnerError::transient(format!(
+            "a rebuild of the normalized_events indexes the walk index set scripts drop already \
+             failed in this process, and it is not retried: {failure}"
+        ))
+        .not_retried()),
+        None => Ok(()),
+    }
 }
 
 fn present(status: &IndexStatus) -> bool {
@@ -158,10 +180,19 @@ impl Session {
 
     async fn restore(&mut self, database: &RunnerDatabase, run: &Restore<'_>) -> RunnerResult<()> {
         let chain_id = run.chain_id;
-        if !self.lock(run).await? || !self.await_other_builds(run).await? {
+        if !self.lock(run).await? {
             return Ok(());
         }
-        // Another process may have finished while this one waited.
+        // Another chain or process may have finished while this one waited.
+        let states = load(&mut self.connection).await?;
+        if states.iter().all(present) {
+            warn_other_definitions(chain_id, &states);
+            return Ok(());
+        }
+        failed_before(database)?;
+        if !self.await_other_builds(run).await? {
+            return Ok(());
+        }
         let states = load(&mut self.connection).await?;
         if let Some((name, held_by)) = states.iter().find_map(|status| match &status.state {
             IndexState::Foreign { held_by } => Some((status.index.name, held_by)),
@@ -428,7 +459,8 @@ impl Session {
 
     /// A stop cancels the statement on the server: a dropped connection alone would leave a
     /// build running there until it next writes to this client. The cancel and its reply share
-    /// what is left of the chain's stop budget.
+    /// what is left of the chain's stop budget. Under Verify and Live a Verify failure cancels
+    /// the same token and so starts that budget, which then bounds only the chain's exit.
     async fn statement(
         &mut self,
         pool: &PgPool,

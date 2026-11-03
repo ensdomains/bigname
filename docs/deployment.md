@@ -5287,8 +5287,9 @@ While the runner builds:
 When a build fails:
 
 - A build or drop that fails stops the chain with an error that names the index and the
-  cause. The runner does not retry it in the process. Once every chain has stopped, the
-  process exits non-zero.
+  cause. The runner does not retry it in the process: another chain's Project entry stops
+  with the same error instead of building again. Once every chain has stopped, the process
+  exits non-zero.
 - Under a restart policy each start drops the invalid leftover and builds it again, so a cause
   that persists shows as a restart loop with the same error.
 - A name held by another relation is refused and never dropped.
