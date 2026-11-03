@@ -316,7 +316,20 @@ async fn a_filtered_total_counts_the_name_index_only() -> Result<()> {
         let page = checked_page(&mut conn, PARENT, &fenced, None, None, CHILDREN as u64).await?;
         ensure!(page.total_count == CHILDREN as u64, "{}", page.total_count);
         // `checked_page` stores the listing again, so its pages are vacuumed again for the
-        // index-only scan, and the sequential scan a 2,000-row table invites is ruled out.
+        // index-only scan, and the sequential scan a 2,000-row table invites is ruled out. The
+        // chain also lists 20,000 children of 200 other parents, as a served chain does, so a
+        // read of the chain's rows filtered by parent costs what it would there.
+        raw_sql(&format!(
+            "INSERT INTO project_child_listing (chain_id, parent_logical_name_id,
+                 child_logical_name_id, namespace, display_key, display_name, namehash,
+                 lifecycle_shadow, wrapper_held, released_lease, expires_key, registered_key)
+             SELECT '{CHAIN}', 'ens:other' || n % 200, 'ens:other-child' || n, 'ens',
+                    'c' || n || '.other.eth', 'c' || n || '.other.eth', '0xother' || n,
+                    FALSE, FALSE, FALSE, -1, -1
+             FROM generate_series(1, 20000) n"
+        ))
+        .execute(&mut *conn)
+        .await?;
         raw_sql("VACUUM ANALYZE project_child_listing")
             .execute(&mut *conn)
             .await?;
