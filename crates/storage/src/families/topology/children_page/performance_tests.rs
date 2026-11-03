@@ -11,7 +11,7 @@ use sqlx::raw_sql;
 use super::*;
 
 pub(super) const CHILDREN: i64 = 2_000;
-const PARENT: &str = "ens:parent";
+pub(super) const PARENT: &str = "ens:parent";
 pub(super) const CHAIN: &str = "ethereum-mainnet";
 
 #[tokio::test]
