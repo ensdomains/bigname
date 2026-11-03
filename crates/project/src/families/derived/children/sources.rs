@@ -208,7 +208,7 @@ fn plan(stored: Option<(i64, &input::Revision)>, current: Option<&input::Revisio
         };
     };
     match stored {
-        Some((_, revision)) if revision != current => Plan {
+        Some((_, revision)) if revision != current && revision.1 == Some(-7) => Plan {
             after: -1,
             reset: true,
             advances: true,
