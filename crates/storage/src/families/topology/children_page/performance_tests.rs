@@ -508,7 +508,7 @@ fn edge_scans(plan: &Value) -> Vec<&Value> {
 
 // The parent-wide arm of the child listing (TYR-455, the parent-wide plan row): Project derives
 // a parent's every listing row in one statement (`topology::listing_rows`). Over the 2,000-child
-// parent among 20,000 edges of another parent, under both plan modes, the parent's edges are
+// parent among 20,000 edges of 200 other parents, under both plan modes, the parent's edges are
 // read by a range of the edge key on the parent node, never by a scan of the edge family, and
 // the statement returns the parent's 2,000 rows.
 #[tokio::test]
@@ -524,7 +524,8 @@ async fn the_parent_wide_listing_reads_the_parents_edges_by_range() -> Result<()
             "INSERT INTO project_child_edge_candidate(chain_id, namespace, parent_node,
                  child_node, authority_arm, block_number, transaction_index, log_index,
                  event_identity, owner, labelhash, source_family)
-             SELECT '{CHAIN}', 'ens', 'other', '0x' || lpad(to_hex(n), 64, '0'), 'ens_v1', 100,
+             SELECT '{CHAIN}', 'ens', 'other' || n % 200, '0x' || lpad(to_hex(n), 64, '0'),
+                 'ens_v1', 100,
                  1, n, 'other:' || n || ':0', '0x1111111111111111111111111111111111111111',
                  '0x' || lpad(to_hex(n), 64, '0'), 'ens_v1_registry_l1'
              FROM generate_series({CHILDREN} + 1, {CHILDREN} + 20000) n;
