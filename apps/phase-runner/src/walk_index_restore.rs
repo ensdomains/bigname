@@ -240,7 +240,7 @@ impl Session {
             warn_other_definitions(chain_id, &states);
             return Ok(());
         }
-        self.warn_interpret_redos(chain_id).await?;
+        self.warn_unfinished_interprets(chain_id).await?;
         let (maintenance_work_mem, max_parallel_maintenance_workers) =
             self.configure(database.index_build_settings()).await?;
         info!(
@@ -367,23 +367,33 @@ impl Session {
         }
     }
 
-    /// The indexes serve every chain on the database, so a build while another chain is still
-    /// in an Interpret redo makes that redo's remaining batches maintain them.
-    async fn warn_interpret_redos(&mut self, chain_id: &str) -> RunnerResult<()> {
+    /// The indexes serve every chain on the database, so a build while another chain's Interpret
+    /// has not completed, in a redo or on its first walk, makes that chain's remaining batches
+    /// maintain them.
+    async fn warn_unfinished_interprets(&mut self, chain_id: &str) -> RunnerResult<()> {
         let walking: Option<String> = sqlx::query_scalar(
-            "SELECT string_agg(chain_id, ', ' ORDER BY chain_id) FROM chain_phase_state
-             WHERE phase_name = 'interpret' AND redo_in_progress",
+            "SELECT string_agg(
+                        chain_id || ' (' || phase_status::text
+                            || CASE WHEN redo_in_progress THEN ', redo' ELSE '' END || ')',
+                        ', ' ORDER BY chain_id)
+             FROM chain_phase_state
+             WHERE phase_name = 'interpret'
+               AND chain_id <> $1
+               AND (redo_in_progress OR phase_status::text <> 'completed')",
         )
+        .bind(chain_id)
         .fetch_one(&mut self.connection)
         .await
-        .map_err(|error| RunnerError::database("failed to read the Interpret redos", error))?;
+        .map_err(|error| {
+            RunnerError::database("failed to read the other chains' Interpret state", error)
+        })?;
         if let Some(walking) = walking {
             warn!(
                 chain_id,
-                interpret_redo_chains = %walking,
+                interpret_unfinished_chains = %walking,
                 "building the normalized_events indexes the walk index set scripts drop while \
-                 these chains are still in an Interpret redo; their remaining batches maintain \
-                 the rebuilt indexes"
+                 these chains' Interpret has not completed; their remaining batches maintain the \
+                 rebuilt indexes"
             );
         }
         Ok(())

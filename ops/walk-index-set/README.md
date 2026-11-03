@@ -116,9 +116,10 @@ flight finish, so Interpret can still complete before the stop, and then the run
 covers the rest.
 
 The set is shared, so on a database with two chains the first chain whose Project starts
-rebuilds the indexes for both, while the other chain's Interpret redo may still be running.
-The runner logs a warning naming each chain still in an Interpret redo. That chain's
-remaining batches maintain the rebuilt indexes, as they would after a hand-run `install.sql`.
+rebuilds the indexes for both, while the other chain's Interpret may still be running. The
+runner logs a warning naming each other chain whose Interpret has not completed, in a redo or
+on its first walk, with its state. That chain's remaining batches maintain the rebuilt
+indexes, as they would after a hand-run `install.sql`.
 
 ## The phase runner's rebuild
 
@@ -148,23 +149,23 @@ While it waits or builds it records loop progress, so a long build does not rais
 stale-loop alert.
 
 - A valid index under one of the names is kept whatever its definition. When the definition
-  differs from `install.sql`'s, the runner logs a warning with the definition it found and
-  the one it expects, once per process, and Project reads the index as found. A changed definition takes a new
-  name ([`docs/storage.md`](../../docs/storage.md#walk-index-set)).
+  differs from `install.sql`'s, the runner logs a warning with the definition it found and the
+  one it expects, once per process, and Project reads the index as found. A changed definition
+  takes a new name ([`docs/storage.md`](../../docs/storage.md#walk-index-set)).
 - A name held by a table, a view or an index on another table stops the chain with an error
   naming the relation, and nothing is dropped. Remove or rename that relation, then restart
   the runner.
-- A build or drop that fails stops the chain with an error naming the index and the cause.
-  It is not retried in the process: another chain's Project entry stops with the same error
-  instead of building again. Once every chain has stopped the process exits non-zero. Under a restart policy
-  each start drops the invalid leftover and builds it again, so a cause that persists, such
-  as a login that does not own the table, shows as a restart loop with the same error each
+- A build or drop that fails stops the chain with an error naming the index and the cause. It is
+  not retried in the process: another chain's Project entry stops with the same error instead of
+  building again. Once every chain has stopped the process exits non-zero. Under a restart
+  policy each start drops the invalid leftover and builds it again, so a cause that persists,
+  such as a login that does not own the table, shows as a restart loop with the same error each
   time.
-- A stop cancels the build on the server and leaves its invalid entry, which the next start
-  drops and builds again. After a one-shot Interpret redo, the next start is the matching
-  Project redo, not the Interpret redo's command again. Indexes already built are kept. A stop whose budget has already
-  run out sends no cancel, so the build carries on until it ends, and the next start waits
-  for it.
+- A stop cancels the build on the server and leaves its invalid entry, which the next
+  Project entry drops and builds again, in the same process too. After a one-shot Interpret
+  redo, the next start is the matching Project redo, not the Interpret redo's command again.
+  Indexes already built are kept. A stop whose budget has already run out sends no cancel,
+  so the build carries on until it ends, and the next start waits for it.
 - While it builds, the runner records loop progress only while the build's backend is
   active, so a connection that died without a reply raises the stale-loop alert.
 

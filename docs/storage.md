@@ -3018,30 +3018,30 @@ silently narrowing the fingerprint.
 
 ### Walk index set
 
-An operator may drop the `normalized_events` indexes Interpret does not read for the length
-of a from-zero walk or a full-history Interpret redo with
+An operator may drop the `normalized_events` indexes Interpret does not read for the length of a
+from-zero walk or a full-history Interpret redo with
 [`ops/walk-index-set`](../ops/walk-index-set/README.md). The phase runner rebuilds any that is
 missing or invalid before Project's first batch, and `install.sql` rebuilds them by hand. The
-indexes Interpret keeps are the [walk index set](glossary.md#walk-index-set). Indexes are access paths, not hash inputs:
-dropping or rebuilding one changes no stored row and leaves the primary key, the
-`event_identity` unique key and every foreign key in place, so database constraints stay
-authoritative. The rule that splits the indexes:
+indexes Interpret keeps are the [walk index set](glossary.md#walk-index-set). Indexes are access
+paths, not hash inputs: dropping or rebuilding one changes no stored row and leaves the primary
+key, the `event_identity` unique key and every foreign key in place, so database constraints
+stay authoritative. The rule that splits the indexes:
 
 - An index is kept when a statement Interpret runs can read it: its loaders, its writer, the
   redo-range preparation, the flag recompute, or the manifest sync a runner start performs.
 - Every other index is a read path for Project, the API or an operator's
-  `phase-runner inspect` command. Project starts only after
-  Interpret completes, and the API refuses the routes that read them while an Interpret redo
-  is in progress (the public namespace snapshot and the composed name reads require each
-  served chain's Interpret not to be in a redo). The one exception is the event audit,
-  `GET /v1/diagnostics/events`, which stays available during a redo by design. Its record
-  attribution reads six of the dropped indexes (the ENSv1 and Basenames record node indexes,
-  the two record-ID indexes, `normalized_events_project_node_history_idx` and
-  `normalized_events_project_v1_pointer_addressed_node_idx`), so while they are dropped it
-  reads without them and, on a large database, may exceed the API's statement timeout
-  (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`, [production settings](production.md)) until
-  the runner or `install.sql` rebuilds them. The `phase-runner inspect` block and raw-event windows, which an
-  operator runs by hand, count and list normalized events by block hash through
+  `phase-runner inspect` command. Project starts only after Interpret completes, and the API
+  refuses the routes that read them while an Interpret redo is in progress (the public namespace
+  snapshot and the composed name reads require each served chain's Interpret not to be in a
+  redo). The one exception is the event audit, `GET /v1/diagnostics/events`, which stays
+  available during a redo by design. Its record attribution reads six of the dropped indexes
+  (the ENSv1 and Basenames record node indexes, the two record-ID indexes,
+  `normalized_events_project_node_history_idx` and
+  `normalized_events_project_v1_pointer_addressed_node_idx`), so while they are dropped it reads
+  without them and, on a large database, may exceed the API's statement timeout
+  (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`, [production settings](production.md)) until the runner
+  or `install.sql` rebuilds them. The `phase-runner inspect` block and raw-event windows, which
+  an operator runs by hand, count and list normalized events by block hash through
   `normalized_events_block_idx` and read more of the table while it is dropped.
 
 The 17 kept indexes and the statements that read them:
