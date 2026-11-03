@@ -5582,5 +5582,151 @@ under matching runner and API binaries. The change rides the next release that r
 Project and shares that release's Project redo. Do not mark old rows ready under the new
 hash.
 
+## ENSv2 registry resolver edges only while reachable
+
+The build that gates an ENSv2 registry's resolver pointers on its reachability
+([architecture](architecture.md#discovery-graph)) changes `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes:
+
+- A registry that announces itself with `RegistryCreated()` and that nothing reachable mounts
+  no longer opens `resolver` discovery edges. The resolvers it points at get no classification
+  row, no Project work block and no name selection from it.
+- When a reachable registry mounts it, each of its tokens with a resolver opens its edge in the
+  mount block. The entries it held before the mount serve from there, as before.
+- When it loses its last mount path, its edges close in that block, or at the start of the block
+  where the expiry is first seen. When an expiry makes it reachable, because the entry its parent
+  claim names expired and a reachable mount takes over, its edges open at the start of that block.
+- A registry that stays reachable keeps byte-identical edges.
+
+A later change to the ENSv2 suffix anchors, from a manifest's `[[roots]]` or a declared ENSv2
+registry, does not rotate the interpreter content hash. Plan a re-derivation from the first block
+the change affects. Interpret re-derives names under the new anchors, but it does not open or close
+the resolver edges of registries whose reachability the change moves.
+
+The announcement admission itself is unchanged, so the watch plan is too. Every announcement is
+read from all emitters, so one Interpret pass admits all the announcements in its range, one
+Ingest repair fetches their logs, and a resolver they announce adds at most one more. The
+discovery repair loop's pass limit bounds those kinds of repair, not the number of admitted
+addresses.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change shares the release's one Interpret and Project redo pair with its other
+hash-rotating changes. Do not mark old rows ready under the new hash.
+
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## An ENSv1 name with no pointer on its selected resource serves its registry resolver
+
+The build that serves the node's ENSv1 registry pointer as `resolver`, and that resolver's
+records, for an `ens_v1` name whose selected resource carries no pointer of its own
+([projections](projections.md#an-ensv1-name-serves-the-resolver-its-registry-record-holds)),
+changes the composed resolver and the record inventory Project stores
+(`crates/storage/src/families/name/serving.rs`,
+`crates/storage/src/families/records/serving.rs`,
+`crates/storage/src/families/records/inventory_selection.rs`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A name such as a legacy `.eth` name whose registry `NewResolver` sits on another resource of
+  its node, or carries no name, serves the registry's resolver and its records on name detail,
+  lookup, the records route and the name lists. Before, it served a null `resolver` with no
+  reason while `ens_v1.resolver` named one.
+- `relation=resolves_to` lists such a name under an address its registry resolver holds for
+  the node.
+- Such a name whose registry pointer is a clear serves a null `resolver` with the clear as its
+  latest event. Before, it served no latest event.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change rides the next release that redoes
+Project and shares that release's Project redo. Do not mark old rows ready under the new
+hash.
+
+It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## The ENSV2Resolver is declared and not projected
+
+The mainnet ENSv2 resolver manifest declares the ENSV2Resolver
+`0x3071ad643ce4ed8b3d67b289845b45db82b068a4` from block `26216293`, with role `ensv2_resolver`
+([ENSV2Resolver declaration](manifests.md#ensv2resolver-declaration)). Project files the
+address under that declaration as unsupported, with `composite_resolver_not_projected`. It is
+the ENSv1 `eth` node's resolver, and a handful of names point at it. Their records stay
+withheld, and only the reason changes, from `resolver_not_declared`. No resolution outcome
+changes. The resolver's own summary moves to the ENSv2 resolver family and manifest.
+
+- The [projection content hash](glossary.md#projection-content-hash) rotates for every chain.
+  The [interpreter content hash](glossary.md#interpreter-content-hash) does not: the change
+  touches no `[[abi.events]]` block and no interpret-side source. The change rides the next
+  full re-derivation release and shares its Interpret and Project redo pair. A Project redo
+  alone does not apply it.
+- The manifest is edited in place as version 1, so it keeps its `manifest_id`, and no
+  supported row is re-stamped. Manifest synchronization records a
+  [manifest-authority marker](glossary.md#manifest-authority-marker) on mainnet and stamps a
+  required Ingest redo from block `26216293`, the declaration's start
+  ([watch-plan widening](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)).
+  The contract's deployed ABI declares no event, so it emits none of the family's events and
+  that fetch returns no log.
+  (upstream: .refs/ens_v2_mainnet_20261002/contracts/deployments/mainnet/ENSV2Resolver.json:L3-L548 @ ens_v2_mainnet_20261002@4f47cbcc)
+  Complete it before the Interpret redo, as for any marker. Sepolia changes no manifest and
+  gets no marker and no Ingest redo.
+- Schema-migration `20261102120000_project_resolver_classification_reason_comment.sql`
+  replaces the comment on `project_resolver_classification.unsupported_reason` so it names the
+  new reason. It changes no column, index or row, and needs no preparation.
+- It adds no table or setting.
+
+After the redo, check on mainnet that the address's `project_resolver_classification` row is
+`ens_v2_resolver_l1` / `ensv2_resolver`, `unsupported`, with `composite_resolver_not_projected`.
+
+## Numeric BaseRegistrar lifecycle on Mainnet
+
+The build that interprets the BaseRegistrar's own numeric `NameRegistered` and `NameRenewed` on
+the Mainnet profile, except the BaseRegistrar call of an admitted controller event of the same
+kind for the same node later in the transaction ([manifests](manifests.md#ens-mainnet),
+[storage semantics](storage.md)) changes `crates/adapters/src` and
+`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`. It
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes for names:
+
+- A name the January 2020 registrar migration moved has its lease from the migration's own
+  transaction, named by its namehash whether or not its label is known. A later label import or
+  label-bearing event renames it on read and re-keys nothing.
+- A migrated name never renewed since is `expired` in grace and `released` after it, with no
+  `owner` or `manager`, like any other lapsed `.eth` name. Before, it served `active` with its
+  registry owner and no expiry.
+- A migrated name that is still live serves the same `owner`, `manager`, `expires_at` and
+  `registered_at` as before. Its selected binding is now the lease, and its address-name history
+  shows the migration contract as a registrant for the length of the migration transaction.
+- A registration or renewal through a controller this profile does not admit now keeps its lease
+  and expiry.
+- A registration or renewal through an admitted controller is interpreted exactly as before. The
+  controller's event owns it, and the numeric event in its transaction derives nothing.
+- After the ENSv2 activation, a renewal through the ENSv1 renewal bridge has no admitted
+  controller event, so its numeric `NameRenewed` renews the ENSv1 lease, as on Sepolia. The
+  lease's rows change under a name the ENSv2 arm decides, and what that name serves does not.
+- A Graveyard cleanup is still skipped and opens no lease.
+
+The manifest-authority fingerprint changes on Ethereum Mainnet. The registrar manifest now
+declares the lifecycle events of the two numeric events. Synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker), so Mainnet needs the
+token-attested full-range Interpret redo and the downstream stamped Project redo described under
+[phase-runner configuration](#phase-runner-configuration). The same event signatures, emitter and
+start block are watched, so the compiled watch plan is unchanged and no Ingest redo is needed.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The one redo per chain discharges both the hash rotation and the marker. The change
+rides the next re-derivation release and shares that release's one Interpret and Project redo
+pair with its other hash-rotating changes. Do not mark old rows ready under the new hash.
+
+It adds no schema-migration, table or setting.

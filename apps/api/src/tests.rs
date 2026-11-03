@@ -635,6 +635,9 @@ mod v2_continuing_lease;
 #[path = "tests/v2_mainnet_admission.rs"]
 mod v2_mainnet_admission;
 
+#[path = "tests/v2_reachable_discovery.rs"]
+mod v2_reachable_discovery;
+
 #[path = "tests/v2_followed_chains.rs"]
 mod v2_followed_chains;
 

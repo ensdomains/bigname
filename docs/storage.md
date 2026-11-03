@@ -955,10 +955,14 @@ Neither index restricts `consumer_visibility`. The statement filters it.
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
-registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
-have no `logical_name_id` unless a proven registry path already establishes the name
-identity or does so in the same registration transaction. The numeric event alone creates
-no name surface. A previously admitted,
+registrar-controller logs. A numeric event followed in its transaction by an admitted
+controller event of the same kind for the same node that declares `RegistrationGranted`, with no
+other numeric event of that kind for the node between them, is the controller's registration or
+renewal, which the controller event interprets, so the numeric event derives no lifecycle row.
+Only the Mainnet profile admits such controller events. Before an admitted plaintext label is
+known, these lifecycle rows have no `logical_name_id` unless a proven registry path already
+establishes the name identity or does so in the same registration transaction. The numeric
+event alone creates no name surface. A previously admitted,
 non-shadow preimage in the same namespace can make the name known before numeric registration;
 with matching current-registry ownership setup, that registration binds the registrar resource.
 A later admitted controller preimage binds the current retained ENSv1 authority, while a preimage
@@ -1810,16 +1814,15 @@ settle as a `RegistrationReleased` no later than the grant's block, so the
 release guard leaves exactly one live lease. Token evidence positioned at the
 cleanup itself must also satisfy one of the two evidence conditions below.
 Which of the four kinds carries the token id depends on the deployment profile:
-the Sepolia profile indexes the BaseRegistrar's numeric `NameRegistered` and
-`NameRenewed` as lifecycle events with the token id, while the Mainnet profile
-declares `NameRegistered` for `RegistrationReleased` and `NameRenewed` for
-`RegistrationRenewed` and `ExpiryChanged` (`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`);
-neither declaration names `RegistrationGranted`, which is what the registrar
-adapter requires before it interprets the numeric events as lifecycle events
-(`crates/adapters/src/schema_v2/protocol/v1/registrar.rs`), and the
-controller-derived `RegistrationGranted`/`RegistrationRenewed` after-state
-carries no token id, so on Mainnet only `TokenControlTransferred` is lease
-evidence, and which transfer that is depends on the path. A retained lease
+the Sepolia profile indexes every BaseRegistrar numeric `NameRegistered` and
+`NameRenewed` as a lifecycle event with the token id, while the Mainnet profile
+indexes only those no admitted controller event covers
+(`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`,
+`crates/adapters/src/schema_v2/session_transaction.rs`). A controller registration
+or renewal is interpreted from the controller's event, whose
+`RegistrationGranted`/`RegistrationRenewed` after-state carries no token id, so on
+Mainnet a lease a controller granted and renewed has only `TokenControlTransferred`
+as lease evidence, and which transfer that is depends on the path. A retained lease
 never transferred before its direct unwrapped migration is handed to the
 controller first, so the migration transaction's own holder-to-controller
 transfer precedes the cleanup. On the unlocked-wrapped path `unwrapETH2LD`

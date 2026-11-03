@@ -246,6 +246,20 @@ pub(in crate::schema_v2) fn registrar_registration_namehash(
     registrar::base::registration_namehash(selected, raw)
 }
 
+pub(in crate::schema_v2) fn registrar_numeric_lifecycle(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, bool)>> {
+    registrar::base::lifecycle_namehash(selected, raw)
+}
+
+pub(in crate::schema_v2) fn registrar_controller_lifecycle(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> Option<(String, bool)> {
+    registrar::identity::controller_lifecycle(selected, raw)
+}
+
 pub(in crate::schema_v2) fn registrar_registration(
     selected: &Selected,
     raw: &RawLogInput,

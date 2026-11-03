@@ -2843,6 +2843,64 @@ async fn a_classification_change_selects_its_readers_only_when_a_side_is_support
     Ok(())
 }
 
+// C1: an ENSV2Resolver declaration re-files the `eth` node's resolver from the ENSv1 family,
+// undeclared, to the declared row, which is unsupported too, so it selects no name. The
+// supported case is the contrast: were the role supported, the same change would select the
+// `eth` node, which points at the resolver, and `a.foo.eth`, three labels with no resolver of
+// its own, whose walk reaches `eth`'s pointer. The second-level names never read it, so the
+// frozen statement's `foo.eth` and `bar.eth` are dropped.
+#[tokio::test]
+async fn the_ensv2_resolver_declaration_selects_no_name() -> Result<()> {
+    const ENSV2_RESOLVER: &str = "0x3071ad643ce4ed8b3d67b289845b45db82b068a4";
+    let before = json!({"classification": {"source_family": "ens_v1_resolver_l1",
+            "basis": "manifest_declared_address", "read_features": []},
+        "support_status": "unsupported", "unsupported_reason": "resolver_not_declared",
+        "manifest_id": 1});
+    let declared = |status: &str, reason: Value| {
+        json!({"classification": {"source_family": "ens_v2_resolver_l1",
+                "role": "ensv2_resolver", "basis": "manifest_declared_address",
+                "read_features": []},
+            "support_status": status, "unsupported_reason": reason, "manifest_id": 2})
+    };
+    for (case, current, expected, dropped) in [
+        (
+            "declared, not projected",
+            declared("unsupported", json!("composite_resolver_not_projected")),
+            &[][..],
+            &[][..],
+        ),
+        (
+            "supported instead",
+            declared("supported", Value::Null),
+            &["eth", "a.foo.eth"][..],
+            &["foo.eth", "bar.eth"][..],
+        ),
+    ] {
+        let mut world = World::new().await?;
+        world
+            .surfaces(&["eth", "foo.eth", "a.foo.eth", "bar.eth", "xyz"])
+            .await?;
+        world.eth().await?;
+        world
+            .registry_pointer_changed(2, "eth", ZERO_ADDR, ENSV2_RESOLVER)
+            .await?;
+        classification_changed(&world, ENSV2_RESOLVER, Some(before.clone()), Some(current)).await?;
+        let call = Call {
+            block: 5,
+            after: 4,
+            root: Some(ROOT),
+        };
+        let selects = if dropped.is_empty() {
+            world.assert_selects(call, expected).await
+        } else {
+            world.assert_narrows(call, expected, dropped).await
+        };
+        selects.with_context(|| format!("ENSV2Resolver case {case}"))?;
+        world.cleanup().await?;
+    }
+    Ok(())
+}
+
 // The declared ENSv1 mirror resolver, re-filed from one unsupported row to another, is no
 // global change: the walk reads the mirror only while it is supported. Withdrawing its support
 // is one, and selects every `.eth` name.

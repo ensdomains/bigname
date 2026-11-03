@@ -630,12 +630,15 @@ which Project builds before it reaches the block's grants.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L69 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 
-A name the January 2020 registrar migration moved has a lease that no grant opened. The
-migration emitted the BaseRegistrar's own `NameRegistered` in the transaction that wrote the
-name's first current-registry record, and no controller event, so the name is selected through
-a registry-only binding that stands for no lease, or through no binding once its registry owner
-is zero (the ownerless-registry profile above). Its first controller renewal names the lease: the adapter mints the
-lease's resource there and derives a `RegistrationGranted` beside the renewal. That lease is the
+A name the January 2020 registrar migration moved has its lease from the migration's own
+transaction. The migration emitted the BaseRegistrar's numeric `NameRegistered` in the
+transaction that wrote the name's first current-registry record, and no controller event, so
+the registrar adapter interprets it as the lease's grant, named by the name's namehash whether
+or not its label is known ([storage semantics](storage.md)). A name selected through a
+registry-only binding that stands for no lease, or through no binding once its registry owner
+is zero (the ownerless-registry profile above), still reads a lease. When a renewal is a lease's
+first row, the adapter mints the lease's resource there and derives a `RegistrationGranted`
+beside the renewal. The lease is the
 name's [implied lease](glossary.md#implied-lease): the resource of the name's latest own
 `RegistrationGranted`, `RegistrationRenewed`, `RegistrationReleased` or `ExpiryChanged` row of
 the `ens_v1_registrar_l1` family with registrar authority kind, at or after the name's first
@@ -646,16 +649,16 @@ no token. The registration then serves the lease's `resource_id` and identity, i
 `ens_v1.expires_at`, and `active`, `expired` or `released` by the ENSv1 schedule. A released
 lease is `released` even when its release carries no expiry. `registered_at` is the time of
 the first current-registry record's block, the migration's own registration block, or of the
-lease's first row when the node has none. A grant a controller registration wrote dates the
-lease itself. The derived grant does not, and its zero-address registrant names no holder. A
-lease whose only grant is the derived one dates from the first current-registry record under a
-NameWrapper binding or a registry-only binding that records the lease too, and every
-ENSv1→ENSv2 migration path keeps that start. The selected binding, its authority kind and the
-registry owner stay as they were. A name whose binding records a lease with registrar rows, a
-name with no binding outside the ownerless-registry profile, a wrapper-selected name, a name
-selected under ENSv2 and any name other than a `.eth` second-level name have no implied lease.
-The migration's own `NameRegistered` is still not interpreted, so a migrated name never renewed
-has no lease row and serves as before.
+lease's first row when the node has none. A grant a controller registration or the
+BaseRegistrar's own `NameRegistered` wrote dates the lease itself. The derived grant does not,
+and its zero-address registrant names no holder. A lease whose only grant is the derived one
+dates from the first current-registry record under a NameWrapper binding or a registry-only
+binding that records the lease too, and every ENSv1→ENSv2 migration path keeps that start. The
+selected binding, its authority kind and the registry owner stay as they were. A name whose
+binding records a lease with registrar rows, a name with no binding outside the
+ownerless-registry profile, a wrapper-selected name, a name selected under ENSv2 and any name
+other than a `.eth` second-level name have no implied lease. A migrated name never renewed is
+released by its lease's schedule like any other lapsed `.eth` name.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
@@ -1573,7 +1576,10 @@ under ENSv1); `resolver_implementation_unknown` when a discovered proxy
 has no canonical `Upgraded` observation — neither an ERC-1967 `Upgraded` log
 nor a factory announcement — so its implementation is unknown;
 `resolver_implementation_not_declared` when the latest observation names an
-implementation outside the active manifest's `resolver_implementations`; and
+implementation outside the active manifest's `resolver_implementations`;
+`composite_resolver_not_projected` for a declared ENSV2Resolver, which stores no
+records and forwards each name to another resolver
+([manifests.md § ENSV2Resolver declaration](manifests.md#ensv2resolver-declaration)); and
 `resolver_binding_enumeration_not_projected` on the binding summary of a
 supported resolver whose family does not project binding enumeration.
 
@@ -1603,12 +1609,34 @@ When a name's pointer on its selected resource is an ENSv1 pointer, the served
 whenever the two name different resolvers. Only a name whose selected authority
 arm is `ens_v1` (`authority` `ens_v1` or `ens_v0`) selects a resource with an
 ENSv1 pointer. A cleared registry pointer clears both. `ens_v1.resolver` and
-`resolver` then agree whenever both are present. The inventory records the node
-as one of its inputs, so a later registry pointer write recomposes it. The
+`resolver` then agree whenever both are present.
+
+The same holds when the selected resource carries no pointer of its own. The
+registry's `NewResolver` can land on another resource of the node, such as a
+legacy `.eth` name's BaseRegistrar lease while the name selects its
+[registry-only resource](glossary.md#registry-only-resource), or the reverse. It
+can also carry no name, when Interpret did not yet know the name. A name whose
+selected authority arm is `ens_v1`, that selects a resource and admits its
+pointers, then serves the node's registry pointer as its `resolver`. Its record
+inventory serves that resolver's records for the node through a stand-in pointer
+built from the registry pointer, as the resolver-anchored records route does. A
+name its authority withholds, such as a released tombstone, composes the
+`resolver` it composed before, with no address and no latest event. A name the
+resolution path withholds still serves no resolver or records. The public routes
+serve a released ENSv1 name nothing new, but the records diagnostic
+(`/v1/diagnostics/names/{name}/records`) exposes retained state, so it can show
+such a name's registry resolver records through the stand-in. A cleared registry
+pointer composes a null `resolver` whose latest event is the clear. A node with
+no registry pointer composes a null `resolver` with no latest event. A name that
+selects no resource, such as the ownerless registry profile, is unchanged.
+
+The inventory records the node as one of its inputs, so a later registry pointer
+write recomposes it. The
 inverse address read (`relation=resolves_to`) also finds such a name through the
 node's registry pointer: an address the registry pointer's resolver holds for the
 node, in a node record, in a record written under the name at another node, or in
-a linked record, reaches the node's ENSv1 resource pointers. A record written
+a linked record, reaches the node's ENSv1 resource pointers and the resources the
+node's `ens_v1` binding candidates select. A record written
 under no name, such as one written before Interpret surfaced the name, and a
 linked record, which has no name, reach them in each
 namespace the request spans, which is every servable namespace when the request

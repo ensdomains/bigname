@@ -1082,7 +1082,7 @@ COMMENT ON COLUMN project_resolver_classification.classification IS
 COMMENT ON COLUMN project_resolver_classification.support_status IS
     'This value is supported or unsupported.';
 COMMENT ON COLUMN project_resolver_classification.unsupported_reason IS
-    'This value is the reason when unsupported: resolver_not_declared, resolver_implementation_unknown, resolver_implementation_not_declared, or resolver_manifest_not_active for a resolver with candidates but no active manifest of its family, which the served build leaves out (one such row per resolver).';
+    'This value is the reason when unsupported: resolver_not_declared, resolver_implementation_unknown, resolver_implementation_not_declared, composite_resolver_not_projected for a declared ENSV2Resolver, or resolver_manifest_not_active for a resolver with candidates but no active manifest of its family, which the served build leaves out (one such row per resolver).';
 COMMENT ON COLUMN project_resolver_classification.manifest_id IS
     'This value is the declaring manifest.';
 COMMENT ON COLUMN project_resolver_classification.manifest_event_id IS

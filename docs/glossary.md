@@ -595,7 +595,9 @@ describes the schema-v2 baseline rather than every row that has ever existed.
 an ENSv2 discovery
 edge created when a contract emits `RegistryCreated()`. It makes the emitting
 registry indexable from that event position. It does not assert parent-child
-reachability or attach the registry to a name. `SubregistryUpdated` supplies
+reachability or attach the registry to a name. The registry's resolver pointers
+become `resolver` edges only while it is reachable, which the
+`reachable_from_root` admission of its `resolver` rule records. `SubregistryUpdated` supplies
 that separate relationship. For a registry created through the
 [ENSv1→ENSv2 migration source family](manifests.md#ensv2-migration-family-admission-plan), the
 edge remains ordinary and the watch plan traverses it while a separate
@@ -775,7 +777,8 @@ NameWrapper straight to the Graveyard, the cleanup transfer itself, admitted
 for a name registered straight into the NameWrapper because its controller
 grant is a registrar lifecycle event of the lease positioned before the
 cleanup. The
-Sepolia profile also indexes the numeric BaseRegistrar lifecycle events.
+Sepolia profile also indexes every numeric BaseRegistrar lifecycle event, and the
+Mainnet profile each one no admitted controller event covers.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
@@ -923,12 +926,11 @@ migration boundary.
 
 the BaseRegistrar lease of an ENSv1 `.eth` second-level name selected through a
 [registry-only handoff](#registry-only-handoff) that records no lease, or in the
-ownerless-registry profile once its registry owner is zero. The January 2020 registrar migration moved names onto the current
-BaseRegistrar with the registrar's own `NameRegistered` and no controller event,
-so bigname holds no grant for them. Their later controller renewals still name
-the lease. The implied lease is the resource of the name's latest own registrar
-lifecycle row at or after its first current-registry record, and the lifecycle
-composes the registration on it (`docs/projections.md`, registry-only bindings).
+ownerless-registry profile once its registry owner is zero. The implied lease is
+the resource of the name's latest own registrar lifecycle row at or after its first
+current-registry record, and the lifecycle composes the registration on it
+(`docs/projections.md`, registry-only bindings). A name the January 2020 registrar
+migration moved has such a row from the migration's own numeric `NameRegistered`.
 
 ## Independently admitted event
 

@@ -35,6 +35,76 @@ async fn point_an_ensv1_node_at(
     rebuild_fixture_families(&database.pool, chain, block, hash).await
 }
 
+/// An ENSv1 `.eth` name `name` registered at `block`, whose registry resolver is `resolver`,
+/// with the families rebuilt at the block.
+async fn register_an_ensv1_name_at(
+    database: &TestDatabase,
+    chain: &str,
+    block: (i64, &str),
+    name: &str,
+    resolver: &str,
+) -> Result<()> {
+    let resource = Uuid::from_u128(0x6200);
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        name,
+        chain,
+        block.0,
+        block.1,
+        resource,
+        Uuid::from_u128(0x6201),
+        Uuid::from_u128(0x6202),
+        "ens_v1",
+    )
+    .await?;
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let facts = [
+        (
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            json!({"source_event": "Transfer", "node": node,
+                   "owner": "0x00000000000000000000000000000000000000bb"}),
+        ),
+        (
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            json!({"authority_kind": "registrar",
+                   "registrant": "0x00000000000000000000000000000000000000bb",
+                   "expiry": 4_102_444_800_u64}),
+        ),
+        (
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({"node": node, "resolver": resolver}),
+        ),
+    ];
+    let mut events = Vec::new();
+    for (index, (kind, family, after)) in facts.into_iter().enumerate() {
+        let mut event = history_event(
+            &format!("precedence-v1-{kind}"),
+            Some(&logical),
+            Some(resource),
+            Some(chain),
+            Some(block.0),
+            Some(block.1),
+            Some("0xprecedence-v1"),
+            Some(91 + index as i64),
+            CanonicalityState::Canonical,
+        );
+        event.source_family = family.into();
+        event.event_kind = kind.into();
+        event.before_state = json!({});
+        event.after_state = after;
+        event.raw_fact_ref =
+            json!({"emitting_address": "0x4444444444444444444444444444444444444401"});
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, chain, block.0, block.1).await?;
+    Ok(())
+}
+
 /// M1 and M2: `alice.eth`'s ENSv2 entry points at a declared ENSv1 mirror, which an ENSv1 name
 /// also points at. The mirror keeps serving `alice.eth`'s ENSv1 records, whether an ENSv2
 /// registry edge reaches it (M1) or only the entry's pointer names it (M2).
@@ -188,64 +258,7 @@ async fn an_ensv1_name_pointing_at_the_mirror_is_unsupported_not_absent() -> Res
             .execute(&database.pool)
             .await?;
         }
-        let resource = Uuid::from_u128(0x6200);
-        let logical = seed_family_identity_inputs(
-            &database.pool,
-            "ens",
-            NAME,
-            CHAIN,
-            BLOCK.0,
-            BLOCK.1,
-            resource,
-            Uuid::from_u128(0x6201),
-            Uuid::from_u128(0x6202),
-            "ens_v1",
-        )
-        .await?;
-        let node = bigname_lookup::ens_namehash_hex(NAME)?;
-        let facts = [
-            (
-                "AuthorityTransferred",
-                "ens_v1_registry_l1",
-                json!({"source_event": "Transfer", "node": node,
-                       "owner": "0x00000000000000000000000000000000000000bb"}),
-            ),
-            (
-                "RegistrationGranted",
-                "ens_v1_registrar_l1",
-                json!({"authority_kind": "registrar",
-                       "registrant": "0x00000000000000000000000000000000000000bb",
-                       "expiry": 4_102_444_800_u64}),
-            ),
-            (
-                "ResolverChanged",
-                "ens_v1_registry_l1",
-                json!({"node": node, "resolver": MIRROR}),
-            ),
-        ];
-        let mut events = Vec::new();
-        for (index, (kind, family, after)) in facts.into_iter().enumerate() {
-            let mut event = history_event(
-                &format!("precedence-v1-{kind}"),
-                Some(&logical),
-                Some(resource),
-                Some(CHAIN),
-                Some(BLOCK.0),
-                Some(BLOCK.1),
-                Some("0xprecedence-v1"),
-                Some(91 + index as i64),
-                CanonicalityState::Canonical,
-            );
-            event.source_family = family.into();
-            event.event_kind = kind.into();
-            event.before_state = json!({});
-            event.after_state = after;
-            event.raw_fact_ref =
-                json!({"emitting_address": "0x4444444444444444444444444444444444444401"});
-            events.push(event);
-        }
-        bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-        rebuild_fixture_families(&database.pool, CHAIN, BLOCK.0, BLOCK.1).await?;
+        register_an_ensv1_name_at(&database, CHAIN, BLOCK, NAME, MIRROR).await?;
 
         let payload = v2_name_record_payload_for_database(
             &database,
@@ -275,5 +288,153 @@ async fn an_ensv1_name_pointing_at_the_mirror_is_unsupported_not_absent() -> Res
         );
         database.cleanup().await?;
     }
+    Ok(())
+}
+
+/// Re-declares the contracts of the fixture's ENSv2 resolver manifest, in its catalog row and in
+/// the update the families read, before the next rebuild.
+async fn redeclare_ensv2_resolvers(
+    database: &TestDatabase,
+    chain: &str,
+    contracts: Value,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = jsonb_set(manifest_payload, '{contracts}', $2)
+         WHERE chain_id = $1 AND source_family = 'ens_v2_resolver_l1'",
+    )
+    .bind(chain)
+    .bind(&contracts)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = jsonb_set(after_state, '{manifest_payload,contracts}', $2)
+         WHERE chain_id = $1 AND source_family = 'ens_v2_resolver_l1'
+           AND event_kind = 'SourceManifestUpdated'",
+    )
+    .bind(chain)
+    .bind(&contracts)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+fn ensv2_resolver_declaration(address: &str) -> Value {
+    json!({"role": "ensv2_resolver", "address": address, "proxy_kind": "none", "start_block": 0})
+}
+
+/// S1, S2, S4: the declared ENSV2Resolver stores no records and forwards each name elsewhere, so
+/// the names that point at it are withheld with `composite_resolver_not_projected`: an ENSv1
+/// name whose registry resolver it is (S1) and an ENSv2 name whose entry resolver it is (S2). Its
+/// stored summary files it under its declaration (S4).
+#[tokio::test]
+async fn names_pointing_at_the_ensv2_resolver_are_withheld_as_composite() -> Result<()> {
+    const CHAIN: &str = "ethereum-sepolia";
+    const BLOCK: (i64, &str) = (21000003, "0xmirror");
+    const COMPOSITE: &str = "0x3030303030303030303030303030303030303030";
+    const V1_NAME: &str = "composite-v1.eth";
+    let withheld =
+        json!({"status": "unsupported", "unsupported_reason": "composite_resolver_not_projected"});
+    let database = v2_mirror_records_database(
+        "alice.eth",
+        COMPOSITE,
+        MirrorFixtureSource::Exact,
+        "resolver",
+    )
+    .await?;
+    redeclare_ensv2_resolvers(
+        &database,
+        CHAIN,
+        json!([ensv2_resolver_declaration(COMPOSITE)]),
+    )
+    .await?;
+    register_an_ensv1_name_at(&database, CHAIN, BLOCK, V1_NAME, COMPOSITE).await?;
+
+    let (mut served, mut expected) = (json!({}), json!({}));
+    for (row, name, key) in [
+        ("S1", V1_NAME, "text:url"),
+        ("S2", "alice.eth", "text:description"),
+    ] {
+        let payload = v2_name_record_payload_for_database(
+            &database,
+            &format!("/v1/names/{name}/records?source=indexed&keys={key}"),
+        )
+        .await?;
+        served[row] = json!({"resolver": payload["data"]["resolver"]["address"],
+                             "record": payload["data"]["records"][key]});
+        expected[row] = json!({"resolver": COMPOSITE, "record": withheld});
+    }
+    let resolver = bigname_storage::families::topology::load_family_resolver_current(
+        &database.pool,
+        CHAIN,
+        COMPOSITE,
+    )
+    .await?
+    .context("S4: the resolver's summary")?;
+    served["S4"] = json!({"classification": resolver.declared_summary["classification"],
+                          "bindings": resolver.declared_summary["bindings"]});
+    expected["S4"] = json!({
+        "classification": {"source_family": "ens_v2_resolver_l1", "role": "ensv2_resolver",
+                           "basis": "manifest_declared_address", "read_features": []},
+        "bindings": withheld,
+    });
+    assert_eq!(served, expected, "S1, S2, S4");
+    database.cleanup().await
+}
+
+/// S3: `alice.eth`'s ENSv2 entry points at the declared mirror, and the mirror's ENSv1 walk falls
+/// through to the `eth` node's resolver. Declaring that resolver as the ENSV2Resolver moves no
+/// walk decision: `alice.eth`'s records are withheld as mirrored and not projected either way.
+#[tokio::test]
+async fn a_mirror_walk_reaching_the_ensv2_resolver_keeps_its_decision() -> Result<()> {
+    const CHAIN: &str = "ethereum-sepolia";
+    const BLOCK: (i64, &str) = (21000003, "0xmirror");
+    const MIRROR: &str = "0x1010101010101010101010101010101010101010";
+    const COMPOSITE: &str = "0x3030303030303030303030303030303030303030";
+    let mirror = json!({"role": "ensv1_mirror_resolver", "address": MIRROR,
+                        "proxy_kind": "none", "start_block": 0});
+    let mut served = Vec::new();
+    for (row, contracts) in [
+        ("undeclared", json!([mirror])),
+        (
+            "declared",
+            json!([mirror, ensv2_resolver_declaration(COMPOSITE)]),
+        ),
+    ] {
+        let database = v2_mirror_records_database(
+            "alice.eth",
+            MIRROR,
+            MirrorFixtureSource::Ancestor,
+            "resolver",
+        )
+        .await?;
+        redeclare_ensv2_resolvers(&database, CHAIN, contracts).await?;
+        point_an_ensv1_node_at(&database, CHAIN, BLOCK, "eth", COMPOSITE).await?;
+        let payload = v2_name_record_payload_for_database(
+            &database,
+            "/v1/names/alice.eth/records?source=indexed&keys=addr:60",
+        )
+        .await?;
+        assert_eq!(
+            payload["data"]["resolver"]["address"],
+            json!(MIRROR),
+            "{row}: {payload:#}"
+        );
+        assert_eq!(
+            payload["data"]["records"]["addr:60"],
+            json!({"status": "unsupported", "unsupported_reason": "mirrored_resolver_not_projected"}),
+            "{row}: {payload:#}"
+        );
+        served.push((
+            payload["data"]["resolver"].clone(),
+            payload["data"]["records"].clone(),
+        ));
+        database.cleanup().await?;
+    }
+    assert_eq!(
+        served[0], served[1],
+        "S3: the declaration moves no walk decision"
+    );
     Ok(())
 }

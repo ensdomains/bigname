@@ -1002,15 +1002,19 @@ fn an_emitter_announced_in_the_second_block_runs_its_first_block_logs_as_pre_adm
 }
 
 /// A registry that points one of its tokens' resolver at itself in its announcement block logs
-/// one warning for the log, although the block is interpreted twice.
+/// one warning for the log, although the block is interpreted twice. The declared registry mounts
+/// it first in the block, because only a reachable registry's pointer is a discovery edge.
 #[test]
 fn a_resolver_pointer_to_its_own_registry_in_an_announcing_block_warns_once() -> anyhow::Result<()>
 {
     let warnings = SelfTargetWarnings::default();
+    let mount = versioned_token("child", 1);
     let input = batch(
-        Vec::new(),
+        vec![declared()],
         vec![
             raw_at(RegistryCreated {}.encode_log_data(), 1, 0, CHILD),
+            raw_at(registered(mount, "child", "child"), 1, 1, CONTRACT),
+            raw_at(subregistry(mount, CHILD), 1, 2, CONTRACT),
             raw_at(
                 v2_registry::ResolverUpdated {
                     tokenId: U256::from(7),
@@ -1019,7 +1023,7 @@ fn a_resolver_pointer_to_its_own_registry_in_an_announcing_block_warns_once() ->
                 }
                 .encode_log_data(),
                 1,
-                1,
+                3,
                 CHILD,
             ),
         ],

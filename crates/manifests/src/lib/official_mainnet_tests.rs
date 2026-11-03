@@ -92,6 +92,7 @@ fn official_mainnet_addresses_receipts_and_abi_match_the_pinned_deployment() -> 
         ("registry", "ETHRegistry"),
         ("registrar", "ETHRegistrar"),
         ("ensv1_mirror_resolver", "ENSV1Resolver"),
+        ("ensv2_resolver", "ENSV2Resolver"),
         ("public_resolver_v2", "PublicResolverV2"),
         (
             "unlocked_migration_controller",
@@ -365,5 +366,49 @@ fn official_mainnet_declares_no_replaced_contract() -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// The ENSV2Resolver is declared once, in the ENSv2 resolver family, as a direct resolver from its
+/// creation block with no read features. Its root is the declared root registry, and the ENSv1
+/// `.eth` resolver it overrides `eth` with is declared nowhere.
+#[test]
+fn official_mainnet_declares_the_ensv2_resolver_once_and_not_its_eth_override() -> Result<()> {
+    let deployed = artifact("ENSV2Resolver")?;
+    let resolver = address(&deployed)?;
+    let repository = load_repository(workspace().join("manifests/mainnet"))?;
+    let declarations: Vec<_> = repository
+        .manifests()
+        .iter()
+        .flat_map(|loaded| {
+            loaded
+                .manifest
+                .contracts
+                .iter()
+                .map(move |contract| (&loaded.manifest, contract))
+        })
+        .filter(|(_, contract)| normalize_address(&contract.address) == resolver)
+        .collect();
+    assert_eq!(declarations.len(), 1, "{declarations:?}");
+    let (manifest, contract) = declarations[0];
+    assert_eq!(manifest.source_family, "ens_v2_resolver_l1");
+    assert_eq!(contract.role, "ensv2_resolver");
+    assert_eq!(contract.proxy_kind, "none");
+    assert_eq!(contract.start_block, Some(block(&deployed)?));
+    assert_eq!(contract.start_block, Some(26_216_293));
+    assert!(contract.read_features.is_empty());
+    assert_eq!(
+        argument(&deployed, 2)?,
+        declared(&active("ens_v2_root_l1")?, "root_registry")?
+    );
+    let eth_resolver = argument(&deployed, 3)?;
+    assert_eq!(eth_resolver, "0x30200e0cb040f38e474e53ef437c95a1be723b2b");
+    assert!(repository.manifests().iter().all(|loaded| {
+        loaded
+            .manifest
+            .contracts
+            .iter()
+            .all(|contract| normalize_address(&contract.address) != eth_resolver)
+    }));
     Ok(())
 }

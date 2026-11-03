@@ -23,6 +23,8 @@ mod family_reads;
 use family_reads::*;
 #[path = "production_interpret/mainnet_admission.rs"]
 mod mainnet_admission;
+#[path = "production_interpret/mainnet_numeric_lease.rs"]
+mod mainnet_numeric_lease;
 #[path = "production_interpret/sepolia_redeploy.rs"]
 mod sepolia_redeploy;
 #[path = "production_interpret/statistics.rs"]

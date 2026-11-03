@@ -24,7 +24,25 @@ fn image(kind: &str, status: &str, reason: Option<&str>, manifest: Option<i64>) 
 async fn a_classification_change_recomposes_the_inventories_that_read_its_fields() -> Result<()> {
     let unsupported = image("a", "unsupported", Some("resolver_not_declared"), Some(1));
     let supported = image("a", "supported", None, Some(1));
-    let cases: [(&str, Option<Value>, Option<Value>, bool); 12] = [
+    let cases: [(&str, Option<Value>, Option<Value>, bool); 13] = [
+        // C1: an ENSV2Resolver declaration re-files its address between two unsupported rows,
+        // and the inventories store the new reason.
+        (
+            "the ENSV2Resolver declared, not projected",
+            Some(image(
+                "ens_v1_resolver_l1",
+                "unsupported",
+                Some("resolver_not_declared"),
+                Some(1),
+            )),
+            Some(image(
+                "ensv2_resolver",
+                "unsupported",
+                Some("composite_resolver_not_projected"),
+                Some(2),
+            )),
+            true,
+        ),
         (
             "unsupported re-filed with a new reason, manifest and classification",
             Some(image(

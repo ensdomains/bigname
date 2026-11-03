@@ -191,6 +191,28 @@ impl State {
         sharing
     }
 
+    /// Every token `registry` holds with a resolver: its token id, the resolver and the earlier
+    /// token ids whose resolver discovery key it still carries.
+    pub(in crate::schema_v2) fn v2_registry_resolver_tokens(
+        &self,
+        registry: &str,
+    ) -> Vec<(String, String, BTreeSet<String>)> {
+        let registry = registry.to_ascii_lowercase();
+        self.v2_tokens
+            .registry_keys(&registry)
+            .into_iter()
+            .filter_map(|key| {
+                let token = self.v2_tokens.get(&key)?;
+                let (_, token_id) = key.rsplit_once(':')?;
+                Some((
+                    token_id.to_owned(),
+                    token.resolver.clone()?,
+                    token.resolver_discovery_aliases.clone(),
+                ))
+            })
+            .collect()
+    }
+
     pub(in crate::schema_v2) fn v2_subregistry_reassertion_target(
         &self,
         emitter: &str,
@@ -207,6 +229,72 @@ impl State {
         self.v2_tokens
             .get(&v2_key(&emitter, survivor))
             .and_then(|token| token.subregistry.clone())
+    }
+
+    /// A `ResolverUpdated` for `token_id`: its resolver, and the latest write of the resolver
+    /// link it shares with every token id that differs from it only in the version bits.
+    pub(in crate::schema_v2) fn write_v2_resolver_link(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        resolver: Option<String>,
+    ) -> BTreeSet<String> {
+        self.v2_resolver_link_writes.insert(
+            (
+                emitter.to_ascii_lowercase(),
+                resolver_observation_id(token_id),
+            ),
+            resolver.clone(),
+        );
+        self.set_v2_resolver(emitter, token_id, resolver)
+    }
+
+    /// A restored `ResolverChanged`. Only a `ResolverUpdated` log's own event writes the link: a
+    /// name transition's restatement of a token's resolver carries no `sender`. A restatement
+    /// changes no state when the live interpreter emitted it, so one that restates the token's
+    /// current resolver keeps the keys the token carries, and a terminal restatement of a token
+    /// already released does not bring it back.
+    pub(in crate::schema_v2) fn restore_v2_resolver_change(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        after_state: &Value,
+    ) {
+        let resolver = after_state
+            .get("resolver")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if after_state.get("source_event").and_then(Value::as_str) == Some("ResolverUpdated")
+            && after_state.get("sender").is_some()
+        {
+            self.write_v2_resolver_link(emitter, token_id, resolver);
+            return;
+        }
+        let key = v2_key(emitter, token_id);
+        match self
+            .v2_tokens
+            .get(&key)
+            .map(|token| token.resolver == resolver)
+        {
+            Some(true) => self.mark_v2_token_dirty(key),
+            None if resolver.is_none() => {}
+            _ => {
+                self.set_v2_resolver(emitter, token_id, resolver);
+            }
+        }
+    }
+
+    /// The resolver the latest `ResolverUpdated` on `token_id`'s resolver link wrote, none for
+    /// a clear.
+    pub(in crate::schema_v2) fn v2_resolver_link_write(
+        &self,
+        emitter: &str,
+        token_id: &str,
+    ) -> Option<&Option<String>> {
+        self.v2_resolver_link_writes.get(&(
+            emitter.to_ascii_lowercase(),
+            resolver_observation_id(token_id),
+        ))
     }
 
     pub(in crate::schema_v2) fn set_v2_resolver(

@@ -207,3 +207,29 @@ fn v2_restore_displacement_removes_the_displaced_resolver_index_entry() {
     assert!(state.v2_token(ROOT, DISPLACED).is_none());
     assert_v2_indexes_are_derived(&state);
 }
+
+/// A restored `ResolverChanged` writes its resolver link only when it is a `ResolverUpdated`
+/// log's own event. A name transition's restatement, which carries no `sender`, sets the token's
+/// resolver and leaves the link's latest write alone.
+#[test]
+fn v2_restored_restatement_leaves_the_resolver_link_write_alone() {
+    const FIRST: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000001";
+    const SECOND: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000002";
+    let mut state = anchored_state();
+    state.restore_v2_resolver_change(
+        ROOT,
+        SECOND,
+        &json!({"source_event": "ResolverUpdated", "token_id": SECOND, "resolver": null, "sender": "0x02"}),
+    );
+    assert_eq!(state.v2_resolver_link_write(ROOT, FIRST), Some(&None));
+    state.restore_v2_resolver_change(
+        ROOT,
+        FIRST,
+        &json!({"source_event": "ResolverUpdated", "token_id": FIRST, "resolver": "0xresolver"}),
+    );
+    assert_eq!(
+        state.v2_token(ROOT, FIRST).unwrap().resolver.as_deref(),
+        Some("0xresolver")
+    );
+    assert_eq!(state.v2_resolver_link_write(ROOT, FIRST), Some(&None));
+}

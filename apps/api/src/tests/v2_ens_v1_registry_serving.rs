@@ -271,18 +271,37 @@ fn block_hash(block: i64) -> String {
 /// One Engine batch per block, `premigrated` first and an empty block at `HEAD` last. Returns
 /// the base block.
 async fn interpret(database: &TestDatabase, after: Vec<Logs>) -> Result<i64> {
+    interpret_from(database, premigrated()?, after).await
+}
+
+/// [`interpret`] with `base` in place of `premigrated`.
+async fn interpret_from(database: &TestDatabase, base: Logs, after: Vec<Logs>) -> Result<i64> {
+    interpret_until(database, base, after, None).await
+}
+
+/// [`interpret_from`] with the empty block at `HEAD` stamped `head_time` when it is given.
+async fn interpret_until(
+    database: &TestDatabase,
+    base: Logs,
+    after: Vec<Logs>,
+    head_time: Option<u64>,
+) -> Result<i64> {
     let pool = &database.pool;
     bigname_manifests::sync_schema_v2_repository(
         pool,
         &bigname_manifests::load_repository(checked_in_profile())?,
     )
     .await?;
-    let mut blocks = vec![premigrated()?];
+    let mut blocks = vec![base];
     blocks.extend(after);
     blocks.push(Vec::new());
     let first = HEAD + 1 - blocks.len() as i64;
     for offset in 0..blocks.len() {
         let block = first + offset as i64;
+        let time = match head_time {
+            Some(time) if block == HEAD => time,
+            _ => LEASE - 100 + 10 * offset as u64,
+        };
         sqlx::query(
             "INSERT INTO chain_lineage(chain_id,block_hash,parent_hash,block_number,
                  block_timestamp,canonicality_state)
@@ -292,7 +311,7 @@ async fn interpret(database: &TestDatabase, after: Vec<Logs>) -> Result<i64> {
         .bind(block_hash(block))
         .bind((offset > 0).then(|| block_hash(block - 1)))
         .bind(block)
-        .bind((LEASE - 100 + 10 * offset as u64) as f64)
+        .bind(time as f64)
         .execute(pool)
         .await?;
     }
@@ -1366,3 +1385,6 @@ async fn p17_a_registry_pointer_moves_a_record_named_at_another_node() -> Result
     }
     Ok(())
 }
+
+#[path = "v2_ens_v1_registry_fallback.rs"]
+mod fallback;
