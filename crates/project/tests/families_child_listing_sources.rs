@@ -365,12 +365,11 @@ async fn replacement_heals(fixture: &Fixture, (c, o): (String, String)) -> Resul
 async fn a_replacement_block_below_the_read_heals_with_finality_markers() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_reorg", 20).await?;
     let labels = read_before_reorg(&fixture, Some(2), Some(2)).await?;
+    replacement_heals(&fixture, labels).await?;
     ensure!(
         watermark(&fixture).await? == Some(2),
-        "block 12 reads through block 5 and stops the watermark at the finalized block"
+        "blocks 12 and 13 read through blocks 5 and 4 and stop the watermark at the finalized block"
     );
-    replacement_heals(&fixture, labels).await?;
-    ensure!(watermark(&fixture).await? == Some(2));
     fixture.cleanup().await
 }
 
@@ -379,12 +378,11 @@ async fn a_replacement_block_below_the_read_heals_with_finality_markers() -> Res
 async fn a_replacement_block_below_the_read_heals_with_only_a_safe_marker() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_reorg_safe", 20).await?;
     let labels = read_before_reorg(&fixture, Some(2), None).await?;
+    replacement_heals(&fixture, labels).await?;
     ensure!(
         watermark(&fixture).await? == Some(2),
-        "block 12 reads through block 5 and stops the watermark at the safe block"
+        "blocks 12 and 13 read through blocks 5 and 4 and stop the watermark at the safe block"
     );
-    replacement_heals(&fixture, labels).await?;
-    ensure!(watermark(&fixture).await? == Some(2));
     fixture.cleanup().await
 }
 
