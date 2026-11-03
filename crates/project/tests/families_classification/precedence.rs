@@ -43,6 +43,15 @@ async fn manifests(
     v1_declared: &[&str],
     v2_declared: &[(&str, &str)],
 ) -> Result<Manifests> {
+    manifests_with(fixture, v1_declared, v2_payload(v2_declared)).await
+}
+
+/// [`manifests`] with the ENSv2 resolver manifest's whole payload.
+async fn manifests_with(
+    fixture: &Fixture,
+    v1_declared: &[&str],
+    v2_resolver_payload: Value,
+) -> Result<Manifests> {
     let v1: Vec<Value> = v1_declared
         .iter()
         .map(|address| json!({"address": address, "role": "public_resolver"}))
@@ -55,14 +64,7 @@ async fn manifests(
         json!({"contracts": v1}),
     )
     .await?;
-    let v2_resolver = manifest(
-        fixture,
-        None,
-        "ens_v2_resolver_l1",
-        1,
-        v2_payload(v2_declared),
-    )
-    .await?;
+    let v2_resolver = manifest(fixture, None, "ens_v2_resolver_l1", 1, v2_resolver_payload).await?;
     manifest(
         fixture,
         None,
@@ -949,5 +951,387 @@ async fn a_reorg_across_the_evidence_restores_the_rows() -> Result<()> {
             "{row}: the replacement block leaves the fields of block 7"
         );
     }
+    fixture.cleanup().await
+}
+
+/// The row a declared ENSV2Resolver gets: filed under the ENSv2 resolver family and its
+/// declaration, and unsupported, since it stores no records and forwards each name elsewhere.
+fn composite() -> Value {
+    filed(
+        "ens_v2_resolver_l1",
+        Some("ensv2_resolver"),
+        Some("composite_resolver_not_projected"),
+    )
+}
+
+/// The fields of [`served`] a declared ENSV2Resolver's row is judged by.
+fn composite_view(fields: &Value) -> Value {
+    let mut view = brief(fields);
+    view["basis"] = fields["classification"]["basis"].clone();
+    view["read_features"] = fields["classification"]["read_features"].clone();
+    view["manifest_id"] = fields["manifest_id"].clone();
+    view["admission_namespace"] = fields["admission_namespace"].clone();
+    view
+}
+
+/// [`composite_view`] of the declared ENSV2Resolver's row under the manifest `manifest_id`.
+fn composite_expected(manifest_id: i64) -> Value {
+    let mut view = composite();
+    view["basis"] = json!("manifest_declared_address");
+    view["read_features"] = json!([]);
+    view["manifest_id"] = json!(manifest_id);
+    view["admission_namespace"] = json!("ens");
+    view
+}
+
+/// Asserts `fields` are the declared ENSV2Resolver's row under the manifest `manifest_id`.
+fn assert_composite(fields: &Value, manifest_id: i64, row: &str) {
+    assert_eq!(
+        composite_view(fields),
+        composite_expected(manifest_id),
+        "{row}"
+    );
+}
+
+/// An ENSv1 registry `ResolverChanged` of the `eth` node to `resolver` on its resource, so it
+/// writes both the F4 and the F5 row.
+async fn eth_pointer(fixture: &Fixture, block: i64, log: i64, resolver: &str) -> Result<()> {
+    fixture
+        .write(
+            block,
+            log,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            None,
+            Some(&uuid(0x7e8)),
+            json!({"node": ETH_NODE, "resolver": resolver}),
+            V1_REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+// D0, D1, D2, D3, D4, D5, D7, D8, R1: an ENSV2Resolver declaration files every address it names
+// that has a candidate as declared and not projected, whatever other evidence the address has.
+// D0 is declared from block 6 and nothing names it, so it has no row. D1 is the `eth` node's
+// shape, an ENSv1 pointer on F4 and F5. D2 has only an ENSv2 entry and its edge. D3 is D1's
+// shape on a plain node, with three ENSv2 entries that come at 5 and go at 8 and its ENSv1
+// pointer cleared at 10 and set again at 12. D4's declaration starts at 6. D5 is upgraded at 5.
+// The mirror and PublicResolverV2 beside it keep their support (D7). D8 is declared, but only a
+// Basenames pointer names it (D8). The rebuild check runs the history in ranges and block by
+// block (R1).
+#[tokio::test]
+async fn the_ensv2_resolver_is_declared_and_not_projected() -> Result<()> {
+    for mode in PLAN_MODES {
+        let fixture = Fixture::new(&format!("classification_rb_composite_{mode}"), 20).await?;
+        plan_mode(&fixture, mode).await?;
+        let [d0, d1, d2, d3, d4, d5, d8, m1, p1] =
+            [0xd0_u32, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd8, 0xf1, 0xf3].map(|n| address(0x5000 + n));
+        let composite_role = "ensv2_resolver";
+        let mut payload = v2_payload(&[
+            (&d1, composite_role),
+            (&d2, composite_role),
+            (&d3, composite_role),
+            (&d5, composite_role),
+            (&d8, composite_role),
+            (&m1, "ensv1_mirror_resolver"),
+            (&p1, "public_resolver_v2"),
+        ]);
+        let contracts = payload["contracts"].as_array_mut().expect("contracts");
+        for late in [&d0, &d4] {
+            contracts.push(json!({"address": late, "role": composite_role,
+                                  "proxy_kind": "none", "start_block": 6}));
+        }
+        let m = manifests_with(&fixture, &[], payload).await?;
+        namespaced_manifest(
+            &fixture,
+            "basenames",
+            "basenames_base_resolver",
+            json!({"contracts": []}),
+            "active",
+        )
+        .await?;
+        let mut instance = std::collections::BTreeMap::new();
+        for address in [&d2, &d3, &m1] {
+            instance.insert(address.clone(), target(&fixture, address).await?);
+        }
+        eth_pointer(&fixture, 2, 1, &d1).await?;
+        pointer(&fixture, 2, 2, 1, &d3).await?;
+        pointer(&fixture, 2, 3, 2, &d5).await?;
+        v2_pointer(&fixture, &m, 2, 4, 91, &d2, &instance[&d2], None).await?;
+        fixture
+            .write(
+                2,
+                5,
+                "ResolverChanged",
+                "basenames_base_registry",
+                None,
+                None,
+                json!({"node": node(92), "resolver": d8}),
+                V1_REGISTRY,
+            )
+            .await?;
+        v2_pointer(&fixture, &m, 2, 6, 93, &m1, &instance[&m1], None).await?;
+        pointer(&fixture, 2, 7, 3, &m1).await?;
+        v2_event(&fixture, 2, 8, 94, &p1).await?;
+        pointer(&fixture, 2, 9, 4, &p1).await?;
+        pointer(&fixture, 2, 10, 5, &d4).await?;
+        for (log, entry) in [(1, 95), (2, 96), (3, 97)] {
+            v2_pointer(&fixture, &m, 5, log, entry, &d3, &instance[&d3], Some(8)).await?;
+            v2_event(&fixture, 8, log, entry, ZERO).await?;
+        }
+        upgraded(&fixture, 5, 4, "ens_v2_resolver_l1", &d5, IMPLEMENTATION).await?;
+        pointer(&fixture, 10, 1, 1, ZERO).await?;
+        pointer(&fixture, 12, 1, 1, &d3).await?;
+
+        fixture.apply(2, FamilyMode::Normal).await?;
+        let mut at_2 = std::collections::BTreeMap::new();
+        let (mut filed_at_2, mut declared) = (json!({}), json!({}));
+        for (row, address) in [("D1", &d1), ("D2", &d2), ("D3", &d3), ("D5", &d5)] {
+            let fields = served(&fixture, address).await?;
+            filed_at_2[row] = composite_view(&fields);
+            declared[row] = composite_expected(m.v2_resolver);
+            at_2.insert(row, fields);
+        }
+        assert_eq!(filed_at_2, declared, "D1, D2, D3, D5 at 2 ({mode})");
+        for (row, address, role) in [
+            ("D7 mirror", &m1, "ensv1_mirror_resolver"),
+            ("D7 PublicResolverV2", &p1, "public_resolver_v2"),
+        ] {
+            let fields = served(&fixture, address).await?;
+            assert_eq!(
+                brief(&fields),
+                filed("ens_v2_resolver_l1", Some(role), None),
+                "{row} at 2 ({mode})"
+            );
+            at_2.insert(row, fields);
+        }
+        let d8_at_2 = served(&fixture, &d8).await?;
+        assert_eq!(
+            brief(&d8_at_2),
+            filed(
+                "basenames_base_resolver",
+                None,
+                Some("resolver_not_declared"),
+            ),
+            "D8: no ENS candidate admits the declaration ({mode})"
+        );
+        assert_eq!(d8_at_2["admission_namespace"], Value::Null, "D8 ({mode})");
+
+        for block in [2, 5, 6, 8, 10, 12] {
+            fixture.apply(block, FamilyMode::Normal).await?;
+            assert_eq!(
+                served(&fixture, &d0).await?,
+                Value::Null,
+                "D0 at {block}: a declaration alone writes no row ({mode})"
+            );
+            for (row, address) in [
+                ("D1", &d1),
+                ("D2", &d2),
+                ("D3", &d3),
+                ("D7 mirror", &m1),
+                ("D7 PublicResolverV2", &p1),
+            ] {
+                assert_eq!(
+                    served(&fixture, address).await?,
+                    at_2[row],
+                    "{row} at {block}: no diff ({mode})"
+                );
+            }
+            // An `Upgraded` is recorded on the row, as for any declared direct resolver, and
+            // moves none of the fields a reader decides by.
+            assert_composite(
+                &served(&fixture, &d5).await?,
+                m.v2_resolver,
+                &format!("D5 at {block} ({mode})"),
+            );
+            assert_eq!(
+                served(&fixture, &d8).await?,
+                d8_at_2,
+                "D8 at {block} ({mode})"
+            );
+            let d4_fields = served(&fixture, &d4).await?;
+            if block < 6 {
+                assert_eq!(brief(&d4_fields), v1_undeclared(), "D4 at {block} ({mode})");
+            } else {
+                assert_composite(
+                    &d4_fields,
+                    m.v2_resolver,
+                    &format!("D4 at {block} ({mode})"),
+                );
+            }
+        }
+        fixture.assert_undo_restores(12).await?;
+        fixture.assert_rebuild_equal(12).await?;
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+// X1, C1: a manifest update that declares the `eth` node's resolver as the ENSV2Resolver re-files
+// that address alone, from the ENSv1 family to the declared row. Every address that both
+// protocols name, the ENSv2-only and ENSv1-only addresses, and the declared mirror and
+// PublicResolverV2 keep their fields. The flip is between two unsupported rows, and the
+// resolution path selection and the text hydration keys count a classification change only with
+// a supported side (resolution_paths/selection.rs `changed_resolvers`, hydrate/text_keys.sql),
+// so it selects no name and re-derives no text key. The inventories that depend on the address
+// recompose for the new reason (lookup/inventory_work.sql).
+#[tokio::test]
+async fn a_manifest_update_declaring_the_ensv2_resolver_refiles_it_alone() -> Result<()> {
+    for mode in PLAN_MODES {
+        let fixture =
+            Fixture::new(&format!("classification_rb_composite_update_{mode}"), 20).await?;
+        plan_mode(&fixture, mode).await?;
+        let [eth, a1, v2, v1, m1, p1] =
+            [0xe0_u32, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5].map(|n| address(0x5100 + n));
+        let declared = [
+            (m1.as_str(), "ensv1_mirror_resolver"),
+            (p1.as_str(), "public_resolver_v2"),
+        ];
+        let m = manifests(&fixture, &[], &declared).await?;
+        let mut instance = std::collections::BTreeMap::new();
+        for address in [&eth, &a1, &v2, &m1] {
+            instance.insert(address.clone(), target(&fixture, address).await?);
+        }
+        eth_pointer(&fixture, 2, 1, &eth).await?;
+        pointer(&fixture, 2, 2, 1, &a1).await?;
+        v2_pointer(&fixture, &m, 2, 3, 71, &a1, &instance[&a1], None).await?;
+        v2_pointer(&fixture, &m, 2, 4, 72, &v2, &instance[&v2], None).await?;
+        pointer(&fixture, 2, 5, 2, &v1).await?;
+        v2_pointer(&fixture, &m, 2, 6, 73, &m1, &instance[&m1], None).await?;
+        pointer(&fixture, 2, 7, 3, &m1).await?;
+        v2_event(&fixture, 2, 8, 74, &p1).await?;
+        pointer(&fixture, 2, 9, 4, &p1).await?;
+        for (log, entry) in [(1, 75), (2, 76), (3, 77)] {
+            v2_pointer(&fixture, &m, 3, log, entry, &eth, &instance[&eth], None).await?;
+        }
+        let mut updated = declared.to_vec();
+        updated.push((eth.as_str(), "ensv2_resolver"));
+        manifest(
+            &fixture,
+            Some(m.v2_resolver),
+            "ens_v2_resolver_l1",
+            8,
+            v2_payload(&updated),
+        )
+        .await?;
+
+        fixture.apply(7, FamilyMode::Normal).await?;
+        let mut before = std::collections::BTreeMap::new();
+        for address in [&eth, &a1, &v2, &v1, &m1, &p1] {
+            before.insert(address.clone(), served(&fixture, address).await?);
+        }
+        assert_eq!(brief(&before[&eth]), v1_undeclared(), "X1 at 7 ({mode})");
+        fixture.apply(8, FamilyMode::Normal).await?;
+        for (row, address) in [
+            ("A1", &a1),
+            ("V2", &v2),
+            ("V1", &v1),
+            ("M1", &m1),
+            ("P1", &p1),
+        ] {
+            assert_eq!(
+                served(&fixture, address).await?,
+                before[address],
+                "X1: {row} keeps its fields ({mode})"
+            );
+        }
+        let flip: Option<(Value, Value)> = sqlx::query_as(
+            "SELECT journal.before_image, to_jsonb(stored)
+             FROM project_family_undo journal
+             JOIN project_resolver_classification stored
+               ON stored.chain_id = journal.chain_id
+              AND stored.resolver_address = journal.key::jsonb ->> 1
+             WHERE journal.chain_id = $1 AND journal.block_number = 8
+               AND journal.family = 'project_resolver_classification'
+               AND journal.key::jsonb ->> 1 = $2",
+        )
+        .bind(CHAIN)
+        .bind(&eth)
+        .fetch_optional(&fixture.pool)
+        .await?;
+        let consumed = |row: &Value| {
+            json!({
+                "family": row["classification"]["source_family"],
+                "support": row["support_status"],
+                "reason": row["unsupported_reason"],
+            })
+        };
+        // C1: the flip is between two unsupported rows.
+        assert_eq!(
+            json!({
+                "X1": composite_view(&served(&fixture, &eth).await?),
+                "C1": flip.map(|(image, written)| json!([consumed(&image), consumed(&written)])),
+            }),
+            json!({
+                "X1": composite_expected(m.v2_resolver),
+                "C1": [
+                    {"family": "ens_v1_resolver_l1", "support": "unsupported",
+                     "reason": "resolver_not_declared"},
+                    {"family": "ens_v2_resolver_l1", "support": "unsupported",
+                     "reason": "composite_resolver_not_projected"},
+                ],
+            }),
+            "X1, C1: the declaration re-files the eth resolver ({mode})"
+        );
+        fixture.assert_undo_restores(8).await?;
+        fixture.assert_rebuild_equal(8).await?;
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+// O1: a reorg that drops the block of the ENSV2Resolver's first candidate drops its row.
+#[tokio::test]
+async fn a_reorg_across_the_ensv2_resolvers_first_candidate_drops_its_row() -> Result<()> {
+    let fixture = Fixture::new("classification_rb_composite_reorg", 20).await?;
+    let resolver = address(0x51f0);
+    let m = manifests(&fixture, &[], &[(&resolver, "ensv2_resolver")]).await?;
+    eth_pointer(&fixture, 8, 1, &resolver).await?;
+
+    fixture.apply(7, FamilyMode::Normal).await?;
+    assert_eq!(served(&fixture, &resolver).await?, Value::Null, "O1 at 7");
+    fixture.apply(8, FamilyMode::Normal).await?;
+    assert_composite(
+        &served(&fixture, &resolver).await?,
+        m.v2_resolver,
+        "O1 at 8",
+    );
+
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 8",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         VALUES ($1, '0xreplacement8', $2, 8, to_timestamp(1800000096), 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(hash(7))
+    .execute(&fixture.pool)
+    .await?;
+    let token = families::input_token(&fixture.pool, CHAIN).await?;
+    let outcome = families::apply(
+        &fixture.pool,
+        CHAIN,
+        &Marker {
+            number: 8,
+            hash: "0xreplacement8".to_owned(),
+        },
+        FamilyMode::Normal,
+        &token,
+        &FamilyOptions::new(CONTENT_HASH),
+    )
+    .await?;
+    assert_eq!(outcome.undone_blocks, 1);
+    assert_eq!(
+        served(&fixture, &resolver).await?,
+        Value::Null,
+        "O1: the replacement block has no candidate"
+    );
     fixture.cleanup().await
 }
