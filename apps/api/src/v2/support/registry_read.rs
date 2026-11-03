@@ -58,7 +58,9 @@ enum Decision {
     Resolver(String),
 }
 
-fn decide(row: &NameCurrentRow) -> Decision {
+/// Whether `row`'s selected arm is `ens_v1` or `ens_v0`, its latest resolver pointer is an ENSv1
+/// one, and neither the cut-over walk nor coverage withholds its resolution.
+fn ens_v1_pointer_row(row: &NameCurrentRow) -> bool {
     let arm = row
         .provenance
         .pointer("/authority_selection/authority_arm")
@@ -67,12 +69,14 @@ fn decide(row: &NameCurrentRow) -> Decision {
         .provenance
         .get("resolver_pointer_source_family")
         .and_then(Value::as_str);
-    if !row_serves_resolver(row)
-        || !matches!(arm, Some("ens_v1" | "ens_v0"))
-        || !family.is_some_and(|family| V1_POINTER_FAMILIES.contains(&family))
-        || row.unresolvable_reason().is_some()
-        || row.resolution_unsupported_reason().is_some()
-    {
+    matches!(arm, Some("ens_v1" | "ens_v0"))
+        && family.is_some_and(|family| V1_POINTER_FAMILIES.contains(&family))
+        && row.unresolvable_reason().is_none()
+        && row.resolution_unsupported_reason().is_none()
+}
+
+fn decide(row: &NameCurrentRow) -> Decision {
+    if !row_serves_resolver(row) || !ens_v1_pointer_row(row) {
         return Decision::Composed;
     }
     let served = row
@@ -90,6 +94,29 @@ fn decide(row: &NameCurrentRow) -> Decision {
         (Some(_), None) => Decision::NullPointer,
         (None, None) => Decision::Composed,
     }
+}
+
+/// Whether `row` serves its node's ENSv1 registry clear: an ENSv1 pointer row that may serve a
+/// resolver, whose latest pointer write serves none and whose stored registry pointer is null. A
+/// node with no observed pointer write has no `latest_event_kind`, and a withheld live pointer
+/// keeps its registry pointer, so neither is a clear. Only a `.eth` name counts: a DNS name's
+/// ancestor is its TLD, whose ENSIP-10 resolver can answer from DNS.
+pub(crate) fn composed_ens_v1_registry_clear(row: &NameCurrentRow) -> bool {
+    let Some(resolver) = row
+        .declared_summary
+        .get("resolver")
+        .filter(|resolver| resolver.is_object())
+    else {
+        return false;
+    };
+    row_serves_resolver(row)
+        && row.normalized_name.ends_with(".eth")
+        && ens_v1_pointer_row(row)
+        && resolver.get("chain_id").is_none_or(Value::is_null)
+        && resolver.get("address").is_none_or(Value::is_null)
+        && resolver.get("status").and_then(Value::as_str) != Some("unsupported")
+        && resolver.get("latest_event_kind").and_then(Value::as_str) == Some("ResolverChanged")
+        && matches!(ens_v1_resolver(&row.declared_summary), Ok(Some(None)))
 }
 
 pub(super) fn row_chain_id(row: &NameCurrentRow) -> Option<String> {

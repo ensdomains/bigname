@@ -103,6 +103,7 @@ pub use history::{HistoryRegistryHandoff, load_history_registry_handoffs};
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 #[cfg(any(test, feature = "test-support"))]
 pub use history::{
+    explain_contract_event_count_for_test, explain_event_history_count_for_test,
     explain_name_history_page_with_child_registrations_for_test,
     explain_registration_history_filter_for_test,
 };

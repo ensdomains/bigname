@@ -899,13 +899,7 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
         "0x0000000000000000000000000000000000000def",
     )
     .await?;
-    append_name_resolver_input(
-        &database,
-        "ens",
-        "alice.eth",
-        "0x0000000000000000000000000000000000000000",
-    )
-    .await?;
+    drop_name_resolver_inputs(&database, "alice.eth").await?;
 
     let executed_address = "0x0000000000000000000000000000000000000e0e";
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -1062,13 +1056,7 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
         "0x0000000000000000000000000000000000000def",
     )
     .await?;
-    append_name_resolver_input(
-        &database,
-        "ens",
-        "alice.eth",
-        "0x0000000000000000000000000000000000000000",
-    )
-    .await?;
+    drop_name_resolver_inputs(&database, "alice.eth").await?;
 
     let (rpc_url, rpc_handle) =
         spawn_primary_name_mock_rpc(vec![resolution_basenames_l1_addr60_response(
@@ -2140,12 +2128,10 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
                 json!("inventory_not_available")
             );
         } else {
-            assert_eq!(
-                payload["data"]["status"],
-                json!("unregistered")
-            );
             // The stored registration holds no lease, so name detail serves the lease the
-            // name's own registrar grant proves. The status stays as composed.
+            // name's own registrar grant proves. The zero registry owner does not end that
+            // lease: the name serves its status, its holder and `ens_v1` authority.
+            assert_eq!(payload["data"]["status"], json!("active"), "{payload}");
             assert_eq!(
                 payload["data"]["registration_id"],
                 json!(Uuid::from_u128(0x2200).to_string()),
@@ -2154,7 +2140,8 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
             assert_eq!(payload["data"]["registered_at"], json!("1704164645"), "{payload}");
             assert_eq!(payload["data"]["expires_at"], json!("1798859045"), "{payload}");
             assert_eq!(payload["data"]["grace_ends_at"], json!("1806635045"), "{payload}");
-            assert!(payload["data"]["ens_v1"].is_null(), "{payload}");
+            assert_eq!(payload["data"]["ens_v1"]["expires_at"], json!("1798859045"), "{payload}");
+            assert_eq!(payload["data"]["authority"], json!("ens_v1"), "{payload}");
             assert!(
                 payload["data"].get("token_id").is_none(),
                 "ownerless exact-name payload must not imply token control: {payload}"
@@ -2173,7 +2160,7 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
     )
     .await?;
     let lookup_record = &lookup["data"][0]["record"];
-    assert_eq!(lookup_record["status"], json!("unregistered"));
+    assert_eq!(lookup_record["status"], json!("active"), "{lookup}");
     assert!(
         lookup_record.get("token_id").is_none(),
         "ownerless batch lookup must not imply token control: {lookup}"
@@ -3664,7 +3651,18 @@ async fn v2_subname_collections_filter_orphaned_observations_and_surfaces() -> R
             .collect::<Vec<_>>(),
         vec!["alpha.parent.eth"]
     );
-    assert_eq!(page.summary.child_count, 1);
+    let summaries = bigname_storage::load_children_current_summaries(
+        &database.pool,
+        std::slice::from_ref(&parent_logical_name_id),
+    )
+    .await?;
+    assert_eq!(
+        summaries
+            .iter()
+            .map(|summary| summary.child_count)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -6154,6 +6152,7 @@ async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> 
         &filter,
         None,
         1,
+        None,
     )
     .await?;
     let next = bigname_storage::load_children_current_page_filtered(
@@ -6162,6 +6161,7 @@ async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> 
         &filter,
         first.next_cursor.as_ref(),
         1,
+        None,
     )
     .await?;
     assert_eq!(first.total_count, next.total_count);

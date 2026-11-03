@@ -2380,6 +2380,19 @@ at the publication instead of `409 stale`, and its verified-only `meta.as_of`
 reports the publication's block rather than the head. The lookup RPC provider
 needs the same `eth_call`-by-hash depth as verified record lookups.
 
+### ENSv1 registry clear on an auto records read
+
+The build that answers a `source=auto` records read of an ENSv1 registry clear
+`not_found` from the index
+([records route](api-v1-routes.md#ensv1-registry-clear-on-an-auto-read))
+changes only the API's records route, which is not a hashed source, so neither
+the [interpreter content hash](glossary.md#interpreter-content-hash) nor the
+[projection content hash](glossary.md#projection-content-hash) rotates and no
+redo is needed. It adds no schema-migration and no manifest change, so an API
+image swap deploys it. Those reads stop calling the RPC provider, and they
+answer the same when the provider is down. `source=verified` reads of the same
+names still call it.
+
 ### CCIP-Read gateway destination filter
 
 The build that refuses CCIP-Read gateway fetches to loopback, private,

@@ -64,8 +64,9 @@ pub(crate) struct ServedName {
     /// Whether a verified read runs Universal Resolver discovery
     /// (`name_records::verified_discovery`). The lookup engine reloads the composed row, not
     /// `row` as the registry read left it, so this is decided before the registry read. It is
-    /// decided on the registration `serve_legacy_lease_in_savepoint` serves, which changes it
-    /// only for a released lease, whose verified read does not execute.
+    /// decided on the registration and control `serve_legacy_lease_in_savepoint` serves. A row
+    /// it serves `released` has no owner and a released registration, so it runs no discovery
+    /// of its own, and a row whose registry owner is zero serves its lease's holder as owner.
     pub(crate) lookup_discovery: bool,
 }
 
