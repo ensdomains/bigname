@@ -149,20 +149,77 @@ pub(super) async fn list(
     after: i64,
     (names, swept): (&[String], &[String]),
 ) -> Result<(Vec<String>, Vec<String>)> {
-    auto_explain(transaction).await;
-    let started = std::time::Instant::now();
-    let rows: Vec<(String, String)> = sqlx::query_as(WORK_LIST)
-        .bind(chain_id)
-        .bind(block.number)
-        .bind(after)
-        .bind(block.timestamp_seconds)
-        .bind(names)
-        .bind(swept)
-        .fetch_all(&mut **transaction)
+    let previous: String = sqlx::query_scalar("/* project:diag.show */ SHOW statement_timeout")
+        .fetch_one(&mut **transaction)
         .await
-        .map_err(|error| {
-            ProjectError::database("failed to read the children a family block touched", error)
-        })?;
+        .map_err(|error| ProjectError::database("diag show", error))?;
+    for statement in [
+        "/* project:diag.savepoint */ SAVEPOINT tyr455_list",
+        "/* project:diag.timeout */ SET LOCAL statement_timeout = '5s'",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("diag setup", error))?;
+    }
+    let started = std::time::Instant::now();
+    let listed: std::result::Result<Vec<(String, String)>, sqlx::Error> =
+        sqlx::query_as(WORK_LIST)
+            .bind(chain_id)
+            .bind(block.number)
+            .bind(after)
+            .bind(block.timestamp_seconds)
+            .bind(names)
+            .bind(swept)
+            .fetch_all(&mut **transaction)
+            .await;
+    let rows = match listed {
+        Ok(rows) => {
+            sqlx::query("/* project:diag.release */ RELEASE SAVEPOINT tyr455_list")
+                .execute(&mut **transaction)
+                .await
+                .map_err(|error| ProjectError::database("diag release", error))?;
+            sqlx::query("/* project:diag.restore */ SELECT set_config('statement_timeout', $1, true)")
+                .bind(&previous)
+                .execute(&mut **transaction)
+                .await
+                .map_err(|error| ProjectError::database("diag restore", error))?;
+            rows
+        }
+        Err(error) => {
+            let report = |text: String| {
+                println!("{text}");
+                eprintln!("{text}");
+            };
+            report(format!(
+                "TYR455DIAG work list failed at block {} after {} names {} swept {} in {:?}: {error}",
+                block.number,
+                after,
+                names.len(),
+                swept.len(),
+                started.elapsed()
+            ));
+            sqlx::query("/* project:diag.rollback */ ROLLBACK TO SAVEPOINT tyr455_list")
+                .execute(&mut **transaction)
+                .await
+                .map_err(|error| ProjectError::database("diag rollback", error))?;
+            let families: Vec<(String, i64)> = sqlx::query_as(
+                "/* project:diag.families */ SELECT family, count(*) FROM project_family_undo
+                 WHERE chain_id = $1 AND block_number = $2 GROUP BY family ORDER BY family",
+            )
+            .bind(chain_id)
+            .bind(block.number)
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("diag families", error))?;
+            report(format!("TYR455DIAG journal rows by family: {families:?}"));
+            diag(transaction, chain_id, block, after, (names, swept)).await;
+            return Err(ProjectError::data_integrity(format!(
+                "TYR455DIAG stop at block {}",
+                block.number
+            )));
+        }
+    };
     if started.elapsed().as_secs() > 2 {
         println!(
             "TYR455DIAG slow work list block {} names {} took {:?}",
@@ -189,36 +246,6 @@ pub(super) async fn list(
     Ok((children, parents))
 }
 
-/// Diagnostic only: log the plan of any statement in this transaction over one second to the
-/// server log, which CI prints when it stops the service container.
-async fn auto_explain(transaction: &mut Transaction<'_, Postgres>) {
-    let _ = sqlx::query("/* project:diag.savepoint */ SAVEPOINT tyr455_auto")
-        .execute(&mut **transaction)
-        .await;
-    let mut loaded = true;
-    for statement in [
-        "/* project:diag.load */ LOAD 'auto_explain'",
-        "/* project:diag.min */ SET LOCAL auto_explain.log_min_duration = '1s'",
-        "/* project:diag.analyze */ SET LOCAL auto_explain.log_analyze = on",
-        "/* project:diag.buffers */ SET LOCAL auto_explain.log_buffers = on",
-        "/* project:diag.nested */ SET LOCAL auto_explain.log_nested_statements = on",
-    ] {
-        if let Err(error) = sqlx::query(statement).execute(&mut **transaction).await {
-            println!("TYR455DIAG auto_explain failed: {error}");
-            eprintln!("TYR455DIAG auto_explain failed: {error}");
-            loaded = false;
-            break;
-        }
-    }
-    let end = if loaded {
-        "/* project:diag.release */ RELEASE SAVEPOINT tyr455_auto"
-    } else {
-        "/* project:diag.rollback */ ROLLBACK TO SAVEPOINT tyr455_auto"
-    };
-    let _ = sqlx::query(end).execute(&mut **transaction).await;
-}
-
-#[allow(dead_code)]
 async fn diag(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -233,7 +260,6 @@ async fn diag(
     for (mode, explain) in [
         ("force_custom_plan", "EXPLAIN"),
         ("force_generic_plan", "EXPLAIN"),
-        ("auto", "EXPLAIN (ANALYZE, BUFFERS)"),
     ] {
         let _ = sqlx::query("/* project:diag.savepoint */ SAVEPOINT tyr455_diag")
             .execute(&mut **transaction)
@@ -243,7 +269,7 @@ async fn diag(
         ))
         .execute(&mut **transaction)
         .await;
-        let _ = sqlx::query("/* project:diag.timeout */ SET LOCAL statement_timeout = '300s'")
+        let _ = sqlx::query("/* project:diag.timeout */ SET LOCAL statement_timeout = '60s'")
             .execute(&mut **transaction)
             .await;
         let started = std::time::Instant::now();
