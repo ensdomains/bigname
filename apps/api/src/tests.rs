@@ -477,6 +477,7 @@ async fn v2_namespace_profile_and_history_are_full_where_names_serve() -> Result
 }
 
 include!("tests/removed_graphql_route.rs");
+include!("tests/cors_preflight.rs");
 include!("tests/v2_name_record.rs");
 include!("tests/v2_name_records_default_set.rs");
 include!("tests/v2_name_records_inventory_only.rs");

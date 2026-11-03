@@ -863,6 +863,9 @@ Rules:
 - There is no `meta` query parameter and no stripped envelope variant.
 - There are no `declared_state`/`verified_state` parallel trees and no `both`
   mode.
+- Cross-origin requests are allowed from any origin, without credentials. A
+  CORS preflight answer carries `Access-Control-Max-Age: 86400`, so a browser
+  may reuse it for up to a day, or for its own shorter limit.
 
 ## Field Budgets
 

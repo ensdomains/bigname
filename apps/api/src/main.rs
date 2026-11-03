@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use axum::{Router, routing::get};
 use clap::Parser;
 use sqlx::PgPool;
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -198,6 +199,11 @@ pub(crate) fn app_router(state: AppState) -> Router {
     ))
 }
 
+/// Chromium caps a cached preflight at 7,200 s and Firefox at 86,400 s, so one day serves both.
+fn cors_layer() -> CorsLayer {
+    CorsLayer::permissive().max_age(Duration::from_secs(86_400))
+}
+
 fn app_router_with_bounds(
     state: AppState,
     health_pool: PgPool,
@@ -206,10 +212,10 @@ fn app_router_with_bounds(
     let bounded_router = v2::router()
         .with_state(state.clone())
         .route("/openapi.json", get(openapi::get_openapi))
-        .route_layer(CorsLayer::permissive());
+        .route_layer(cors_layer());
     let health_router = Router::new()
         .route("/healthz", get(health))
-        .route_layer(CorsLayer::permissive())
+        .route_layer(cors_layer())
         .layer(axum::Extension(HealthDatabasePool(health_pool)))
         .with_state(state);
     // The API is read-only public data served cross-origin to browser clients (the ENS Manager
