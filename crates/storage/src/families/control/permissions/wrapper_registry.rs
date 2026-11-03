@@ -119,8 +119,9 @@ fn resource_root(resources: &str) -> String {
 }
 
 /// The approved operators of the parent entry's owner in the parent registry. The lateral
-/// subquery runs after the entry is found, so it probes the approvals' primary key with the
-/// entry's chain, registry and owner, and no plan depends on the approvals' estimate.
+/// subquery runs after the entry is found, so it probes the approvals by key. That is the
+/// primary key with the entry's chain, registry and owner, or the subject's index when the
+/// read has a subject. No plan depends on the approvals' estimate.
 fn entry_operators(subject: &str) -> String {
     format!(
         "JOIN LATERAL (

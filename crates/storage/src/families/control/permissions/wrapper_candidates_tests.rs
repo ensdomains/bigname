@@ -189,7 +189,7 @@ const OWNER_APPROVALS: Step = Step {
 /// With a subject, the approvals of that subject by the entry owner: through the primary key,
 /// or through the subject's own index.
 const SUBJECT_APPROVAL: Step = Step {
-    label: "the subject's approval by the entry owner",
+    label: "the subject's approvals by key",
     indexes: &[
         "project_account_approval_pkey",
         "project_account_approval_subject_idx",
