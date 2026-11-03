@@ -247,7 +247,7 @@ pub(crate) async fn refresh(
     after: i64,
     touched: (&[String], &[String]),
 ) -> Result<Refreshed> {
-    let observed = sources::read(transaction, chain_id).await?;
+    let observed = sources::Read::default();
     let (mut children, parents) = work::list(transaction, chain_id, block, after, touched).await?;
     if !observed.holders.is_empty() {
         children.extend(observed.holders.iter().cloned());
