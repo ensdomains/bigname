@@ -255,7 +255,9 @@ fn push_resolver_candidate_select<'a>(
     }
     // Priority exclusions: the set arm drops rows the emitted arm claims, and
     // the cleared arm drops rows either earlier arm claims. `IS DISTINCT FROM`
-    // keeps a row whose other resolver value is missing.
+    // keeps a row whose other resolver value is missing. The stored event counts mirror these
+    // exclusions in `count_contract.rs`, and `stored_counts_equal_the_reads_they_count` pins
+    // the two together.
     match arm {
         ResolverArm::Emitted => {}
         ResolverArm::PointerSet => {

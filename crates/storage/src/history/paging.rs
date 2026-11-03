@@ -351,7 +351,9 @@ pub(super) fn push_history_filters<'a>(
     }
 
     // A source that took the resolver arms holds only the resolver's rows.
-    // Every other resolver read is narrowed by this condition.
+    // Every other resolver read is narrowed by this condition. The stored event counts mirror
+    // it in the handoff of `count_contract.rs`, and `stored_counts_equal_the_reads_they_count`
+    // pins the two together.
     if resolver_source == ResolverSource::Condition
         && let Some(resolver) = filter.resolver.as_ref()
     {
