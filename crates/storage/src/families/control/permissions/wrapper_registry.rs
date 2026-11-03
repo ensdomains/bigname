@@ -88,12 +88,12 @@ pub(super) fn operator_candidates() -> String {
 }
 
 /// The root grants `resources` selects on chain `$9`, then for each grant its WrapperRegistry's
-/// parent row and the parent's live entry, each found by its primary key. The root grants are
-/// one `OFFSET 0` subquery, and the parent row with its entry another. The planner cannot
-/// merge either into a join, so it cannot start from the entries or the parent rows, whatever
-/// their estimates. A page's outer bound on the resource ids stays a filter above the first
-/// subquery. So the root-grant lookup is estimated with the array predicate once: counted
-/// twice, it misestimates the selected root grants.
+/// parent row and then the parent's live entry, each found by its primary key. Each step is an
+/// `OFFSET 0` subquery, which the planner cannot merge into a join. So it cannot start from the
+/// entries or the parent rows, whatever their estimates, and it cannot read the entries of the
+/// parent registry by the registry alone. A page's outer bound on the resource ids stays a
+/// filter above the first subquery. So the root-grant lookup is estimated with the array
+/// predicate once: counted twice, it misestimates the selected root grants.
 fn resource_root(resources: &str) -> String {
     format!(
         "FROM (SELECT grant_row.chain_id, grant_row.resource_id, grant_row.subject,
@@ -102,15 +102,18 @@ fn resource_root(resources: &str) -> String {
                WHERE grant_row.chain_id = $9 AND grant_row.scope = 'root' AND {resources}
                OFFSET 0) virtual_grant
         JOIN LATERAL (
-            SELECT entry.chain_id, entry.registry, entry.owner
+            SELECT parent.chain_id, parent.parent, parent.parent_entry_key
             FROM bigname_phase.project_ens_v2_registry_parent parent
-            JOIN bigname_phase.project_ens_v2_entry_owner entry
-              ON entry.chain_id = parent.chain_id AND entry.registry = parent.parent
-             AND entry.entry_key = parent.parent_entry_key
-            JOIN bigname_phase.project_family_marker marker ON marker.chain_id = entry.chain_id
             WHERE parent.chain_id = virtual_grant.chain_id
               AND parent.registry = virtual_grant.registry
-              AND parent.parent = virtual_grant.subject AND {LIVE_ENTRY}
+              AND parent.parent = virtual_grant.subject
+            OFFSET 0) parent ON true
+        JOIN LATERAL (
+            SELECT entry.chain_id, entry.registry, entry.owner
+            FROM bigname_phase.project_ens_v2_entry_owner entry
+            JOIN bigname_phase.project_family_marker marker ON marker.chain_id = entry.chain_id
+            WHERE entry.chain_id = parent.chain_id AND entry.registry = parent.parent
+              AND entry.entry_key = parent.parent_entry_key AND {LIVE_ENTRY}
             OFFSET 0) entry ON true"
     )
 }

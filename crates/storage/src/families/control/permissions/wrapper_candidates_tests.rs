@@ -186,15 +186,15 @@ const OWNER_APPROVALS: Step = Step {
     ],
     lacks: &[],
 };
+/// With a subject, the approvals of that subject by the entry owner: through the primary key,
+/// or through the subject's own index.
 const SUBJECT_APPROVAL: Step = Step {
     label: "the subject's approval by the entry owner",
-    indexes: &["project_account_approval_pkey"],
-    has: &[
-        "(authority_kind = 'ens_v2_registry'",
-        "(authority_contract = ",
-        "(owner = ",
-        "(subject = ",
+    indexes: &[
+        "project_account_approval_pkey",
+        "project_account_approval_subject_idx",
     ],
+    has: &["(subject = ", "(authority_kind = 'ens_v2_registry'"],
     lacks: &[],
 };
 /// An address read starts from the subject's approvals and then the entries of their owners.
@@ -404,14 +404,21 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
             let [owners_before, operators_before] = sources_before();
             let owner_steps = [ROOT_GRANTS, PARENT_ROW, PARENT_ENTRY];
             let operator_steps = [ROOT_GRANTS, PARENT_ROW, PARENT_ENTRY, approvals];
+            // With a subject, the operator source before also reads that subject's approvals
+            // through the subject's index, which is a lookup by key as well.
+            let operator_before_misses = if subject.is_some() {
+                &operator_steps[..3]
+            } else {
+                &operator_steps[..]
+            };
             let values = read.values();
             for mode in PLAN_MODES {
                 // The lookups the source before misses on this fixture, which tell the two
                 // sources apart. The operator source before starts from the approvals and
-                // misses all of them. The owner source before has no key for the resource in
-                // a generic plan. A custom plan folds its `$2 IS NULL`, so it starts from the
-                // root grant too, except at a root with 300 holders, where it merge-joins every
-                // entry of the chain with every parent row.
+                // misses every lookup from the resource. The owner source before has no key
+                // for the resource in a generic plan. A custom plan folds its `$2 IS NULL`, so
+                // it starts from the root grant too, except at a root with 300 holders, where it
+                // merge-joins every entry of the chain with every parent row.
                 let owner_before_misses: &[Step] = match (mode, read.resource == root(1)) {
                     ("force_generic_plan", _) => &[ROOT_GRANTS],
                     (_, true) => &[PARENT_ROW, PARENT_ENTRY],
@@ -430,7 +437,7 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
                         &operators,
                         &operators_before,
                         &operator_steps[..],
-                        &operator_steps[..],
+                        operator_before_misses,
                     ),
                 ] {
                     let cell = format!("{}, {arm} source, {mode}", read.label);
@@ -822,12 +829,12 @@ async fn wrapper_sources_keep_every_key_of_the_resources() -> Result<()> {
                     .bind(after.as_ref().map(|key| key.subject.as_str()))
                     .bind(after.as_ref().map(|key| key.resource_id))
                     .bind(after.as_ref().map(|key| key.scope.as_str()))
-                    .bind(64_i64)
+                    .bind(1001_i64)
                     .bind(None::<Uuid>)
                     .bind(*chain)
                     .fetch_all(&mut *connection)
                     .await?;
-                let last = keys.len() < 64;
+                let last = keys.len() < 1001;
                 after = keys.last().cloned();
                 before.extend(keys);
                 if last {
