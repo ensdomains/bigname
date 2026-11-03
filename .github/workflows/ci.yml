@@ -499,6 +499,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The test binaries take about 34 GB. Three shards ran out of space on
+      # 2026-11-02 while linking them. The removals take up to two minutes, so
+      # they run in the background while the toolchain installs and the cache
+      # restores. The build needs the space minutes later.
+      - name: Free runner disk space
+        run: nohup scripts/ci-free-disk >"$RUNNER_TEMP/ci-free-disk.log" 2>&1 &
+
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -552,6 +559,40 @@ jobs:
             echo "- Exact hit: \`$CACHE_HIT\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
+      # The build needs about 34 GB. With less than 40 GB free, the build waits
+      # for the removals to finish, for up to three minutes.
+      - name: Wait for the disk cleanup when space is short
+        run: |
+          start=$SECONDS
+          for _ in $(seq 180); do
+            pgrep -f scripts/ci-free-disk >/dev/null || break
+            [ "$(df --output=avail -BG / | tail -n 1 | tr -dc 0-9)" -lt 40 ] || break
+            sleep 1
+          done
+          echo "waited $((SECONDS - start)) s for the disk cleanup"
+
+      - name: Report disk before the build
+        run: scripts/ci-disk-report "before the build" "${{ job.services.postgres.id }}"
+
+      # The same build the test step below runs, done first so the disk report
+      # after it shows the space the test binaries take.
+      - name: Build test binaries
+        run: >-
+          ./scripts/test-db -- cargo nextest run --no-run
+          -p phase-runner
+          -p bigname-ingest
+          -p bigname-interpret
+          -p bigname-content-hash
+          -p bigname-benchmark-gate
+          -p bigname-lookup
+          -p bigname-project
+          -p bigname-metrics
+          --features bigname-adapters/test-activation,bigname-storage/test-support
+
+      - name: Report disk after the build
+        if: always()
+        run: scripts/ci-disk-report "after the build" "${{ job.services.postgres.id }}"
+
       - name: Watch for stalled test databases
         run: nohup scripts/ci-pg-hang-watch "${{ job.services.postgres.id }}" "$RUNNER_TEMP/pg-hang-report.txt" >/dev/null 2>&1 &
 
@@ -594,6 +635,10 @@ jobs:
           -p bigname-metrics
           --features bigname-adapters/test-activation,bigname-storage/test-support
           --doc
+
+      - name: Report disk after the tests
+        if: always()
+        run: scripts/ci-disk-report "after the tests" "${{ job.services.postgres.id }}"
 
   phase_runner:
     name: test (phase-runner)
