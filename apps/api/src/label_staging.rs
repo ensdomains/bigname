@@ -48,16 +48,19 @@ const INSUFFICIENT_PRIVILEGE: &str = "42501";
 
 const OUTCOMES: usize = 7;
 
+// Each id is spelled out, since the flattened bounds already use `max_in_flight`.
 #[derive(Args, Clone, Debug)]
 pub(crate) struct LabelStagingConfig {
     /// Candidate writes a second. Zero stages nothing, and responses still show proven labels.
     #[arg(
+        id = "label_staging_per_second",
         long = "label-staging-per-second",
         env = "BIGNAME_API_LABEL_STAGING_PER_SECOND",
         default_value_t = DEFAULT_PER_SECOND
     )]
     pub(crate) per_second: u32,
     #[arg(
+        id = "label_staging_burst",
         long = "label-staging-burst",
         env = "BIGNAME_API_LABEL_STAGING_BURST",
         default_value_t = DEFAULT_BURST
@@ -65,12 +68,14 @@ pub(crate) struct LabelStagingConfig {
     pub(crate) burst: u32,
     /// Labelhashes remembered as staged before the set starts again.
     #[arg(
+        id = "label_staging_max_labels",
         long = "label-staging-max-labels",
         env = "BIGNAME_API_LABEL_STAGING_MAX_LABELS",
         default_value_t = DEFAULT_MAX_LABELS
     )]
     pub(crate) max_labels: usize,
     #[arg(
+        id = "label_staging_max_in_flight",
         long = "label-staging-max-in-flight",
         env = "BIGNAME_API_LABEL_STAGING_MAX_IN_FLIGHT",
         default_value_t = DEFAULT_MAX_IN_FLIGHT
