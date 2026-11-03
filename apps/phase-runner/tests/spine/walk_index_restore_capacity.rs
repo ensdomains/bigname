@@ -457,12 +457,14 @@ async fn an_invalid_leftover_is_dropped_before_the_wait_for_capacity() -> Result
     scratch.cleanup().await
 }
 
-/// The backend holding the rebuild lock, the rebuild's own session.
+/// The backend holding the rebuild lock in this test's database, the rebuild's own session.
+/// `pg_locks` lists every database's locks, and other tests' rebuilds take the same key.
 async fn restore_backend(pool: &sqlx::PgPool) -> Result<Option<i32>> {
     Ok(sqlx::query_scalar(
         "SELECT held.pid FROM pg_locks held,
                 (SELECT hashtextextended('bigname.walk_index_set', 0) AS key) lock
          WHERE held.locktype = 'advisory' AND held.granted AND held.objsubid = 1
+           AND held.database = (SELECT oid FROM pg_database WHERE datname = current_database())
            AND held.classid = ((lock.key >> 32) & 4294967295)::oid
            AND held.objid = (lock.key & 4294967295)::oid",
     )
