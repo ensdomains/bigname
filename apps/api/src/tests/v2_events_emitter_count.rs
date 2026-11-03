@@ -346,13 +346,13 @@ async fn events_emitter_total_count_is_null_above_ten_thousand() -> Result<()> {
     let contract = format!("/v1/events?contract_address={EMITTER_BOUNDARY}&page_size=3");
     let both = format!("{resolver}&contract_address={EMITTER_BOUNDARY}");
 
-    // Row 1 at the cap: the contract anchors read the 10,000 emitted rows and count them exactly.
+    // At the cap: the contract anchors read the 10,000 emitted rows and count them exactly.
     for route in [&contract, &both] {
         let page = v2_history_payload_for_database(&database, &format!("{route}&include=total_count")).await?;
         assert_eq!(page["page"]["total_count"], json!(10_000), "{route}");
     }
 
-    // Row 2: the resolver read also holds the two pointer changes, 10,002 rows. The count is
+    // Above the cap: the resolver read also holds the two pointer changes, 10,002 rows. The count is
     // null and the page is the page without the flag.
     let default = v2_history_payload_for_database(&database, &resolver).await?;
     let counted = v2_history_payload_for_database(&database, &format!("{resolver}&include=total_count")).await?;
@@ -361,7 +361,7 @@ async fn events_emitter_total_count_is_null_above_ten_thousand() -> Result<()> {
     assert_eq!(counted["page"]["next_cursor"], default["page"]["next_cursor"]);
     assert_eq!(counted["page"]["has_more"], json!(true));
 
-    // Row 2 on the contract anchors: one more emitted row takes them to 10,001.
+    // Above the cap on the contract anchors: one more emitted row takes them to 10,001.
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[emitted(10_000)]).await?;
     for route in [&contract, &both] {
         let page = v2_history_payload_for_database(&database, &format!("{route}&include=total_count")).await?;

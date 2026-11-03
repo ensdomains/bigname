@@ -163,7 +163,7 @@ async fn registry_event_count_plan_stops_at_the_cap() -> Result<()> {
     Ok(())
 }
 
-/// Row 3: with no test override, `counts.events` is exact up to 10,000 events and `null` above,
+/// Rows A1 and A2 at the production cap: with no test override, `counts.events` is exact up to 10,000 events and `null` above,
 /// and the contract feed's opt-in count agrees on both sides of the cap.
 #[tokio::test]
 async fn registry_event_count_is_null_above_ten_thousand() -> Result<()> {
