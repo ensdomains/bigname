@@ -726,6 +726,30 @@ CREATE INDEX IF NOT EXISTS normalized_events_address_root_permission_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+-- A registry's role counts (CURRENT_ROLES in apps/api/src/v2/registries/role_counts.rs) read
+-- the registry's current role assignments. This index holds exactly the role-change rows that
+-- statement keeps, keyed by chain and emitting registry and then in its DISTINCT ON order, so
+-- it reads no other event of the registry and needs no sort. Keep it identical to
+-- migrations/20261102140000_normalized_events_registry_roles_index.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_registry_roles_idx
+    ON normalized_events (
+        chain_id,
+        lower(raw_fact_ref ->> 'emitting_address'),
+        resource_id,
+        lower(after_state ->> 'subject'),
+        block_number DESC,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND event_kind IN ('PermissionChanged', 'RootPermissionChanged')
+      AND after_state ->> 'source_event' = 'EACRolesChanged'
+      AND resource_id IS NOT NULL
+      AND after_state ->> 'subject' IS NOT NULL
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 -- Product address history: direct account owner/operator and claimed reverse address.
 -- Keep these predicates equal to history/direct_accounts.rs and the reviewed prebuild.
 CREATE INDEX IF NOT EXISTS normalized_events_history_account_owner_idx
