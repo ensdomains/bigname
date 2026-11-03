@@ -105,8 +105,7 @@ pub(super) async fn registry_page(
 }
 
 /// The registry's representative pointing name: the earliest name whose current ENSv2
-/// subregistry pointer targets it, the overview's `name` rule. With no reverse index on
-/// `project_parent_subregistry` this reads the chain's pointer rows.
+/// subregistry pointer targets it, the overview's `name` rule.
 const SERVING_PARENT: &str = "/* storage:children.registry_serving_parent */
     SELECT pointer.logical_name_id
     FROM bigname_phase.project_parent_subregistry pointer

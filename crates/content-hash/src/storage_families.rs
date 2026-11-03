@@ -259,6 +259,7 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/records/seams.rs",
     "crates/storage/src/families/topology/children_page.rs",
     "crates/storage/src/families/topology/collections.rs",
+    "crates/storage/src/families/topology/listing_page.rs",
     "crates/storage/src/families/topology/mod.rs",
     "crates/storage/src/families/topology/name_topology.rs",
     "crates/storage/src/families/topology/overview.rs",
