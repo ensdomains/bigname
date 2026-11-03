@@ -119,9 +119,6 @@ async fn an_observation_derives_again_only_rows_holding_its_labels() -> Result<(
         "the work list is {children:?} and parents {parents:?}"
     );
 
-    raw_sql("SET LOCAL enable_seqscan = off")
-        .execute(&mut *transaction)
-        .await?;
     let header = block(12);
     let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {WORK_LIST}"))
         .bind(CHAIN)

@@ -5,7 +5,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Result, ensure};
-use bigname_storage::families::topology::{ListingBlock, listing_rows};
+use bigname_storage::families::{
+    name::{ensure_family_publications, is_publication_unavailable},
+    topology::{ListingBlock, listing_rows},
+};
 
 use super::Fixture;
 
@@ -92,11 +95,14 @@ impl Fixture {
             .build_query_scalar::<String>()
             .fetch_one(&self.pool)
             .await?;
-        if stored != composed && self.before_children_stream(chain, &state).await? {
+        if stored != composed
+            && self.readers_refuse(chain).await?
+            && self.before_children_stream(chain, &state).await?
+        {
             // A rebuild whose composition pass has not finished the children stream publishes
-            // nothing yet (`bootstrap_pending`), and the stream has not reached every parent.
-            // That one difference is allowed, counted, and predicted by the test
-            // (`expect_listing_skips`).
+            // nothing yet: the readers refuse it with the structured refusal, and the stream has
+            // not reached every parent. That one difference is allowed, counted, and predicted by
+            // the test (`expect_listing_skips`). Any other difference fails below.
             self.listing_checks.skipped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
@@ -114,6 +120,16 @@ impl Fixture {
         );
         self.listing_checks.compared.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Whether the readers refuse `chain`'s publication with the structured refusal
+    /// (`FamilyPublicationUnavailable`), matched by its kind. Any other error fails the check.
+    async fn readers_refuse(&self, chain: &str) -> Result<bool> {
+        match ensure_family_publications(&self.pool, &[chain.to_owned()]).await {
+            Ok(_) => Ok(false),
+            Err(error) if is_publication_unavailable(&error) => Ok(true),
+            Err(error) => Err(error),
+        }
     }
 
     /// Whether `chain`'s marker (in `state`) belongs to a rebuild whose composition pass has not
@@ -159,7 +175,9 @@ pub(super) struct Checks {
 
 impl Checks {
     /// A fixture skipped exactly the predicted number, and one that checked any publication
-    /// compared at least one in full.
+    /// compared at least one in full: each check of a marked block either compares or skips, so
+    /// a fixture that skipped and compared nothing is the only one that checked without
+    /// comparing.
     pub(super) fn require(&self) -> Result<()> {
         let compared = self.compared.load(Ordering::Relaxed);
         let skipped = self.skipped.load(Ordering::Relaxed);
