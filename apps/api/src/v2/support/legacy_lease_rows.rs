@@ -3,11 +3,13 @@
 //! per-chain bounds ([`serve_legacy_leases_at_bounds`]).
 use std::collections::BTreeMap;
 
+use anyhow::Result;
 use bigname_storage::{IdentityNameCurrentRow, NameCurrentRow};
 use serde_json::Value;
 use sqlx::PgConnection;
+use tracing::error;
 
-use super::legacy_lease::{lease_read, serve_read_in_savepoint};
+use super::legacy_lease::{LeaseRead, fill_lease, lease_read};
 use super::{LegacyLeaseShape, legacy_lease_shape};
 
 #[cfg(test)]
@@ -26,6 +28,8 @@ pub(crate) trait LeaseRow {
     fn chain_positions(&self) -> &Value;
     fn declared_summary(&self) -> &Value;
     fn declared_summary_mut(&mut self) -> &mut Value;
+    /// The summary and the provenance together, for the fill of an ownerless row's `authority`.
+    fn summary_and_provenance_mut(&mut self) -> (&mut Value, &mut Value);
 }
 
 macro_rules! lease_row {
@@ -51,6 +55,9 @@ macro_rules! lease_row {
             }
             fn declared_summary_mut(&mut self) -> &mut Value {
                 &mut self.declared_summary
+            }
+            fn summary_and_provenance_mut(&mut self) -> (&mut Value, &mut Value) {
+                (&mut self.declared_summary, &mut self.provenance)
             }
         }
     };
@@ -78,10 +85,60 @@ pub(crate) async fn serve_legacy_leases_at_bounds<'a, R: LeaseRow + 'a>(
     conn: &mut PgConnection,
     rows: impl IntoIterator<Item = &'a mut R>,
     bounds: &BTreeMap<String, i64>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     for row in rows {
         let read = lease_read(&*row, |chain_id| bounds.get(chain_id).copied());
         serve_read_in_savepoint(&mut *conn, row, read).await?;
     }
     Ok(())
+}
+
+/// [`fill_lease`] of `row` in a savepoint of `conn`, as `serve_legacy_lease_in_savepoint`
+/// describes. A row whose fill fails is restored as composed, summary and provenance both.
+pub(super) async fn serve_read_in_savepoint<R: LeaseRow>(
+    conn: &mut PgConnection,
+    row: &mut R,
+    read: Option<LeaseRead>,
+) -> Result<bool> {
+    let Some(read) = read else {
+        return Ok(false);
+    };
+    #[cfg(test)]
+    let _ = LEASE_SAVEPOINTS.try_with(|count| count.set(count.get() + 1));
+    let composed = (row.declared_summary().clone(), row.provenance().clone());
+    let mut savepoint = sqlx::Connection::begin(&mut *conn).await?;
+    match fill_lease(&mut savepoint, &mut *row, read).await {
+        Ok(filled) => {
+            if let Err(error) = savepoint.commit().await {
+                restore(row, composed);
+                return Err(error.into());
+            }
+            Ok(filled)
+        }
+        Err(read_error) => {
+            restore(row, composed);
+            if let Err(rollback_error) = savepoint.rollback().await {
+                error!(
+                    service = "api",
+                    name = %row.normalized_name(),
+                    error = %read_error,
+                    "legacy lease read failed and its savepoint did not roll back"
+                );
+                return Err(rollback_error.into());
+            }
+            error!(
+                service = "api",
+                name = %row.normalized_name(),
+                error = %read_error,
+                "legacy lease read failed, serving the composed registration"
+            );
+            Ok(false)
+        }
+    }
+}
+
+fn restore<R: LeaseRow>(row: &mut R, (summary, provenance): (Value, Value)) {
+    let (filled_summary, filled_provenance) = row.summary_and_provenance_mut();
+    *filled_summary = summary;
+    *filled_provenance = provenance;
 }

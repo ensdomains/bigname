@@ -2,13 +2,24 @@ use super::*;
 
 /// The public `authority` each name of `seed_authority_shape_names` serves. `shared-one.eth`
 /// is the ownerless registry profile: it keeps its ENSv1 arm (and its 2017-registry generation)
-/// but serves no `authority`.
+/// but serves no `authority`, except where the read-time lease fill serves it.
 fn expected_authority(name: &str) -> Option<&'static str> {
     match name {
         "alpha.eth" => Some("ens_v0"),
         "beta.eth" | "gamma.eth" => Some("ens_v1"),
         "shared-two.eth" => Some("ens_v2"),
         _ => None,
+    }
+}
+
+/// [`expected_authority`] on name detail and lookup name inputs, which the read-time lease fill
+/// reaches. Its BaseRegistrar grant gives `shared-one.eth` a lease the zero registry owner does
+/// not end, so it serves its arm's authority, `ens_v0` while only the 2017 registry records its
+/// node (TYR-439).
+fn expected_filled_authority(name: &str) -> Option<&'static str> {
+    match name {
+        "shared-one.eth" => Some("ens_v0"),
+        _ => expected_authority(name),
     }
 }
 
@@ -138,13 +149,13 @@ async fn v2_address_names_split_the_ens_v1_arm_by_registry_generation() -> Resul
 }
 
 #[tokio::test]
-async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -> Result<()> {
+async fn v2_name_detail_and_lookup_serve_ens_v0_on_the_ownerless_lease() -> Result<()> {
     const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
     let database = TestDatabase::new_migrated().await?;
     seed_authority_shape_names(&database, HOLDER).await?;
 
     for name in AUTHORITY_SHAPE_NAMES {
-        let expected = expected_authority(name);
+        let expected = expected_filled_authority(name);
         let detail = v2_get_json(&database, &format!("/v1/names/{name}")).await?;
         assert_eq!(
             detail["data"].get("authority").and_then(Value::as_str),
@@ -152,6 +163,12 @@ async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -
             "{name}: {detail}"
         );
     }
+    // The lease's grant names HOLDER, which the fill serves as the ownerless name's owner, with
+    // no manager, since its registry owner is zero.
+    let shared = v2_get_json(&database, "/v1/names/shared-one.eth").await?;
+    assert_eq!(shared["data"]["owner"], HOLDER, "{shared}");
+    assert!(shared["data"].get("manager").is_none(), "{shared}");
+    assert_eq!(shared["data"]["status"], "active", "{shared}");
     let lookup = v2_lookup_json(
         &database,
         json!({
@@ -166,7 +183,7 @@ async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -
     .await?;
     let results = lookup["data"].as_array().expect("lookup results");
     for (index, name) in AUTHORITY_SHAPE_NAMES.into_iter().enumerate() {
-        let expected = expected_authority(name);
+        let expected = expected_filled_authority(name);
         let record = &results[index]["record"];
         assert_eq!(
             record.get("authority").and_then(Value::as_str),
