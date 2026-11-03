@@ -29,6 +29,7 @@ pub use collections::{
 };
 pub use listing::{
     DISPLAY_KEY_BYTES, DISPLAY_KEY_CHARS, LISTING_COLUMNS, MISSING_TIMESTAMP, listing_rows,
+    listing_statement,
 };
 pub(crate) use name_topology::load_name_topology_on;
 pub use name_topology::load_name_topology_shadow;
