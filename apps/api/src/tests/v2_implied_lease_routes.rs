@@ -218,8 +218,25 @@ async fn the_name_listing_dates_a_migrated_lease_at_its_first_registry_record() 
     database.cleanup().await
 }
 
+/// The records route's answer for `alice.eth` on `database`: whether `resolver` is present, its
+/// value, and the `text:description` entry, which must be present.
+async fn records_answer(database: &TestDatabase, source: &str) -> Result<Value> {
+    let uri = format!("/v1/names/alice.eth/records?source={source}&keys=text:description");
+    let records = v2_get_json(database, &uri).await?;
+    assert_eq!(records["meta"]["source"], json!(source), "{records}");
+    let entry = records["data"]["records"]
+        .get("text:description")
+        .with_context(|| format!("the requested key is answered: {records:#}"))?;
+    Ok(json!({
+        "has_resolver": records["data"].get("resolver").is_some(),
+        "resolver": records["data"]["resolver"],
+        "entry": entry,
+    }))
+}
+
 /// A released implied lease serves `released` with no resolver and no records on name detail
 /// and on an indexed records read, although its retained registry pointer and records remain.
+/// The records read answers as the bound fixture whose own lease was released does.
 #[tokio::test]
 async fn a_released_implied_lease_serves_no_resolver_or_records() -> Result<()> {
     let database = released_ownerless().await?;
@@ -231,18 +248,13 @@ async fn a_released_implied_lease_serves_no_resolver_or_records() -> Result<()> 
     assert!(data.get("owner").is_none(), "{data}");
     assert!(data.get("manager").is_none(), "{data}");
 
-    let records = v2_get_json(
-        &database,
-        "/v1/names/alice.eth/records?source=indexed&keys=text:description",
-    )
-    .await?;
-    assert_eq!(records["meta"]["source"], json!("indexed"), "{records}");
-    assert!(records["data"]["resolver"].is_null(), "{records}");
-    assert_ne!(
-        records["data"]["records"]["text:description"]["status"],
-        json!("ok"),
-        "{records}"
-    );
+    let answer = records_answer(&database, "indexed").await?;
+    assert!(answer["resolver"].is_null(), "{answer}");
+    assert_ne!(answer["entry"]["status"], json!("ok"), "{answer}");
+    let peer = TestDatabase::new_migrated().await?;
+    seed_alice_state_inputs(&peer, AliceInputState::Released).await?;
+    assert_eq!(answer, records_answer(&peer, "indexed").await?);
+    peer.cleanup().await?;
     database.cleanup().await
 }
 
@@ -273,14 +285,26 @@ async fn a_released_implied_lease_answers_a_verified_read_without_a_provider_cal
             "{uri}: {payload:#}"
         );
         assert!(payload["data"]["resolver"].is_null(), "{uri}: {payload:#}");
+        if uri.contains("/records") {
+            let entry = &payload["data"]["records"]["text:description"];
+            assert!(entry.is_object(), "{uri}: {payload:#}");
+            assert_ne!(entry["status"], json!("ok"), "{uri}: {payload:#}");
+        } else {
+            assert_eq!(
+                payload["data"]["status"],
+                json!("released"),
+                "{uri}: {payload:#}"
+            );
+        }
     }
     database.cleanup().await
 }
 
-/// A released ownerless name is served under its own path: the composed row carries the
-/// release, and the read takes no alias discovery statement.
+/// A released ownerless name is served under its own path. The composed row carries the release,
+/// so the row holds no current registration and name detail looks for an ENSv2 alias path, as for
+/// any released name. On a chain that is not cut over that look is the one publication read.
 #[tokio::test]
-async fn a_released_ownerless_name_takes_no_alias_walk() -> Result<()> {
+async fn a_released_ownerless_name_is_served_under_its_own_path() -> Result<()> {
     let database = released_ownerless().await?;
     let (status, body, walked) = crate::v2::support::ALIAS_WALK_STATEMENTS
         .scope(std::cell::Cell::new(0), async {
@@ -301,7 +325,7 @@ async fn a_released_ownerless_name_takes_no_alias_walk() -> Result<()> {
         })
         .await?;
     assert_eq!(status, StatusCode::OK, "{body:#}");
-    assert_eq!(walked, 0, "{body:#}");
+    assert_eq!(walked, 1, "{body:#}");
     let data = &body["data"];
     assert_eq!(data["name"], json!("alice.eth"), "{data}");
     assert!(data.get("canonical_name").is_none(), "{data}");

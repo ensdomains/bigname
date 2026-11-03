@@ -752,8 +752,9 @@ async fn a_migrated_name_is_renamed_on_read_and_registered_again() -> Result<()>
     scratch.cleanup().await
 }
 
-/// A BaseRegistrar mint of `label` straight to HOLDER with no controller event after it, so the
-/// numeric `NameRegistered` is the lease and the mint's own `Transfer` is the token's only move
+/// A BaseRegistrar mint of `label` straight to HOLDER with no controller event in its
+/// transaction, so the numeric `NameRegistered` is the lease and the mint's own `Transfer` is the
+/// token's only move
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f).
 fn direct_mint(facts: &mut Facts, transaction: i64, label: &str) {
     facts.push(
@@ -801,10 +802,11 @@ fn controller_renewal(facts: &mut Facts, transaction: i64, label: &str) -> Resul
     Ok(())
 }
 
-/// TYR-473's class: a 2020 migration mint whose token never moved after the mint transaction,
-/// with its label known, renewed later through a controller. The mint's numeric
-/// `NameRegistered` grants the lease to its owner, so the renewal derives no grant and the name
-/// serves that holder as its owner and lists it for the holder. Both mint shapes: through the
+/// A 2020 migration mint whose token never moved after the mint transaction, with its label
+/// known, whose holder then cleared the registry record and renewed the lease through a
+/// controller. The mint's numeric `NameRegistered` grants the lease to its owner, so the renewal
+/// derives no grant. The zero registry owner leaves the lease's holder as the only owner the name
+/// can serve, and it serves that holder and lists the name for it. Both mint shapes: through the
 /// migrator, and straight to the holder.
 #[tokio::test]
 async fn a_known_migrated_name_never_transferred_serves_its_mint_holder() -> Result<()> {
@@ -819,7 +821,14 @@ async fn a_known_migrated_name_never_transferred_serves_its_mint_holder() -> Res
     migration_mint(&mut facts, 0, LABELS[0]);
     direct_mint(&mut facts, 1, LABELS[1]);
     for (transaction, label) in LABELS.into_iter().enumerate() {
-        controller_renewal(&mut facts, i64::try_from(transaction)?, label)?;
+        let transaction = i64::try_from(transaction)?;
+        facts.push(
+            HANDOFF,
+            transaction,
+            REGISTRY,
+            record_owner(label, "0x0000000000000000000000000000000000000000"),
+        );
+        controller_renewal(&mut facts, transaction, label)?;
     }
     let scratch = corpus_of("production_interpret_mainnet_numeric_lease_known", facts).await?;
     let pool = scratch.pool();
@@ -844,7 +853,8 @@ async fn a_known_migrated_name_never_transferred_serves_its_mint_holder() -> Res
             row.normalized_name == format!("{label}.eth")
                 && summary.pointer("/registration/status") == Some(&json!("active"))
                 && summary.pointer("/registration/authority_kind") == Some(&json!("registrar"))
-                && summary.pointer("/control/owner") == Some(&json!(HOLDER)),
+                && summary.pointer("/control/owner") == Some(&json!(HOLDER))
+                && summary.pointer("/control/registry_owner") != Some(&json!(HOLDER)),
             "{label}: {summary:#}"
         );
         let owner: Option<String> = sqlx::query_scalar(
