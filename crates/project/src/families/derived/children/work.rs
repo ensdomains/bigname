@@ -149,14 +149,7 @@ pub(super) async fn list(
     after: i64,
     (names, swept): (&[String], &[String]),
 ) -> Result<(Vec<String>, Vec<String>)> {
-    if names.len() > 500 {
-        diag(transaction, chain_id, block, after, (names, swept)).await;
-        return Err(ProjectError::data_integrity(format!(
-            "TYR455DIAG stop at block {} with {} names",
-            block.number,
-            names.len()
-        )));
-    }
+    auto_explain(transaction).await;
     let started = std::time::Instant::now();
     let rows: Vec<(String, String)> = sqlx::query_as(WORK_LIST)
         .bind(chain_id)
@@ -196,6 +189,36 @@ pub(super) async fn list(
     Ok((children, parents))
 }
 
+/// Diagnostic only: log the plan of any statement in this transaction over one second to the
+/// server log, which CI prints when it stops the service container.
+async fn auto_explain(transaction: &mut Transaction<'_, Postgres>) {
+    let _ = sqlx::query("/* project:diag.savepoint */ SAVEPOINT tyr455_auto")
+        .execute(&mut **transaction)
+        .await;
+    let mut loaded = true;
+    for statement in [
+        "/* project:diag.load */ LOAD 'auto_explain'",
+        "/* project:diag.min */ SET LOCAL auto_explain.log_min_duration = '1s'",
+        "/* project:diag.analyze */ SET LOCAL auto_explain.log_analyze = on",
+        "/* project:diag.buffers */ SET LOCAL auto_explain.log_buffers = on",
+        "/* project:diag.nested */ SET LOCAL auto_explain.log_nested_statements = on",
+    ] {
+        if let Err(error) = sqlx::query(statement).execute(&mut **transaction).await {
+            println!("TYR455DIAG auto_explain failed: {error}");
+            eprintln!("TYR455DIAG auto_explain failed: {error}");
+            loaded = false;
+            break;
+        }
+    }
+    let end = if loaded {
+        "/* project:diag.release */ RELEASE SAVEPOINT tyr455_auto"
+    } else {
+        "/* project:diag.rollback */ ROLLBACK TO SAVEPOINT tyr455_auto"
+    };
+    let _ = sqlx::query(end).execute(&mut **transaction).await;
+}
+
+#[allow(dead_code)]
 async fn diag(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
