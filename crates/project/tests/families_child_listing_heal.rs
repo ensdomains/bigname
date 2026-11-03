@@ -7,7 +7,9 @@ use anyhow::{Result, ensure};
 use bigname_project::families::{self, FamilyMode};
 use families_support::{
     CHAIN, Fixture, hash,
-    listing_cases::{OWNER, REGISTRY, assert_served, edge, journalled, listed, name, node, preimage},
+    listing_cases::{
+        OWNER, REGISTRY, assert_served, edge, journalled, listed, name, node, preimage,
+    },
 };
 use serde_json::json;
 
