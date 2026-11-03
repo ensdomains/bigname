@@ -6,6 +6,7 @@
 //! | --- | --- | --- | --- |
 //! | 1 | Every index in place | Serves, INFO line, gauge 0 | `the_api_starts_with_every_dropped_index_in_place` |
 //! | 2 | One missing | Refuses to start naming it, ERROR line, gauge 1 | `the_api_refuses_to_start_without_a_dropped_index_and_names_it` |
+//! | 2b | One missing and another not valid | Refuses naming both in the list's order, gauge 2 | `the_api_names_every_index_not_in_place_in_the_lists_order` |
 //! | 3 | One not valid, or not ready | Refuses the same way, naming it | `the_api_refuses_an_index_that_is_not_valid_or_not_ready` |
 //! | 4 | A table or another table's index under a listed name | Refuses, naming what holds it | `the_api_refuses_a_name_another_relation_holds` |
 //! | 5 | Override `warn` with every index in place, then with one missing | Serves with a WARN that the setting is set, gauge 0, then with a WARN naming the index and the setting, gauge 1 | `warn_serves_without_a_missing_index_and_says_so` |
@@ -29,8 +30,9 @@ use crate::cli::WalkIndexSetCheck;
 const DROPPED: &str = "normalized_events_registry_announcement_idx";
 const REFUSED: &str = "API walk index set check refused to start";
 
-/// The gauge is process-wide, so tests that read it run one at a time under `cargo test`.
-static GAUGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The gauge is process-wide. nextest runs each test in its own process, and under
+/// `cargo test` every test that runs the check takes this lock.
+pub(super) static GAUGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
@@ -138,6 +140,14 @@ async fn scraped_gauge() -> Result<i64> {
     Ok(value.trim().parse()?)
 }
 
+async fn cleanup_role(database: &TestDatabase, pool: PgPool, role: String) -> Result<()> {
+    pool.close().await;
+    raw_sql(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
+        .execute(&database.pool)
+        .await?;
+    Ok(())
+}
+
 async fn drop_index(pool: &PgPool, name: &str) -> Result<()> {
     raw_sql(&format!("DROP INDEX bigname_phase.{name}"))
         .execute(pool)
@@ -209,6 +219,43 @@ async fn the_api_refuses_to_start_without_a_dropped_index_and_names_it() -> Resu
     );
     assert!(!logs.contains("is in place"), "{logs}");
     assert_eq!(scraped_gauge().await?, 1);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn the_api_names_every_index_not_in_place_in_the_lists_order() -> Result<()> {
+    let _gauge = GAUGE.lock().await;
+    let database = TestDatabase::new_migrated().await?;
+    let invalid = DROP_LIST[0].name;
+    assert_ne!(invalid, DROPPED);
+    drop_index(&database.lookup_pool, DROPPED).await?;
+    raw_sql(&format!(
+        "UPDATE pg_index SET indisvalid = false \
+         WHERE indexrelid = 'bigname_phase.{invalid}'::regclass"
+    ))
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let (error, _) = serve_once(&database, WalkIndexSetCheck::Refuse).await?;
+
+    let listed = DROP_LIST
+        .iter()
+        .filter_map(|index| match index.name {
+            name if name == DROPPED => Some(format!("{name} (missing)")),
+            name if name == invalid => Some(format!("{name} (not valid and ready)")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        error.contains(&format!(
+            "2 of the {} normalized_events indexes the walk index set scripts drop are not in \
+             place: {listed}.",
+            DROP_LIST.len()
+        )),
+        "{error}"
+    );
+    assert_eq!(scraped_gauge().await?, 2);
     database.cleanup().await
 }
 
@@ -394,7 +441,7 @@ async fn the_check_reads_only_the_catalog_on_a_read_only_session() -> Result<()>
         format!("{error:#}").contains(&format!("{DROPPED} (missing)")),
         "{error:#}"
     );
-    restricted.close().await;
+    cleanup_role(&database, restricted, role).await?;
     database.cleanup().await
 }
 
@@ -444,6 +491,6 @@ async fn a_catalog_read_that_fails_refuses_in_both_modes() -> Result<()> {
             );
         }
     }
-    without_usage.close().await;
+    cleanup_role(&database, without_usage, role).await?;
     database.cleanup().await
 }

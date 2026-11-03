@@ -1,5 +1,6 @@
 #[tokio::test]
 async fn api_serve_tolerates_an_absent_phase_schema() -> Result<()> {
+    let _gauge = walk_index_set_check::GAUGE.lock().await;
     let database = TestDatabase::new_migrated().await?;
     sqlx::query("DROP SCHEMA bigname_phase CASCADE")
         .execute(&database.lookup_pool)
