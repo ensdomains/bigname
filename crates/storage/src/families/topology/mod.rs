@@ -29,6 +29,7 @@ pub use collections::{
 };
 pub use listing::{
     DISPLAY_KEY_BYTES, DISPLAY_KEY_CHARS, LISTING_COLUMNS, MISSING_TIMESTAMP, listing_rows,
+    listing_statement,
 };
 pub(crate) use listing_page::{
     count as count_children_on, counts as count_children_of_parents_on, page as children_page_on,

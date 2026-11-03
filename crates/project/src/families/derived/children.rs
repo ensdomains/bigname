@@ -430,14 +430,13 @@ pub(crate) async fn derive(
     );
     scope(transaction, WHOLE_PARENT, parents).await?;
     for parent in parents {
-        let parent = std::slice::from_ref(parent);
-        let rows = bigname_storage::families::topology::listing_rows(&head, listing, parent, None)
-            .build()
+        let (sql, arguments) = statement(&head, listing, std::slice::from_ref(parent), None)?;
+        let rows = sqlx::query_with(&sql, arguments)
             .execute(&mut **transaction)
             .await
             .map_err(|error| {
                 ProjectError::database(
-                    format!("failed to derive the child listing of {}", parent[0]),
+                    format!("failed to derive the child listing of {parent}"),
                     error,
                 )
             })?
@@ -447,7 +446,7 @@ pub(crate) async fn derive(
                 target: "bigname_project::families",
                 chain_id,
                 block_number = block.number,
-                parent = %parent[0],
+                parent = %parent,
                 rows,
                 "a parent's child listing was derived whole in one block transaction"
             );
@@ -473,21 +472,16 @@ pub(crate) async fn derive(
                     .map(|(_, node)| node.to_ascii_lowercase())
             })
             .collect();
-        bigname_storage::families::topology::listing_rows(
-            &head,
-            listing,
-            &candidates,
-            Some(nodes.as_slice()),
-        )
-        .build()
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database(
-                "failed to derive the listing rows of touched children",
-                error,
-            )
-        })?;
+        let (sql, arguments) = statement(&head, listing, &candidates, Some(nodes.as_slice()))?;
+        sqlx::query_with(&sql, arguments)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database(
+                    "failed to derive the listing rows of touched children",
+                    error,
+                )
+            })?;
     }
     let changed = execute(
         transaction,
@@ -565,6 +559,19 @@ pub(crate) async fn derive(
     .await?;
     refreshed.rows += counts;
     Ok(refreshed)
+}
+
+/// The listing statement of `parents` at `listing`, narrowed to `children` when given, as owned
+/// SQL and arguments: the writer's future runs under the phase runner's `Send` bound, which a
+/// builder borrowing its binds across the await fails (`listing_statement`).
+fn statement(
+    head: &str,
+    listing: bigname_storage::families::topology::ListingBlock<'_>,
+    parents: &[String],
+    children: Option<&[String]>,
+) -> Result<(String, sqlx::postgres::PgArguments)> {
+    bigname_storage::families::topology::listing_statement(head, listing, parents, children)
+        .map_err(|error| ProjectError::database("failed to bind the child listing rows", error))
 }
 
 async fn scope(

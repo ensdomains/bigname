@@ -7,7 +7,7 @@
 //! itself, or by its first characters when it is too long for a btree entry; the timestamps are
 //! the child's name summary's, a missing one stored as [`MISSING_TIMESTAMP`] so that every sort
 //! key is a plain btree column.
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{Execute, Postgres, QueryBuilder, postgres::PgArguments};
 
 use super::children::{ListingBlock, Parents, Relation, push_listed};
 
@@ -67,4 +67,23 @@ pub fn listing_rows<'a>(
            FROM children"
     ));
     builder
+}
+
+/// [`listing_rows`] as its SQL and its bound arguments, both owned, for `sqlx::query_with`. A
+/// caller whose future must be `Send` across generic lifetimes, such as the Project writer under
+/// the phase runner, holds these across its await instead of a builder that borrows its binds:
+/// the compiler cannot prove such a builder `Send` for every lifetime.
+pub fn listing_statement(
+    head: &str,
+    block: ListingBlock<'_>,
+    parents: &[String],
+    children: Option<&[String]>,
+) -> Result<(String, PgArguments), sqlx::Error> {
+    let mut builder = listing_rows(head, block, parents, children);
+    let arguments = builder
+        .build()
+        .take_arguments()
+        .map_err(sqlx::Error::Encode)?
+        .unwrap_or_default();
+    Ok((builder.into_sql(), arguments))
 }
