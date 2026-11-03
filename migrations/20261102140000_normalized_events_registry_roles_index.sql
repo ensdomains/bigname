@@ -2,10 +2,10 @@
 -- apps/api/src/v2/registries/role_counts.rs), which the registry detail and labels routes
 -- read with include=counts. A partial index of the registry role-change rows that pass
 -- that statement's constant terms on normalized_events, keyed by chain and emitting
--- registry and then in the statement's DISTINCT ON order. Without it the statement reads the registry's whole event history
--- through normalized_events_emitter_history_idx and drops every row that is not a role
--- change. No rows, phase markers, catalogue version or content-hash inputs change, and no
--- redo is required.
+-- registry and then in the statement's DISTINCT ON order. Without it the statement reads
+-- the registry's whole event history through normalized_events_emitter_history_idx and
+-- drops every row that is not a role change. No rows, phase markers, catalogue version or
+-- content-hash inputs change, and no redo is required.
 --
 -- Populated tables require a valid prebuild with the reviewed definition, built
 -- concurrently as docs/deployment.md describes. The prebuild is adopted without a build
