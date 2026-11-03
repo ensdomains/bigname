@@ -18,6 +18,9 @@ mod columns;
 mod contract_count;
 #[cfg(test)]
 mod contract_event_count_tests;
+pub mod count_contract;
+#[cfg(test)]
+mod count_contract_tests;
 mod decoders;
 mod direct_accounts;
 mod duplicates;

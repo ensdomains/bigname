@@ -2780,8 +2780,8 @@ Project's publication of current state directly from the
 changed keys, undo journal and marker together. Rebuilds can group older work
 blocks into bounded ranges; reads remain unavailable until the marker is live.
 
-The families carry labels F1 to F16, used in the difference lists, the table
-comments and the reducers' module headers; F10, the retired resolver alias
+The families carry labels F1 to F16 and F20, used in the difference lists, the
+table comments and the reducers' module headers; F10, the retired resolver alias
 tables, is unused. Each label names these tables and
 the reducer under `crates/project/src/families/` that writes them:
 
@@ -2804,6 +2804,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
 | F15, name summary | `project_name_summary` | `derived/summary.rs` |
 | F16, ENSv2 registry entries | `project_ens_v2_entry_owner`, `project_ens_v2_registry_parent` | `ens_v2_registry.rs` |
+| F20, event counts | `project_event_count` | `event_counts.rs` |
 
 ## Family marker
 

@@ -22,7 +22,7 @@ pub const CHAIN: &str = "ethereum-sepolia";
 pub const CONTENT_HASH: &str = bigname_test_support::PROJECTION_CONTENT_HASH;
 
 /// The tables a rebuild composes in its composition pass rather than in its ranges.
-pub const COMPOSED_TABLES: [&str; 13] = [
+pub const COMPOSED_TABLES: [&str; 14] = [
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
@@ -36,6 +36,7 @@ pub const COMPOSED_TABLES: [&str; 13] = [
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",
+    "project_event_count",
 ];
 
 pub fn hash(block: i64) -> String {

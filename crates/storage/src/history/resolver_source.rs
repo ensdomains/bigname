@@ -6,7 +6,7 @@ use sqlx::{Postgres, QueryBuilder};
 
 use super::{
     ChainBlockRange, EventHistoryReadFilter, EventHistoryResolverFilter, HistoryBlockWindow,
-    HistoryOrder,
+    HistoryOrder, count_contract,
     duplicates::push_product_history_duplicate_filter_for_alias,
     filters::push_string_filter,
     keyset::push_history_cursor_after_for_alias,
@@ -232,23 +232,24 @@ fn push_resolver_candidate_select<'a>(
     }
     builder.push("\nWHERE candidate.chain_id = ");
     builder.push_bind(&resolver.chain_id);
+    let emitter = count_contract::emitter("candidate");
     match arm {
         ResolverArm::Emitted => {
-            builder.push(" AND lower(candidate.raw_fact_ref ->> 'emitting_address') = ");
+            builder.push(format!(" AND {emitter} = "));
             builder.push_bind(&resolver.address);
         }
         ResolverArm::PointerSet => {
-            builder.push(
-                " AND candidate.event_kind = 'ResolverChanged' \
-                 AND lower(candidate.after_state ->> 'resolver') = ",
-            );
+            builder.push(format!(
+                " AND candidate.event_kind = 'ResolverChanged' AND {} = ",
+                count_contract::set_resolver("candidate")
+            ));
             builder.push_bind(&resolver.address);
         }
         ResolverArm::PointerCleared => {
-            builder.push(
-                " AND candidate.event_kind = 'ResolverChanged' \
-                 AND lower(candidate.before_state ->> 'resolver') = ",
-            );
+            builder.push(format!(
+                " AND candidate.event_kind = 'ResolverChanged' AND {} = ",
+                count_contract::cleared_resolver("candidate")
+            ));
             builder.push_bind(&resolver.address);
         }
     }
@@ -258,19 +259,16 @@ fn push_resolver_candidate_select<'a>(
     match arm {
         ResolverArm::Emitted => {}
         ResolverArm::PointerSet => {
-            builder.push(
-                " AND lower(candidate.raw_fact_ref ->> 'emitting_address') \
-                 IS DISTINCT FROM ",
-            );
+            builder.push(format!(" AND {emitter} IS DISTINCT FROM "));
             builder.push_bind(&resolver.address);
         }
         ResolverArm::PointerCleared => {
-            builder.push(
-                " AND lower(candidate.raw_fact_ref ->> 'emitting_address') \
-                 IS DISTINCT FROM ",
-            );
+            builder.push(format!(" AND {emitter} IS DISTINCT FROM "));
             builder.push_bind(&resolver.address);
-            builder.push(" AND lower(candidate.after_state ->> 'resolver') IS DISTINCT FROM ");
+            builder.push(format!(
+                " AND {} IS DISTINCT FROM ",
+                count_contract::set_resolver("candidate")
+            ));
             builder.push_bind(&resolver.address);
         }
     }

@@ -2648,6 +2648,61 @@ Both tables are journalled and undone like every family. Schema-migration
 phase schema; they start empty, and the content-hash rotation that ships with
 them rebuilds the families.
 
+### Event counts
+
+F20, `project_event_count`, keeps per chain, anchor, namespace and event kind
+the number of events at or below the family marker's block that an event read
+of that anchor counts. The anchor kinds follow the arms of the resolver event
+read (`crates/storage/src/history/resolver_source.rs`):
+
+| `anchor_kind` | An event is counted for `anchor` when |
+| --- | --- |
+| 0 | `anchor` emitted it |
+| 1 | it is a `ResolverChanged` another contract emitted, setting the pointer to `anchor` |
+| 2 | it is a `ResolverChanged` another contract emitted, moving the pointer from `anchor` to another resolver |
+
+So the kind 0 rows of an address are what `GET /v1/events?contract_address=`
+counts for it, per namespace and kind, and the three kinds of a resolver add up
+to what `GET /v1/events?resolver=` counts. The rows hold every event kind,
+product kind or not. A count of zero has no row.
+
+An event is counted under the predicate those reads apply, built from the same
+code (`crates/storage/src/history/count_contract.rs`):
+
+- It is `activated`, its row and its block's lineage are `canonical`, `safe` or
+  `finalized`, and it has a block. An event without a block is never counted,
+  because every read a stored count serves is bounded by a published block.
+- It is not a registrar surface snapshot, a token-state-absent `ExpiryChanged`,
+  a derived NameWrapper mint transfer, a registry-read copy, or the second row
+  of a proven adjacent address pair ([History](#history)).
+- Of a registry-fallback handoff's copies, the anchor counts the copy with the
+  least identity among the copies its own read admits in the event's
+  namespace. The copies of one handoff come from one log, so they share the
+  chain, block, emitter, namespace and kind.
+
+Each family block adds the counts of the events in its range after the prior
+marker's block and journals each touched key's before-image, so an undo
+restores the counts with the other families. A step that touches more than
+10,000 keys logs a `WARN` with the chain, block and key count. A rebuild's
+ranges write no counts. Its [composition pass](glossary.md#composition-pass)
+adds them window by window in the catalogue's event windows, with the code a
+block runs.
+
+The address-pair rule reads the contract rows of the event's own manifest
+(`manifest_contract_instances`) and the proven resolver generations in
+`count_contract.rs`, so a stored count keeps the decision they gave when its
+block was counted. An edit of the proven generations rotates the projection
+content hash, so the redo it requires counts again. Manifest synchronization
+replaces a manifest's contract rows in place when its file changes under the
+same version (`crates/manifests/src/schema_v2.rs`). Such an edit changes the
+reads at once and leaves the stored counts stale until a full-range Project
+redo.
+
+The table is journalled and undone like every family. Schema-migration
+`20261104130000_project_event_count.sql` adds it to an existing phase schema
+empty, and the projection content-hash rotation that ships with it rebuilds the
+families. No read serves it yet.
+
 ### Publication and resumption
 
 ProjectPhase invokes the family runner directly. One run applies or undoes at

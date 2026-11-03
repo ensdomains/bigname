@@ -77,6 +77,8 @@ tables! {
         ["chain_id", "resource_id", "source_kind", "source_key", "source_resolver",
          "pointer_event_identity", "link_event_identity"];
     HISTORY_MARKER = "project_history_catalogue_marker" ["chain_id"];
+    EVENT_COUNT = "project_event_count"
+        ["chain_id", "anchor_kind", "anchor", "namespace", "event_kind"];
 }
 
 /// The derived index tables, cleared with the chain and rebuilt from their base rows.
@@ -90,7 +92,7 @@ pub(crate) const DERIVED: [&str; 5] = [
 
 /// The tables a rebuild's composition pass writes: the composed families and the address indexes.
 /// They grow from empty during the pass, so the pass refreshes their planner statistics.
-pub(crate) const COMPOSED: [&str; 12] = [
+pub(crate) const COMPOSED: [&str; 13] = [
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
@@ -103,6 +105,7 @@ pub(crate) const COMPOSED: [&str; 12] = [
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",
+    "project_event_count",
 ];
 
 /// The composition pass's name work list (families/compose.rs), cleared with the families.

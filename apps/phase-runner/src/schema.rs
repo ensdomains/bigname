@@ -74,6 +74,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "project_history_source",
     "project_history_source_edge",
     "project_history_catalogue_marker",
+    "project_event_count",
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",

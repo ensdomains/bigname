@@ -168,6 +168,10 @@ pub(crate) const SEMANTIC_SOURCE_FILES: &[Classified] = &[
         "crates/storage/src/history/catalogue_contract.rs",
         COMPOSITION,
     ),
+    project(
+        "crates/storage/src/history/count_contract.rs",
+        "the event predicate Project's stored event counts apply; no interpret-side caller",
+    ),
     project("crates/storage/src/history/source.rs", COMPOSITION),
     both("crates/storage/src/identity_search.rs", SEARCH),
     both("crates/storage/src/identity_search/documents.rs", SEARCH),
