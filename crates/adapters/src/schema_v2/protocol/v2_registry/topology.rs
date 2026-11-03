@@ -545,18 +545,7 @@ pub(super) fn discovery_observation_key(
     token_id: U256,
     resolver: bool,
 ) -> String {
-    let mut bytes = token_id.to_be_bytes::<32>();
-    bytes[28..].fill(0);
-    let base = format!(
-        "{}:{:#x}",
-        raw.emitting_address.to_ascii_lowercase(),
-        U256::from_be_bytes(bytes)
-    );
-    if resolver {
-        format!("resolver:{base}")
-    } else {
-        base
-    }
+    super::reachability::observation_key(&raw.emitting_address, token_id, resolver)
 }
 
 pub(super) fn resolver_discovery_keys(

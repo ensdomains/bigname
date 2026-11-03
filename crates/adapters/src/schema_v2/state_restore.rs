@@ -140,12 +140,7 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
             if expiry_retirement_is_projection_only(event) || support::missing_replacement_role(state, emitter, token, event, "resolver") {
                 return;
             }
-            let resolver = event
-                .after_state
-                .get("resolver")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            state.set_v2_resolver(emitter, token, resolver);
+            state.restore_v2_resolver_change(emitter, token, &event.after_state);
         }
         "SubregistryChanged" => {
             let Some(token) = token else { return };

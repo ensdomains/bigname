@@ -55,14 +55,16 @@ use std::{cell::RefCell, collections::BTreeSet};
 //   does read it the retry loads it and restores again. A batch that marks a registry dirty
 //   reads the registry-level rows of its suffix walk, and reads every token in it only when
 //   that walk changed since names were last refreshed, because each of them then emits its
-//   new name.
+//   new name. A walk that changes reachability drafts each of those tokens' resolver edges from
+//   the same reads. A `ResolverUpdated` reads its emitter's suffix walk to gate its edge.
 // - Restore finish and `replace_v2_suffix_anchors` re-derive the name of every loaded token.
 //   Each derivation reads the token's ancestors through the reporting maps, and a token that
 //   is not loaded is not read by the batch.
 // - `latest_v2_timestamp` is the latest restored ENSv2 topology timestamp; the loader reads
 //   it for the whole chain and supplies it to the restore.
-// - The dirty sets and terminal-closure hits are emptied by every refresh, so they hold only
-//   keys the restore or batch touched through the maps.
+// - The dirty sets and terminal-closure hits are emptied by every refresh, and pending
+//   reachability changes by every drain or restore, so they hold only keys the restore or batch
+//   touched through the maps.
 //
 // Where ENSv2 code reads the name-keyed state it shares with ENSv1-model names
 // (`known_surfaces`, `active_resources` and the surface counts), it reports the name with

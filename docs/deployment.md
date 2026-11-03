@@ -5582,6 +5582,42 @@ under matching runner and API binaries. The change rides the next release that r
 Project and shares that release's Project redo. Do not mark old rows ready under the new
 hash.
 
+## ENSv2 registry resolver edges only while reachable
+
+The build that gates an ENSv2 registry's resolver pointers on its reachability
+([architecture](architecture.md#discovery-graph)) changes `crates/adapters/src`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) moves with it.
+
+What changes:
+
+- A registry that announces itself with `RegistryCreated()` and that nothing reachable mounts
+  no longer opens `resolver` discovery edges. The resolvers it points at get no classification
+  row, no Project work block and no name selection from it.
+- When a reachable registry mounts it, each of its tokens with a resolver opens its edge in the
+  mount block. The entries it held before the mount serve from there, as before.
+- When it loses its last mount path, its edges close in that block, or at the start of the block
+  where the expiry is first seen. When an expiry makes it reachable, because the entry its parent
+  claim names expired and a reachable mount takes over, its edges open at the start of that block.
+- A registry that stays reachable keeps byte-identical edges.
+
+A later change to the ENSv2 suffix anchors, from a manifest's `[[roots]]` or a declared ENSv2
+registry, does not rotate the interpreter content hash. Plan a re-derivation from the first block
+the change affects. Interpret re-derives names under the new anchors, but it does not open or close
+the resolver edges of registries whose reachability the change moves.
+
+The announcement admission itself is unchanged, so the watch plan is too. Every announcement is
+read from all emitters, so one Interpret pass admits all the announcements in its range, one
+Ingest repair fetches their logs, and a resolver they announce adds at most one more. The
+discovery repair loop's pass limit bounds those kinds of repair, not the number of admitted
+addresses.
+
+These rows arrive through re-derivation, not through an in-place change. Every chain needs a
+full-history Interpret redo, then the Project redo it installs, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change shares the release's one Interpret and Project redo pair with its other
+hash-rotating changes. Do not mark old rows ready under the new hash.
+
 It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
 and the compiled watch plan are unchanged, so stamp no Ingest redo.
 

@@ -39,6 +39,9 @@ mod v1_resolver_after_reregistration;
 #[path = "tests/same_transaction_pointer.rs"]
 mod same_transaction_pointer;
 
+#[path = "tests/registry_reachability.rs"]
+mod registry_reachability;
+
 #[path = "tests/v1_wrapped_registration_resolver.rs"]
 mod v1_wrapped_registration_resolver;
 
@@ -4871,13 +4874,17 @@ fn a_resolver_or_implementation_self_target_opens_no_edge_and_writes_no_row() ->
                     .all(|edge| edge.edge_kind != edge_kind),
                 "{case} {edge_kind}: no edge opens"
             );
-            assert!(
+            // An announced registry nothing mounts is unreachable, so its resolver pointer
+            // opens no edge and has none to close (TYR-400).
+            let unreachable_pointer = edge_kind == "resolver" && case == "undeclared";
+            assert_eq!(
                 output.discovery_edge_closures.iter().any(|closure| {
                     closure.edge_kind == edge_kind
                         && closure.from_contract_instance_id == Uuid::from_u128(68)
                         && closure.active_to_block_number == 1
                 }),
-                "{case} {edge_kind}: the previous edge closes"
+                !unreachable_pointer,
+                "{case} {edge_kind}: the previous edge closes when the registry is reachable"
             );
             assert!(
                 output.decode_skips.is_empty(),

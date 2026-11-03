@@ -76,10 +76,12 @@ impl State {
             v2_subregistry_tokens_by_observation: Default::default(),
             v2_resolver_tokens_by_observation: Default::default(),
             v2_resolver_aliases_by_observation: Default::default(),
+            v2_resolver_link_writes: Default::default(),
             v2_expiries: Default::default(),
             v2_dirty_tokens: OrdSet::new(),
             v2_dirty_registries: OrdSet::new(),
             v2_terminal_closure_hits: OrdSet::new(),
+            v2_reachability_changes: OrdMap::new(),
             v2_token_by_upstream_resource_index: Default::default(),
             v2_token_by_name_index: Default::default(),
             v2_tokens_by_current_name_index: Default::default(),
@@ -155,6 +157,7 @@ impl State {
             return;
         }
         self.refresh_dirty_v2_names(at_unix_timestamp);
+        self.v2_reachability_changes.clear();
         self.prune_unbacked_surfaces();
     }
 
@@ -184,6 +187,8 @@ impl State {
             self.refresh_dirty_v2_names(timestamp);
         }
         crate::schema_v2::state_restore::rebuild_v2_indexes(self);
+        // Reachability changes a restore re-derives were drafted by the batches that wrote them.
+        self.v2_reachability_changes.clear();
         self.finish_v1_registry_only_restore();
         self.prune_unbacked_surfaces();
     }
@@ -266,6 +271,7 @@ impl State {
             self.v2_dirty_tokens.extend(refresh_targets.tokens);
             self.v2_dirty_registries.extend(refresh_targets.registries);
             self.refresh_dirty_v2_names(delta_timestamp);
+            self.v2_reachability_changes.clear();
         }
         if !full_restore {
             self.finish_v1_registry_only_restore();

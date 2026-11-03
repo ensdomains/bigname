@@ -625,7 +625,19 @@ ENSv2 mappings:
 Registry-name suffix labels are retained verbatim. Raw label text keys the live topology maps, so the current parent pointer and child claim must agree on the same raw label. A raw-distinct label path has a distinct namehash identity; if any label does not byte-equal its ENSIP-15 normalized result, that identity remains a shadow and cannot open a current binding. Thus labels such as `Foo` and `foo` retain distinct preimages and namehash identities, while only the normalization-gate-passing identity can bind.
 
 - `ResolverUpdated(tokenId, resolver, sender)` → updates the resolver edge for
-  the current registry resource and is the source of its resolver target;
+  the current registry resource and is the source of its resolver target. The
+  edge exists only while the emitting registry is reachable, that is while its
+  [ENSv2 name suffix walk](glossary.md#ensv2-name-suffix-walk) reaches an
+  anchor. A registry admitted only by its `RegistryCreated()` announcement is
+  indexed, but its pointers open no edge until a reachable registry mounts it.
+  At the mount, each of its tokens with a resolver opens its edge in that
+  block. When the last mount path is lost, its edges close in that block, or
+  at the start of the block where an expiry is first seen. An expiry can also
+  make a registry reachable: when the entry its parent claim names expires,
+  the walk falls back to its mounts, and a reachable one opens its edges at
+  the start of that block. The pointers
+  themselves are interpreted throughout, so a later mount serves the current
+  ones;
   defensive `TokenRegenerated` interpretation leaves the survivor's resolver
   edge under its existing `observation_key` and records that prior key on the
   successor token. The next explicit resolver update or terminal token event
@@ -703,7 +715,7 @@ ENSv1 pointer proves that a name in the namespace uses the address as well as an
 ENSv2 one does, so the declaration holds while the edges to the address open
 and close.
 
-[Watch-plan](glossary.md) expansion includes manifest-declared instances, registry-announcement admissions, resolver admissions, and proxy/implementation targets. Announcement admission is forward-only from the observed event; bootstrap can discover earlier announcements only back to the configured ingest coverage start and therefore assumes that coverage reaches the deployment. A `subregistry` edge changes parent-child topology only; it never admits the child emitter. Match-all signature scopes are manifest event subscriptions rather than address rows.
+[Watch-plan](glossary.md) expansion includes manifest-declared instances, registry-announcement admissions, resolver admissions, and proxy/implementation targets. A registry-announcement admission is indexing, not reachability: any contract can emit `RegistryCreated()`, and the admission only makes its logs readable. Announcement admission is forward-only from the observed event; bootstrap can discover earlier announcements only back to the configured ingest coverage start and therefore assumes that coverage reaches the deployment. A `subregistry` edge changes parent-child topology only; it never admits the child emitter. Match-all signature scopes are manifest event subscriptions rather than address rows.
 
 ## Intake architecture
 

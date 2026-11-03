@@ -12,12 +12,12 @@ wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry.rs"
-loc = 661
+loc = 659
 justification = "ENSv2 registry dispatch keeps raw registration and reservation admission adjacent to retained topology refresh while expiry lifecycle helpers live in the bounded sibling module."
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry/topology.rs"
-loc = 651
+loc = 640
 justification = "ENSv2 topology removal and rebound groups remain adjacent while the fixed expiry event group and pointer clears live in the bounded sibling module."
 
 [[files]]

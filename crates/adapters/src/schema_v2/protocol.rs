@@ -212,6 +212,17 @@ pub(super) enum DiscoveryDraft {
         admission_basis: String,
         observation_key: String,
     },
+    /// An ENSv2 registry token's resolver pointer, opened or closed when the registry's
+    /// reachability changes. It runs from that registry, whichever log or block boundary moved it.
+    RegistryResolverEdge {
+        registry: String,
+        observation_key: String,
+        to_address: String,
+    },
+    RegistryResolverClose {
+        registry: String,
+        observation_key: String,
+    },
     /// A proxy announcing its implementation. Admits the proxy as a resolver only when the
     /// implementation is declared in a same-deployment `resolver_implementations` list.
     ResolverAnnouncement {
