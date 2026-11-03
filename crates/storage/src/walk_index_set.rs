@@ -1,7 +1,7 @@
 //! The `normalized_events` indexes `ops/walk-index-set/drop.sql` drops for a from-zero walk or
 //! a full-history Interpret redo (`docs/storage.md` § Walk index set), and one catalog read of
 //! their state. The phase runner rebuilds them before Project runs.
-use sqlx::{Acquire, Postgres};
+use sqlx::{Connection, PgConnection};
 
 mod constants;
 pub use constants::{DROP_LIST, KEPT};
@@ -76,13 +76,11 @@ type StateRow = (
 
 /// The state of every index in [`DROP_LIST`], in its order, read in one transaction that
 /// writes nothing, or `None` when [`TABLE`] does not exist. Definitions print as `install.sql`
-/// checks them, whatever the session's `search_path`.
-pub async fn load_drop_list_state<'a, A>(
-    connection: A,
-) -> Result<Option<Vec<IndexStatus>>, sqlx::Error>
-where
-    A: Acquire<'a, Database = Postgres>,
-{
+/// checks them, whatever the session's `search_path`. It takes a connection rather than any
+/// `Acquire`, so a caller's future stays `Send`.
+pub async fn load_drop_list_state(
+    connection: &mut PgConnection,
+) -> Result<Option<Vec<IndexStatus>>, sqlx::Error> {
     let mut transaction = connection.begin().await?;
     sqlx::query(
         "SELECT set_config('search_path', 'pg_catalog', true),

@@ -7,6 +7,8 @@
 //! dropped.
 use std::{
     collections::BTreeSet,
+    future::Future,
+    pin::Pin,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -19,6 +21,7 @@ use tracing::{info, warn};
 use crate::{
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
+    metrics::RunnerLoopHeartbeat,
     runner_support::StopClock,
     shutdown::until_cancelled,
 };
@@ -50,19 +53,35 @@ pub(crate) struct Restore<'a> {
     pub(crate) cancellation: &'a CancellationToken,
     /// The chain's stop clock, which bounds everything after a stop.
     pub(crate) stop_clock: &'a StopClock,
-    /// Records loop progress, so a long build does not read as a stalled runner.
-    pub(crate) progress: &'a (dyn Fn() + Sync),
+    /// Where loop progress is recorded, so a long build does not read as a stalled runner.
+    pub(crate) heartbeat: Option<&'a RunnerLoopHeartbeat>,
 }
+
+impl Restore<'_> {
+    fn progress(&self) {
+        if let Some(heartbeat) = self.heartbeat {
+            heartbeat.record_progress(self.chain_id);
+        }
+    }
+}
+
+/// The restore as a boxed `Send` future, so the restart loop's future stays `Send` without
+/// rustc proving it for every lifetime of the references the restore holds.
+pub(crate) type RestoreFuture<'a> = Pin<Box<dyn Future<Output = RunnerResult<()>> + Send + 'a>>;
 
 /// Returns once every index is in place, or as soon as `cancellation` fires. A failed build is
 /// not retried in this process: the next start drops its invalid leftover and builds it again.
-pub(crate) async fn restore(database: &RunnerDatabase, run: &Restore<'_>) -> RunnerResult<()> {
+pub(crate) fn restore<'a>(database: &'a RunnerDatabase, run: &'a Restore<'a>) -> RestoreFuture<'a> {
+    Box::pin(restore_all(database, run))
+}
+
+async fn restore_all(database: &RunnerDatabase, run: &Restore<'_>) -> RunnerResult<()> {
     let Restore {
         chain_id,
         cancellation,
         ..
     } = *run;
-    let Some(states) = until_cancelled(cancellation, load(database.pool())).await? else {
+    let Some(states) = until_cancelled(cancellation, load_from_pool(database.pool())).await? else {
         return Ok(());
     };
     if states.iter().all(present) {
@@ -89,10 +108,17 @@ pub(crate) async fn restore(database: &RunnerDatabase, run: &Restore<'_>) -> Run
     result
 }
 
-async fn load<'a, A>(connection: A) -> RunnerResult<Vec<IndexStatus>>
-where
-    A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
-{
+async fn load_from_pool(pool: &PgPool) -> RunnerResult<Vec<IndexStatus>> {
+    let mut connection = pool.acquire().await.map_err(|error| {
+        RunnerError::database(
+            "failed to acquire a connection to read the normalized_events indexes",
+            error,
+        )
+    })?;
+    load(&mut connection).await
+}
+
+async fn load(connection: &mut PgConnection) -> RunnerResult<Vec<IndexStatus>> {
     load_drop_list_state(connection)
         .await
         .map(Option::unwrap_or_default)
@@ -487,7 +513,9 @@ impl Session {
             return Ok(false);
         }
         let pid = self.pid;
-        let mut running = std::pin::pin!(sqlx::raw_sql(statement).execute(&mut self.connection));
+        // `Executor::execute` returns a boxed `Send` future, and a `&str` goes out as a simple
+        // query, outside any transaction, as a concurrent build needs.
+        let mut running = sqlx::Executor::execute(&mut self.connection, statement);
         let mut progress =
             tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
         progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -508,7 +536,7 @@ impl Session {
                 }
                 _ = progress.tick() => {
                     if building_on_server(pool, pid).await {
-                        (run.progress)();
+                        run.progress();
                     }
                 }
             }
@@ -530,7 +558,7 @@ async fn building_on_server(pool: &PgPool, pid: i32) -> bool {
 
 /// Waits one poll interval, recording loop progress. `false` when a stop came first.
 async fn pause(run: &Restore<'_>) -> bool {
-    (run.progress)();
+    run.progress();
     tokio::select! {
         () = run.cancellation.cancelled() => false,
         () = tokio::time::sleep(POLL) => true,

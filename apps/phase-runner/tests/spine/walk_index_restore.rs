@@ -869,9 +869,11 @@ async fn the_transfer_node_migration_and_the_runner_build_each_others_index_once
 #[tokio::test]
 async fn module_definitions_are_the_baselines() -> Result<()> {
     let scratch = ScratchDatabase::create("walk_index_restore_baseline").await?;
-    let states = load_drop_list_state(scratch.pool())
+    let mut connection = scratch.pool().acquire().await?;
+    let states = load_drop_list_state(&mut connection)
         .await?
         .context("the baseline has normalized_events")?;
+    drop(connection);
     for status in &states {
         assert_eq!(
             status.state,

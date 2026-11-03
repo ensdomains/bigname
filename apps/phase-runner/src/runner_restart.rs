@@ -43,12 +43,11 @@ impl PhaseRunner {
             // chain's Interpret completed. A failed build is not retried.
             let restored = if phase_name == PhaseName::Project {
                 let stop_clock = self.chain_stop_clock(&chain.chain_id);
-                let progress = || self.record_loop_progress(&chain.chain_id);
                 let run = crate::walk_index_restore::Restore {
                     chain_id: &chain.chain_id,
                     cancellation: &cancellation,
                     stop_clock: &stop_clock,
-                    progress: &progress,
+                    heartbeat: self.loop_heartbeat.as_ref(),
                 };
                 crate::walk_index_restore::restore(&self.database, &run)
                     .await
