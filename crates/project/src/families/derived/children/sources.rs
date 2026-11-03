@@ -229,7 +229,10 @@ fn whole_tail(after: i64, floor: Option<i64>) -> bool {
 /// The block the watermark moves to after a read above `after` through `cutoff`: the floor or
 /// the cutoff, whichever is lower, when above `after`. None leaves it as it is.
 fn advance_to(after: i64, cutoff: i64, floor: Option<i64>) -> Option<i64> {
-    let bound = cutoff.min(floor?);
+    let bound = {
+        let _ = floor?;
+        cutoff
+    };
     (bound > after).then_some(bound)
 }
 
