@@ -113,7 +113,8 @@ const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders 
                     AND lineage.block_number = observed.block_number
                     AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
               )
-            OFFSET 0
+            ORDER BY observed.block_number, observed.normalized_event_id
+            LIMIT 1000
         ) event
         CROSS JOIN LATERAL (
             SELECT surface.labelhashes FROM name_surfaces surface
