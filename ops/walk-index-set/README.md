@@ -11,13 +11,15 @@ the API refuses the routes that read them while an Interpret redo is in progress
 Two readers stay available while the set is dropped and read without it, so on a large
 database they read far more of the table. The event audit, `GET /v1/diagnostics/events`, stays
 available during a redo; its record attribution reads six of the dropped indexes and may
-exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until
-`install.sql` has run. The operator's `phase-runner inspect` block and raw-event windows count
+exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until the indexes
+are rebuilt. The operator's `phase-runner inspect` block and raw-event windows count
 and list normalized events by block hash, which `normalized_events_block_idx` serves.
 
 The [walk index set](../../docs/glossary.md#walk-index-set) is the 17 indexes Interpret keeps.
-`drop.sql` drops the other 33 before a from-zero walk or a full-history Interpret redo, and
-`install.sql` rebuilds them, with their reviewed definitions, before Project runs.
+`drop.sql` drops the other 33 before a from-zero walk or a full-history Interpret redo. Before
+Project runs, the phase runner rebuilds any of them that is missing, with the statements
+`install.sql` uses (see [The phase runner's rebuild](#the-phase-runners-rebuild)), and
+`install.sql` remains the way to rebuild them by hand.
 [`docs/storage.md`](../../docs/storage.md#walk-index-set) lists both sets and the rule that
 splits them. Indexes are access paths: dropping or rebuilding them changes no stored row, no
 [interpreter content hash](../../docs/glossary.md#interpreter-content-hash) input and no
@@ -96,37 +98,59 @@ final `ANALYZE` covers it.
 
 For a full-history Interpret redo run with the one-shot `phase-runner redo` command (the
 [planned boundary](../../docs/runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)),
-note that the command need not stop between the phases: when Interpret completes on a chain
-whose Interpret had completed before the redo, the usual case, the same command runs the
-Project redo that completion stamps before it exits. Rebuild while Interpret is still
-incomplete:
-
-1. start the Interpret redo, and once the chain's `interpret` row in `chain_phase_state` shows
-   `redo_in_progress`, run `drop.sql`;
-2. while Interpret's last batches run, stop the command with SIGTERM or Ctrl-C, wait for it
-   to exit, and check that the `interpret` row still shows `redo_in_progress`;
-3. run `install.sql`;
-4. rerun the same command, with the same chain, range and flags. It resumes Interpret from
-   its recorded block, finishes it with every index in place; the Project redo then runs
-   with them too, from this command or from its own.
-
-A stop lets the batch in flight finish, so Interpret can still complete. If the `interpret`
-row no longer shows `redo_in_progress`, the Project redo is stamped and may already have
-started without the indexes. Run `install.sql`, then start the Project redo with its own
-command, or rerun that command if it was running; do not rerun the Interpret command, whose
-attestation token, if it had one, is spent.
+start the Interpret redo, and once the chain's `interpret` row in `chain_phase_state` shows
+`redo_in_progress`, run `drop.sql`. When Interpret completes on a chain whose Interpret had
+completed before the redo, the usual case, the same command goes on to the Project redo that
+completion stamps, and the runner rebuilds the indexes before that Project redo's first batch.
+A Project redo started with its own command rebuilds them the same way.
 
 For a from-zero walk under the long-running runner, run `drop.sql` after `init-schema` and
-before the first start. Project starts on its own once Interpret completes, so stop the
-runner while Interpret's last batches run, run `install.sql`, then start it again. In either
-sequence a missed stop never changes a row, but until `install.sql` finishes Project reads
-without these indexes, through sequential scans, and an API read that needs one may exceed
-the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) on a large database. The
-script can run while they do.
+before the first start. The runner rebuilds the indexes once Interpret completes, before
+Project's first batch.
 
-The set is shared, so on a database with two chains run `install.sql` before either chain's
-Interpret completes: stop each chain's redo before its last batch, run `install.sql`, then
-rerun each command.
+Either way the chain's Project waits for the builds, so the time between Interpret completing
+and Project's first batch is the sum of them. To spend that time while Interpret still runs
+instead, stop the command or runner while Interpret's last batches run, run `install.sql`,
+and start it again. The runner then finds every index in place. A stop lets the batch in
+flight finish, so Interpret can still complete before the stop, and then the runner's rebuild
+covers the rest.
+
+The set is shared, so on a database with two chains the first chain whose Project starts
+rebuilds the indexes for both, while the other chain's Interpret redo may still be running.
+The runner logs a warning naming each chain still in an Interpret redo. That chain's
+remaining batches maintain the rebuilt indexes, as they would after a hand-run `install.sql`.
+
+## The phase runner's rebuild
+
+At every Project entry, normal or redo, supervised or one-shot, the runner reads the state of
+every name `drop.sql` drops in the catalog. When every one is a valid, ready index on `normalized_events`
+it does nothing more. Otherwise it opens a connection of its own, takes a session advisory
+lock so that one rebuild runs at a time across every process on the database, and waits for
+any other index build on the table to finish. Then, one index at a time, it drops an invalid
+leftover with `DROP INDEX CONCURRENTLY` and runs `install.sql`'s `CREATE INDEX CONCURRENTLY`
+statement, outside a transaction, with `lock_timeout` 0 and each build bounded to six hours.
+It logs each index it built with its duration, analyzes the table, checks every name again
+and logs `every normalized_events index the walk index set scripts drop is in place`.
+
+- A valid index under one of the names is kept whatever its definition. When the definition
+  differs from `install.sql`'s, the runner logs a warning with the definition it found and
+  the one it expects, and Project reads the index as found. A changed definition takes a new
+  name ([`docs/storage.md`](../../docs/storage.md#walk-index-set)).
+- A name held by a table, a view or an index on another table stops the chain with an error
+  naming the relation, and nothing is dropped. Remove or rename that relation, then restart
+  the runner.
+- A build or drop that fails stops the chain with an error naming the index and the cause,
+  and the process exits non-zero. It is not retried in the process. Under a restart policy
+  each start drops the invalid leftover and builds it again, so a cause that persists, such
+  as a login that does not own the table, shows as a restart loop with the same error each
+  time.
+- A stop cancels the build on the server and leaves its invalid entry, which the next start
+  drops and builds again. Indexes already built are kept.
+
+`BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM` and
+`BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS` set `maintenance_work_mem` and
+`max_parallel_maintenance_workers` on the rebuild's connection only. Unset, the server's values
+apply. The build line logs the values in force.
 
 ## Checks and recovery
 
@@ -148,8 +172,8 @@ rerun the script. Recover a valid index that fails the definition check the same
 name belongs to a table, view or another table's index, remove or rename that relation
 first.
 
-The runner never checks or recreates these indexes, so a restart while they are dropped
-resumes the walk or redo from its marker as usual. `scripts/check-schema` proves that
+A runner restart while the indexes are dropped resumes the walk or redo from its marker as
+usual, and Interpret never builds them. `scripts/check-schema` proves that
 `drop.sql` refuses a chain with Project progress and a chain with only a live publication,
 fails after its drops when a fresh chain's Project is running by then, refuses a name held by
 another table's index, fails naming an index whose drop failed, and drops exactly
@@ -160,3 +184,6 @@ names. A database test in
 on `normalized_events`, and that a walk, a full-history redo, a flag recompute and a runner
 restart's manifest sync, over ENSv1, Basenames and ENSv2 histories, scan `normalized_events`
 sequentially nowhere without the dropped indexes and store the same rows.
+`crates/storage/src/walk_index_set/tests.rs` holds the runner's copy of the list, statements
+and definitions to these scripts, and `apps/phase-runner/tests/spine/walk_index_restore.rs`
+proves the runner's rebuild, its refusals and its stop.

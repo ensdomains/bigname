@@ -390,11 +390,17 @@ starting durable cursor, no-head completion, capacity pause, and completed Verif
 A from-zero walk on a large database may run with only the
 [walk index set](../glossary.md#walk-index-set) on `normalized_events`. Run
 [`ops/walk-index-set/drop.sql`](../../ops/walk-index-set/README.md) after `init-schema` and
-before the first start. Project starts on its own once Interpret completes, so stop the
-runner while Interpret's last batches run, run `ops/walk-index-set/install.sql`, record its
-output in the walk log, and start the runner again. If the stop is missed, run
-`install.sql` at once: until it finishes, Project reads without those indexes, more slowly,
-and an API read that needs one may exceed `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.
+before the first start. Once Interpret completes, the runner rebuilds the dropped indexes
+before Project's first batch and logs
+`every normalized_events index the walk index set scripts drop is in place`. Record that line
+in the walk log. Project waits for the builds. To build while Interpret's last batches run
+instead, stop the runner then, run `ops/walk-index-set/install.sql`, record its output, and
+start the runner again. A build that fails stops the chain with an error naming the index and
+the cause, and the runner exits non-zero without retrying it. Under the container's restart
+policy that shows as a restart loop in the restart count, and each start drops the invalid
+leftover and builds it again. The
+[walk index set README](../../ops/walk-index-set/README.md#the-phase-runners-rebuild) gives the
+recovery.
 
 ## Planned migration and fingerprint boundary
 
@@ -1184,20 +1190,19 @@ in the same step.
    writes only the [walk index set](../glossary.md#walk-index-set); it refuses while
    any chain may still be served, and fails after its drops if a chain meets that condition by
    then, for example a Project that started while they ran; then run `install.sql` at once. Start it with Interpret's whole range still
-   ahead: its one-hour timeout bounds each drop, not the whole script. If it ran, rebuild before Interpret completes,
-   because when Interpret had completed before the redo the same command goes straight on
-   to the Project redo: while
-   Interpret's last batches run, stop the command, confirm the `interpret` row still shows
-   `redo_in_progress`, run `ops/walk-index-set/install.sql`, then rerun the same command,
-   which resumes Interpret from its recorded block. Record both outputs.
+   ahead: its one-hour timeout bounds each drop, not the whole script. If it ran, the
+   runner rebuilds the dropped indexes before the Project redo's first batch, from this
+   command or from the Project redo's own, and logs
+   `every normalized_events index the walk index set scripts drop is in place`. Record the
+   `drop.sql` output and that line.
    During the redo the runner refreshes the planner statistics of
    `normalized_events` itself and logs
    `interpret refreshed normalized_events statistics`: after the first batch
    that writes ENSv2 events, again as they grow, and when the redo completes.
    Run `ANALYZE bigname_phase.normalized_events` by hand only if it logs
    `interpret could not refresh normalized_events statistics`. While
-   `install.sql` builds an index that warning is expected, and the script ends
-   with its own `ANALYZE`.
+   `install.sql` or the runner builds an index that warning is expected, and
+   both end with their own `ANALYZE`.
    If the previous release had started a Project redo and left it unfinished,
    for example killed mid-way before this deploy, the Interpret redo that starts
    the new interpreter content hash supersedes it: that Project redo's progress

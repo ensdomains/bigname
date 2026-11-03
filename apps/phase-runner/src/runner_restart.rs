@@ -39,15 +39,35 @@ impl PhaseRunner {
                 // against the process token, once this returns.
                 return Ok(());
             }
-            let result = Box::pin(self.run_phase_once(
-                chain,
-                Arc::clone(&phase),
-                mode.clone(),
-                cancellation.clone(),
-                automatic_discovery_ingest,
-                &mut backoff,
-            ))
-            .await;
+            // Every Project entry, normal or redo, supervised or one-shot, passes here, after its
+            // chain's Interpret completed. A failed build is not retried.
+            let restored = if phase_name == PhaseName::Project {
+                crate::walk_index_restore::restore(
+                    &self.database,
+                    &chain.chain_id,
+                    &cancellation,
+                    self.stop_budget,
+                )
+                .await
+                .map(|()| !cancellation.is_cancelled())
+            } else {
+                Ok(true)
+            };
+            let result = match restored {
+                Ok(false) => continue,
+                Ok(true) => {
+                    Box::pin(self.run_phase_once(
+                        chain,
+                        Arc::clone(&phase),
+                        mode.clone(),
+                        cancellation.clone(),
+                        automatic_discovery_ingest,
+                        &mut backoff,
+                    ))
+                    .await
+                }
+                Err(error) => Err(error),
+            };
             self.record_loop_progress(&chain.chain_id);
             match result {
                 Ok(()) => return Ok(()),

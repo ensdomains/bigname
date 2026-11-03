@@ -18,6 +18,7 @@ use crate::{
     phase::{BlockRange, PhaseName},
     project_phase::FamilySettings,
     runner::RedoPhase,
+    walk_index_restore::IndexBuildSettings,
 };
 
 #[path = "cli_adaptive.rs"]
@@ -26,6 +27,9 @@ use adaptive::AdaptiveInterpretArgs;
 #[path = "cli_families.rs"]
 mod families;
 use families::ProjectFamiliesArgs;
+#[path = "cli_index_build.rs"]
+mod index_build;
+use index_build::IndexBuildArgs;
 #[path = "cli_live.rs"]
 pub mod live;
 #[path = "cli_redo.rs"]
@@ -188,6 +192,9 @@ struct RunArgs {
     project_families: ProjectFamiliesArgs,
 
     #[command(flatten)]
+    index_build: IndexBuildArgs,
+
+    #[command(flatten)]
     live: live::LiveArgs,
 }
 
@@ -280,6 +287,9 @@ struct RedoArgs {
 
     #[command(flatten)]
     project_families: ProjectFamiliesArgs,
+
+    #[command(flatten)]
+    index_build: IndexBuildArgs,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -316,6 +326,7 @@ pub enum ResolvedCommand {
         runtime: RuntimeConfig,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
         project_families: FamilySettings,
+        index_build: IndexBuildSettings,
         live_publication_lag_blocks: u32,
     },
     Redo {
@@ -334,6 +345,7 @@ pub enum ResolvedCommand {
         watch_set_coverage_attestations: BTreeMap<String, String>,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
         project_families: FamilySettings,
+        index_build: IndexBuildSettings,
     },
     Rewind {
         database_url: String,
@@ -414,6 +426,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
         runtime,
         hydration_rpc_urls,
         project_families: args.project_families.into(),
+        index_build: args.index_build.into(),
         live_publication_lag_blocks: args.live.live_publication_lag_blocks,
     })
 }

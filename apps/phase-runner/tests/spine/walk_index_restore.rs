@@ -17,10 +17,13 @@
 //! | 14 | A build that fails | Error names the index and the cause, not retried, Project not started | `a_failed_build_stops_project_with_the_error_line` |
 //! | 15 | A stop during a build | Returns within the stop budget, the server build is cancelled, the leftover is rebuilt next time | `a_stop_during_the_restore_cancels_the_build_and_leaves_a_rebuildable_leftover` |
 //! | 20 | The transfer node schema-migration | Adopts the runner's build, and the runner keeps the migration's | `the_transfer_node_migration_and_the_runner_build_each_others_index_once` |
+//! | 22 | The fresh baseline | Every listed definition is the baseline's, and the two lists are every index | `module_definitions_are_the_baselines` |
+//! | D5 | Rebuild settings set, and unset | The build session runs with them, or with the server's | `restore_applies_the_build_settings` |
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use phase_runner::database::RunnerDatabase;
+use bigname_storage::walk_index_set::{DROP_LIST, IndexState, KEPT, load_drop_list_state};
+use phase_runner::{database::RunnerDatabase, walk_index_restore::IndexBuildSettings};
 use sqlx::{Connection, PgConnection};
 use tracing::instrument::WithSubscriber;
 
@@ -742,4 +745,87 @@ async fn the_transfer_node_migration_and_the_runner_build_each_others_index_once
     project_redo(&runner, chain_id, CancellationToken::new()).await?;
     assert_eq!(oid(scratch.pool(), TRANSFER_NODE).await?, migrated);
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn module_definitions_are_the_baselines() -> Result<()> {
+    let scratch = ScratchDatabase::create("walk_index_restore_baseline").await?;
+    let states = load_drop_list_state(scratch.pool())
+        .await?
+        .context("the baseline has normalized_events")?;
+    for status in &states {
+        assert_eq!(
+            status.state,
+            IndexState::Present {
+                definition: status.index.definition.to_owned()
+            },
+            "{}",
+            status.index.name
+        );
+    }
+    let listed: BTreeSet<String> = KEPT
+        .iter()
+        .copied()
+        .chain(DROP_LIST.iter().map(|index| index.name))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(listed.len(), KEPT.len() + DROP_LIST.len());
+    let baseline: BTreeSet<String> = index_oids(scratch.pool()).await?.into_keys().collect();
+    assert_eq!(baseline, listed);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn restore_applies_the_build_settings() -> Result<()> {
+    for settings in [
+        IndexBuildSettings::default(),
+        IndexBuildSettings {
+            maintenance_work_mem: Some("96MB".to_owned()),
+            max_parallel_maintenance_workers: Some(0),
+        },
+    ] {
+        let scratch = ScratchDatabase::create("walk_index_restore_settings").await?;
+        let chain_id = "walk-index-settings";
+        completed_chain(&scratch, chain_id).await?;
+        drop_index(scratch.pool(), DROPPED).await?;
+        let (server_memory, server_workers): (String, String) = sqlx::query_as(
+            "SELECT current_setting('maintenance_work_mem'),
+                    current_setting('max_parallel_maintenance_workers')",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        let memory = settings
+            .maintenance_work_mem
+            .clone()
+            .unwrap_or(server_memory);
+        let workers = settings
+            .max_parallel_maintenance_workers
+            .map_or(server_workers, |workers| workers.to_string());
+        let runner = runner(
+            scratch.runner().with_index_build_settings(settings.clone()),
+            PhaseSet::loopback(),
+            available_capacity(),
+            "walk-index-settings-runner",
+        )?;
+
+        let (result, logs) =
+            logged(project_redo(&runner, chain_id, CancellationToken::new())).await;
+        result?;
+
+        let started = logs
+            .lines()
+            .find(|line| line.contains("building the normalized_events indexes"))
+            .unwrap_or_else(|| panic!("no build line: {logs}"));
+        assert!(
+            started.contains(&format!("maintenance_work_mem={memory}")),
+            "{settings:?}: {started}"
+        );
+        assert!(
+            started.contains(&format!("max_parallel_maintenance_workers={workers}")),
+            "{settings:?}: {started}"
+        );
+        assert!(usable(scratch.pool(), DROPPED).await?);
+        scratch.cleanup().await?;
+    }
+    Ok(())
 }

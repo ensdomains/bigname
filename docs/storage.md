@@ -3019,8 +3019,9 @@ silently narrowing the fingerprint.
 ### Walk index set
 
 An operator may drop the `normalized_events` indexes Interpret does not read for the length
-of a from-zero walk or a full-history Interpret redo, and rebuild them before Project runs,
-with [`ops/walk-index-set`](../ops/walk-index-set/README.md). The indexes Interpret keeps are
+of a from-zero walk or a full-history Interpret redo with
+[`ops/walk-index-set`](../ops/walk-index-set/README.md). The phase runner rebuilds any that is
+missing or invalid before Project's first batch, and `install.sql` rebuilds them by hand. The indexes Interpret keeps are
 the [walk index set](glossary.md#walk-index-set). Indexes are access paths, not hash inputs:
 dropping or rebuilding one changes no stored row and leaves the primary key, the
 `event_identity` unique key and every foreign key in place, so database constraints stay
@@ -3081,7 +3082,10 @@ these: `normalized_events_history_account_owner_idx`,
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 A new index on `normalized_events` joins one list in the change that adds it: the drop list
-when Interpret does not read it, the kept set when Interpret does.
+when Interpret does not read it, the kept set when Interpret does. The phase runner carries
+both lists, with `install.sql`'s statements and reviewed definitions, in
+`crates/storage/src/walk_index_set/constants.rs`, and
+`crates/storage/src/walk_index_set/tests.rs` fails until they match the scripts.
 `crates/interpret/src/load/walk_index_set_tests.rs` fails until the two lists together are
 every index the baseline defines on the table, and proves that Interpret, over ENSv1,
 Basenames and ENSv2 histories through either loader, scans `normalized_events` sequentially
@@ -3089,6 +3093,18 @@ nowhere without the drop list and stores the same rows. That test shows each sta
 an index path, not that the path is keyed: a name-only read falls back to a range of
 `normalized_events_chain_block_number_idx`, which is why `normalized_events_name_history_idx`
 stays although a walk over ENSv1-only history never reads it.
+
+Before every Project entry the runner reads the drop list's state in the catalog
+(`crates/storage/src/walk_index_set.rs`). It builds each missing index with `install.sql`'s
+statement, concurrently and outside a transaction, and drops and rebuilds an index that is not
+valid and ready (`apps/phase-runner/src/walk_index_restore.rs`). It never drops a valid index,
+and a valid index whose definition differs from `install.sql`'s is kept and read as found,
+with a warning that prints both. A changed definition therefore takes a new name: a release
+that changes what one of these indexes holds adds an index under a new name and drops the old
+one, so a runner or API of the previous release still finds the names it expects. A name held
+by another relation stops Project instead. The
+[walk index set README](../ops/walk-index-set/README.md#the-phase-runners-rebuild) describes the
+rebuild, its log lines and its failures.
 
 ## Projection publication
 

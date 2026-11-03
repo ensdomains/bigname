@@ -5,7 +5,10 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
-use crate::error::{RunnerError, RunnerResult};
+use crate::{
+    error::{RunnerError, RunnerResult},
+    walk_index_restore::IndexBuildSettings,
+};
 
 pub const INTERPRETER_CONTENT_HASH_SETTING: &str = "bigname.interpreter_content_hash";
 pub const PHASE_SEARCH_PATH: &str = "bigname_phase";
@@ -14,6 +17,7 @@ pub const PHASE_SEARCH_PATH: &str = "bigname_phase";
 pub struct RunnerDatabase {
     pool: PgPool,
     connect_options: PgConnectOptions,
+    index_build: IndexBuildSettings,
 }
 
 #[derive(Clone)]
@@ -53,7 +57,16 @@ impl RunnerDatabase {
         Ok(Self {
             pool,
             connect_options,
+            index_build: IndexBuildSettings::default(),
         })
+    }
+
+    /// The session settings the rebuild of the walk index set scripts' dropped indexes runs
+    /// with (`walk_index_restore`).
+    #[must_use]
+    pub fn with_index_build_settings(mut self, settings: IndexBuildSettings) -> Self {
+        self.index_build = settings;
+        self
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -62,6 +75,10 @@ impl RunnerDatabase {
 
     pub(crate) fn connect_options(&self) -> PgConnectOptions {
         self.connect_options.clone()
+    }
+
+    pub(crate) fn index_build_settings(&self) -> &IndexBuildSettings {
+        &self.index_build
     }
 }
 

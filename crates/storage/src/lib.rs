@@ -40,7 +40,7 @@ mod snapshot_selection;
 pub mod sql_row;
 mod time;
 mod unix_seconds;
-mod walk_index_set;
+pub mod walk_index_set;
 pub use expiry::contract_expiry_reason;
 /// How a name surface that stores no raw bytes is named when it is read.
 pub use families::name::rendered as rendered_name;
