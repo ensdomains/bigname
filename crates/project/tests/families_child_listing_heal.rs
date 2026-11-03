@@ -190,7 +190,7 @@ async fn a_child_with_two_unknown_labels_heals_once_per_observation() -> Result<
         first[0].1 == format!("c.[{}].eth", &p[2..]) && first[0].2 == first[0].1,
         "block 12 spells the child's own label: {first:?}"
     );
-    ensure!(unhealed(&fixture, &child).await? == [p.clone()]);
+    ensure!(unhealed(&fixture, &child).await? == std::slice::from_ref(&p));
     ensure!(journalled(&fixture, 12, "project_child_listing").await? == (1, 1));
     assert_served(&fixture, &name(1)).await?;
     let kept = fixture.exact().await?;
@@ -213,7 +213,7 @@ async fn a_child_with_two_unknown_labels_heals_once_per_observation() -> Result<
     for ((table, was), (_, now)) in kept.iter().zip(&restored) {
         ensure!(was == now, "the undo left {table} as {now}, not {was}");
     }
-    ensure!(unhealed(&fixture, &child).await? == [p.clone()]);
+    ensure!(unhealed(&fixture, &child).await? == std::slice::from_ref(&p));
     fixture.apply(13, FamilyMode::Normal).await?;
     ensure!(listed(&fixture, &name(1)).await? == second);
     fixture.assert_rebuild_equal(13).await?;
