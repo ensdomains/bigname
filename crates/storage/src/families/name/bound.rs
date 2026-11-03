@@ -335,7 +335,7 @@ pub(crate) async fn count(
         .with_context(|| {
             format!("failed to count the bound names of {chain_id}:{resolver_address}")
         })?;
-    // Rolling back ends the setting. The count wrote nothing.
+    // Rolling back ends both settings. The count wrote nothing.
     scoped.rollback().await?;
     Ok(u64::try_from(total).unwrap_or_default())
 }

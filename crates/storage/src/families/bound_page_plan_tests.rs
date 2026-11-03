@@ -22,7 +22,7 @@
 
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use sqlx::{PgConnection, Row, raw_sql};
+use sqlx::{Connection, PgConnection, Row, raw_sql};
 
 use super::{
     id_index_plan_tests::{PLAN_MODES, with_database},
@@ -408,6 +408,22 @@ async fn reader_count(connection: &mut PgConnection) -> Result<()> {
         .fetch_one(&mut *connection)
         .await?;
     ensure!(setting == "on", "the count left enable_sort {setting}");
+    // Inside a read's transaction the count runs in a savepoint. Rolling it back restores the
+    // setting for the rest of the read.
+    let mut read = connection.begin().await?;
+    let total = bound_count(&mut *read, (CHAIN, &address, None), true, cap).await?;
+    ensure!(
+        i64::try_from(total)? == CAP + 1,
+        "the reader counted {total} inside a read"
+    );
+    let setting: String = sqlx::query_scalar("SHOW enable_sort")
+        .fetch_one(&mut *read)
+        .await?;
+    ensure!(
+        setting == "on",
+        "the count left enable_sort {setting} inside the read"
+    );
+    read.rollback().await?;
     forced_generic_count(connection).await
 }
 

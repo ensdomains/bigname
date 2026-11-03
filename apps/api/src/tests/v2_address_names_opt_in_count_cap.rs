@@ -47,7 +47,10 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
     assert_eq!(paths, ["walk"]);
     assert_eq!(exact["page"]["total_count"], json!(OPT_IN_NAMES), "{exact}");
     let composed = batches.iter().sum::<usize>();
-    assert!((OPT_IN_NAMES..=OPT_IN_NAMES + 32).contains(&composed), "{batches:?}");
+    assert!(
+        (OPT_IN_NAMES..=OPT_IN_NAMES + 32).contains(&composed),
+        "{batches:?}"
+    );
     assert_eq!(page_body(&exact), page_body(&unasked));
 
     // One candidate over it the flag composes nothing for the count, and the page is the
@@ -68,23 +71,32 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
         let full = Box::pin(bulk_payload(&database, &uri)).await?;
         assert!(full["page"]["total_count"].is_u64(), "{query}: {full}");
         let (exact, _, _) = opt_in_page(&database, &uri, every).await?;
-        assert_eq!(exact["page"]["total_count"], full["page"]["total_count"], "{query}");
+        assert_eq!(
+            exact["page"]["total_count"], full["page"]["total_count"],
+            "{query}"
+        );
         let (capped, paths, _) = opt_in_page(&database, &uri, over).await?;
         assert_eq!(paths, ["walk"], "{query}");
-        assert_eq!(capped["page"]["total_count"], Value::Null, "{query}: {capped}");
+        assert_eq!(
+            capped["page"]["total_count"],
+            Value::Null,
+            "{query}: {capped}"
+        );
         assert_eq!(page_body(&capped), page_body(&full), "{query}");
     }
 
     // `sort=created_at` still composes every candidate for its order over the cap; only
     // the count is dropped.
-    let (created, _, batches) = opt_in_page(&database, &format!("{counted}&sort=created_at"), over).await?;
+    let (created, _, batches) =
+        opt_in_page(&database, &format!("{counted}&sort=created_at"), over).await?;
     assert_eq!(created["page"]["total_count"], Value::Null, "{created}");
     assert!(batches.iter().sum::<usize>() >= OPT_IN_NAMES, "{batches:?}");
 
     // A namespace holding none of the candidates is read in full with an exact zero.
     let (ens, _, _) = opt_in_page(&database, &format!("{counted}&namespace=ens"), over).await?;
     assert_eq!(ens["page"]["total_count"], Value::Null, "{ens}");
-    let (none, paths, _) = opt_in_page(&database, &format!("{counted}&namespace=basenames"), over).await?;
+    let (none, paths, _) =
+        opt_in_page(&database, &format!("{counted}&namespace=basenames"), over).await?;
     assert_eq!(paths, ["exact"]);
     assert_eq!(none["page"]["total_count"], json!(0), "{none}");
 
@@ -95,7 +107,11 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
     )
     .await?;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
-    assert_eq!(refused["error"]["code"], json!("invalid_input"), "{refused}");
+    assert_eq!(
+        refused["error"]["code"],
+        json!("invalid_input"),
+        "{refused}"
+    );
 
     // The candidates are gathered in the requested namespace, so the opt-in cap compares that
     // namespace's candidates. The address index also lists five names with no `ens` surface:
@@ -118,7 +134,8 @@ async fn address_names_opt_in_count_is_null_above_its_cap() -> Result<()> {
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(indexed, i64::try_from(OPT_IN_NAMES + others.len())?);
-    let (ens, paths, _) = opt_in_page(&database, &format!("{counted}&namespace=ens"), every).await?;
+    let (ens, paths, _) =
+        opt_in_page(&database, &format!("{counted}&namespace=ens"), every).await?;
     assert_eq!(paths, ["walk"]);
     assert_eq!(ens["page"]["total_count"], json!(OPT_IN_NAMES), "{ens}");
     database.cleanup().await
@@ -141,10 +158,16 @@ async fn address_names_opt_in_count_after_a_walk_fallback_follows_its_cap() -> R
     let uri = format!(
         "/v1/addresses/{BULK_ADDRESS}/names?sort=expires_at&page_size=10&include=total_count"
     );
-    for (opt_in, total) in [(OPT_IN_NAMES, json!(OPT_IN_NAMES)), (OPT_IN_NAMES - 1, Value::Null)] {
+    for (opt_in, total) in [
+        (OPT_IN_NAMES, json!(OPT_IN_NAMES)),
+        (OPT_IN_NAMES - 1, Value::Null),
+    ] {
         let (payload, paths, _) = opt_in_page(&database, &uri, opt_in).await?;
         assert_eq!(paths, ["fallback"], "opt-in cap {opt_in}");
-        assert_eq!(payload["page"]["total_count"], total, "opt-in cap {opt_in}: {payload}");
+        assert_eq!(
+            payload["page"]["total_count"], total,
+            "opt-in cap {opt_in}: {payload}"
+        );
     }
     database.cleanup().await
 }
