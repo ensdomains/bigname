@@ -81,6 +81,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "project_name_summary",
     "project_child_listing",
     "project_child_listing_count",
+    "project_child_preimage_watermark",
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",

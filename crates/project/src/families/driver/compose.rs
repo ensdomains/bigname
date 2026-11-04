@@ -18,6 +18,7 @@ use crate::{
     families::{
         FamilyOutcome, block,
         compose::{self, Stream},
+        derived,
         input::{self, Revision},
         manifests,
         marker::{self, Composition, FamilyMarker},
@@ -51,6 +52,7 @@ impl Run<'_> {
         let Some(pass) = family.current.clone() else {
             // Nothing was applied in a range, so there is nothing to compose.
             let mut transaction = self.fenced(family, &record, revision).await?;
+            derived::seed_child_listing_sources(&mut transaction, self.chain_id).await?;
             repair::end_compose(&mut transaction, self.chain_id, -1).await?;
             commit(transaction).await?;
             return Ok(Some(ended(record, -1)));
@@ -71,6 +73,7 @@ impl Run<'_> {
             }
             let mut transaction = self.fenced(family, &record, revision).await?;
             repair::begin_compose(&mut transaction, self.chain_id).await?;
+            derived::seed_child_listing_sources(&mut transaction, self.chain_id).await?;
             let names =
                 compose::prepare_names(&mut transaction, self.chain_id, pass.number).await?;
             commit(transaction).await?;

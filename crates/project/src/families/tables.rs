@@ -72,6 +72,8 @@ tables! {
     CHILD_LISTING = "project_child_listing" ["chain_id", "child_logical_name_id"];
     CHILD_LISTING_COUNT = "project_child_listing_count"
         ["chain_id", "parent_logical_name_id", "registry_address"];
+    CHILD_PREIMAGE_WATERMARK = "project_child_preimage_watermark"
+        ["chain_id", "source_chain_id"];
     HISTORY_ANCHOR = "project_address_history_anchor"
         ["chain_id", "address", "anchor_kind", "anchor_id"];
     HISTORY_SOURCE = "project_history_source"

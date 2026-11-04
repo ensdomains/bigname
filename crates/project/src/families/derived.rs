@@ -8,7 +8,9 @@
 //! (`summary.rs`), then the child listing rows they move (`children.rs`); both are journalled, so
 //! an undo restores them with the other families.
 mod children;
-pub(crate) use children::derive as derive_child_listing;
+pub(crate) use children::{
+    derive as derive_child_listing, seed_sources as seed_child_listing_sources,
+};
 mod summary;
 pub(crate) use summary::{
     CHUNK as SUMMARY_CHUNK, WORK_LIST as SUMMARY_WORK_LIST, compose as compose_summaries,
@@ -22,7 +24,7 @@ use sqlx::{Postgres, Transaction};
 use super::{
     block::BlockStats,
     input, marker,
-    tables::{CHILD_LISTING, NAME_SUMMARY},
+    tables::{CHILD_LISTING, CHILD_PREIMAGE_WATERMARK, NAME_SUMMARY},
 };
 use crate::{ProjectError, Result};
 
@@ -472,6 +474,9 @@ pub(super) async fn refresh_block(
     .await?;
     if listing.rows > 0 {
         *stats.rows.entry(CHILD_LISTING.name).or_default() += listing.rows;
+    }
+    if listing.watermark_rows > 0 {
+        *stats.rows.entry(CHILD_PREIMAGE_WATERMARK.name).or_default() += listing.watermark_rows;
     }
     stats.undo_rows += listing.undo_rows;
     Ok(())

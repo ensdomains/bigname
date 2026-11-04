@@ -2484,6 +2484,28 @@ COMMENT ON COLUMN project_child_listing_count.registry_address IS
     'This value is the registry whose labels the row counts, or the empty string for every child of the parent.';
 COMMENT ON COLUMN project_child_listing_count.child_count IS
     'This value is the number of listed rows the key covers.';
+CREATE TABLE IF NOT EXISTS project_child_preimage_watermark (
+    chain_id text NOT NULL,
+    source_chain_id text NOT NULL,
+    source_block_number bigint NOT NULL,
+    source_input_content_hash text,
+    source_redo_attempt_generation bigint,
+    PRIMARY KEY (chain_id, source_chain_id),
+    CHECK (source_chain_id <> chain_id),
+    CHECK (source_block_number >= -1)
+);
+COMMENT ON TABLE project_child_preimage_watermark IS
+    'Project-owned watermarks of family F17: per chain and other chain, the highest block of the other chain, at or below its finalized (else safe) block, whose preimage observations the chain''s family step has read, so its stored child names heal from labels first observed there. The family step advances it in its own block transaction and journals it for undo; a reset clears it, and a rebuild''s composition pass starts it again.';
+COMMENT ON COLUMN project_child_preimage_watermark.chain_id IS
+    'This value is the chain whose child listing the watermark heals.';
+COMMENT ON COLUMN project_child_preimage_watermark.source_chain_id IS
+    'This value is the other chain whose preimage observations are read.';
+COMMENT ON COLUMN project_child_preimage_watermark.source_block_number IS
+    'This value is the highest block of the source chain, at or below its finalized (else safe) block, whose preimage observations have been read, or -1 when a changed Interpret revision of the source sends the reading back to block 0.';
+COMMENT ON COLUMN project_child_preimage_watermark.source_input_content_hash IS
+    'This value is the source chain''s Interpret input content hash the watermark was read under.';
+COMMENT ON COLUMN project_child_preimage_watermark.source_redo_attempt_generation IS
+    'This value is the source chain''s Interpret redo attempt generation the watermark was read under.';
 CREATE INDEX IF NOT EXISTS project_parent_subregistry_address_idx
     ON project_parent_subregistry (chain_id, subregistry_address);
 

@@ -59,9 +59,13 @@ const CONTROL_TABLES: [&str; 3] = [
 ];
 
 /// The family tables added after the last migration with a reset list
-/// (migrations/20261103120000_project_child_listing.sql creates them empty). The published
+/// (migrations/20261103120000_project_child_listing.sql creates them). The published
 /// reset lists cannot name them; the family reset (`families::family_tables`) clears them.
-const LATER_TABLES: [&str; 2] = ["project_child_listing", "project_child_listing_count"];
+const LATER_TABLES: [&str; 3] = [
+    "project_child_listing",
+    "project_child_listing_count",
+    "project_child_preimage_watermark",
+];
 
 /// The family reset covers the child listing tables, so a later reset clears them.
 #[test]
@@ -114,6 +118,7 @@ fn reset_tables() -> Vec<String> {
                     | "project_lookup_dependency"
                     | "project_child_listing"
                     | "project_child_listing_count"
+                    | "project_child_preimage_watermark"
             )
         })
         .map(str::to_owned)
@@ -153,6 +158,7 @@ fn selector_reset_tables() -> Vec<String> {
                     | "project_lookup_dependency"
                     | "project_child_listing"
                     | "project_child_listing_count"
+                    | "project_child_preimage_watermark"
             )
         })
         .map(str::to_owned)

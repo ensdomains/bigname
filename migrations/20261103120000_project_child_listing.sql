@@ -1,7 +1,9 @@
 -- The child listing family F17: project_child_listing, one row per child a parent lists at the
 -- publication, with its six read indexes, and project_child_listing_count, the per-parent and
--- per-registry child counts the family step keeps from the same diff. An index on an existing
--- family table serves the step's work list: project_parent_subregistry by subregistry address.
+-- per-registry child counts the family step keeps from the same diff, and
+-- project_child_preimage_watermark, the highest block of every other chain whose preimage
+-- observations each chain has read. An index on an existing family table serves the step's work
+-- list: project_parent_subregistry by subregistry address.
 --
 -- The new tables start empty and need no reset. The release that adds them rotates the
 -- projection content hash, so the runner refuses a normal Project or Live start until a
@@ -133,6 +135,28 @@ COMMENT ON COLUMN bigname_phase.project_child_listing_count.registry_address IS
     'This value is the registry whose labels the row counts, or the empty string for every child of the parent.';
 COMMENT ON COLUMN bigname_phase.project_child_listing_count.child_count IS
     'This value is the number of listed rows the key covers.';
+CREATE TABLE IF NOT EXISTS bigname_phase.project_child_preimage_watermark (
+    chain_id text NOT NULL,
+    source_chain_id text NOT NULL,
+    source_block_number bigint NOT NULL,
+    source_input_content_hash text,
+    source_redo_attempt_generation bigint,
+    PRIMARY KEY (chain_id, source_chain_id),
+    CHECK (source_chain_id <> chain_id),
+    CHECK (source_block_number >= -1)
+);
+COMMENT ON TABLE bigname_phase.project_child_preimage_watermark IS
+    'Project-owned watermarks of family F17: per chain and other chain, the highest block of the other chain, at or below its finalized (else safe) block, whose preimage observations the chain''s family step has read, so its stored child names heal from labels first observed there. The family step advances it in its own block transaction and journals it for undo; a reset clears it, and a rebuild''s composition pass starts it again.';
+COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.chain_id IS
+    'This value is the chain whose child listing the watermark heals.';
+COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.source_chain_id IS
+    'This value is the other chain whose preimage observations are read.';
+COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.source_block_number IS
+    'This value is the highest block of the source chain, at or below its finalized (else safe) block, whose preimage observations have been read, or -1 when a changed Interpret revision of the source sends the reading back to block 0.';
+COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.source_input_content_hash IS
+    'This value is the source chain''s Interpret input content hash the watermark was read under.';
+COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.source_redo_attempt_generation IS
+    'This value is the source chain''s Interpret redo attempt generation the watermark was read under.';
 CREATE INDEX IF NOT EXISTS project_parent_subregistry_address_idx
     ON bigname_phase.project_parent_subregistry (chain_id, subregistry_address);
 END
