@@ -818,7 +818,7 @@ async fn nameless_registry_events_keep_the_lease_before_surface_materialization(
     for (id, expected_block, count) in [(lease, 122, 6), (successor, 125, 2)] {
         let history = v2_history_payload_for_database(
             &database,
-            &format!("/v1/events?registration_id={id}&page_size=20"),
+            &format!("/v1/events?registration_id={id}&page_size=20&include=total_count"),
         )
         .await?;
         let resolvers = history["data"]
@@ -923,7 +923,7 @@ async fn nameless_registry_events_keep_the_lease_before_surface_materialization(
     assert_eq!(read_only["registration_id"], Value::Null, "{all}");
     let current = v2_history_payload_for_database(
         &database,
-        &format!("/v1/events?registration_id={successor}&page_size=20"),
+        &format!("/v1/events?registration_id={successor}&page_size=20&include=total_count"),
     )
     .await?;
     assert_eq!(current["page"]["total_count"], json!(2), "{current}");
@@ -3170,7 +3170,8 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
     .await?;
     publish_registration_history_fixture(&database).await?;
 
-    let older_route = format!("/v1/events?registration_id={older_lease_id}&page_size=20");
+    let older_route =
+        format!("/v1/events?registration_id={older_lease_id}&page_size=20&include=total_count");
     let older = v2_history_payload_for_database(&database, &older_route).await?;
     let older_hashes = history_transaction_hashes(&older);
     assert!(

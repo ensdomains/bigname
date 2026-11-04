@@ -15,11 +15,11 @@ use super::history_context::HistoryRowContext;
 use super::history_keyset;
 use super::support::normalize_inferred_route_name;
 use super::{
-    CursorPayload, Envelope, EventDetail, HISTORY_TOTAL_COUNT_CAP, HistoryEventType,
-    HistoryInclude, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result,
-    build_event_detail, decode, encode, format_timestamp, history_event_type, history_include,
-    history_sort_token, history_storage_order, insert_history_filter_keys, map_history_page_error,
-    raw_event_kind, resolve_history_block_window, validate_latest_collection_selectors,
+    CursorPayload, Envelope, EventDetail, HistoryEventType, HistoryInclude, Page,
+    QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result, build_event_detail,
+    decode, encode, format_timestamp, history_event_type, history_include, history_sort_token,
+    history_storage_order, insert_history_filter_keys, map_history_page_error, raw_event_kind,
+    resolve_history_block_window, validate_latest_collection_selectors,
 };
 
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -87,8 +87,8 @@ pub(crate) struct Event {
 pub(crate) struct ParsedEventsFilter {
     pub(crate) storage_filter: EventHistoryFilter,
     pub(crate) cursor_filters: BTreeMap<String, String>,
-    /// Whether an anchor (name, registration, address, or resolver) bounds the
-    /// read, which is what makes a capped `total_count` affordable.
+    /// Whether a name, registration, address, or resolver anchor bounds the read.
+    /// `include=total_count` counts such a read, as `events_summary_mode` decides.
     pub(crate) anchored: bool,
 }
 
@@ -373,8 +373,6 @@ pub(crate) fn events_summary_mode(params: &QueryParams, anchored: bool) -> Histo
         HistorySummaryMode::CappedCount(emitter_exact_count_cap())
     } else if exact_count && anchored {
         HistorySummaryMode::Count
-    } else if anchored {
-        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
     } else {
         HistorySummaryMode::None
     }

@@ -393,3 +393,42 @@ async fn v2_history_batched_registrations_keep_separate_payments_and_omit_missin
     assert!(missing.iter().all(|r| r["data"].get("base_cost").is_none()));
     database.cleanup().await
 }
+
+/// Reads anchored by an ENSv2 registration, the permission read a roles view makes among them,
+/// count only when the request asks for a total.
+#[tokio::test]
+async fn v2_history_ens_v2_registration_events_count_only_on_opt_in() -> Result<()> {
+    let database = routes::database_at(134).await?;
+    let (status, events) =
+        read_family_response(&database, &format!("/v1/events?name={NAME}&page_size=200")).await?;
+    assert_eq!(status, StatusCode::OK, "{events:#}");
+    let registrations = events["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["registration_id"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!registrations.is_empty(), "{events:#}");
+    let (mut registration_rows, mut permission_rows) = (0, 0);
+    for registration in registrations {
+        let all = assert_events_count_only_on_opt_in(
+            &database,
+            &format!("/v1/events?registration_id={registration}&page_size=200"),
+        )
+        .await?;
+        registration_rows += all["data"].as_array().unwrap().len();
+        let roles = assert_events_count_only_on_opt_in(
+            &database,
+            &format!(
+                "/v1/events?registration_id={registration}&type=permission&include=data,raw&order=asc&page_size=200"
+            ),
+        )
+        .await?;
+        permission_rows += roles["data"].as_array().unwrap().len();
+    }
+    assert!(
+        registration_rows > 0 && permission_rows > 0,
+        "{registration_rows} registration rows, {permission_rows} permission rows: {events:#}"
+    );
+    database.cleanup().await
+}
