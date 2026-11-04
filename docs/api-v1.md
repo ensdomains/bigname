@@ -143,7 +143,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_owner` (Unix seconds or RFC 3339) | `expires_before` (new) |
 | `expires_window` | repeated `GET /v1/names` query parameter: 1–32 disjoint finite `after..before` windows over exact `expires_at`, lower inclusive and upper exclusive; replaces scalar expiry bounds for that request | new in v2 |
 | `expires_window_index` | zero-based index of a `GET /v1/names` row’s matching `expires_window` in original request order; present only with repeated-window requests | new in v2 |
-| `parent` (query) | `GET /v1/names` and `GET /v1/addresses/{address}/names` filter: only names exactly one label below the given name, matched on the served name spelling rather than on the node or registry topology, so a bracketed labelhash label matches only names served with that bracketed spelling (a [rendered name](glossary.md#rendered-name) whose label has no verified text), except the labelhashes of `eth` and `base`, which normalization of the `parent` value spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
+| `parent` (query) | `GET /v1/names` and `GET /v1/addresses/{address}/names` filter: only names exactly one label below the given name. On `GET /v1/names` it matches the labelhash path, so a bracketed labelhash label names the node it hashes, and a name is listed whatever text its labels are served under, a [rendered name](glossary.md#rendered-name) label with no verified text included. On `GET /v1/addresses/{address}/names` it matches the served name spelling rather than the node or registry topology, so a bracketed labelhash label matches only names served with that bracketed spelling, except the labelhashes of `eth` and `base`, which normalization of the `parent` value spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
 | `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
@@ -774,7 +774,9 @@ Rules:
   group. Relation sets that require post-filtering retain `total_count=null`;
   use the address-name GET collection for an exact single-relation count.
   Address-name ownership collections return the exact count of their filtered,
-  deduplicated entries before the cursor.
+  deduplicated entries before the cursor when the address has at most 1,000
+  candidate names, and with `include=total_count` up to 10,000. Above that it
+  is `null`.
   Address history returns `total_count=null` by default; `include=total_count`
   requests an exact total over the same filters and published snapshot as its
   page. Name history populates it with a capped count over the page's exact
@@ -795,8 +797,8 @@ Rules:
   The registry overview's nested `referenced_by` page populates it only with
   `include=counts`.
   The resolver overview's nested `bound_names` page populates it only with
-  `include=total_count`, with the exact number of bound names on the page's
-  snapshot.
+  `include=total_count`, with the number of bound names on the page's
+  snapshot: exact up to 100,000 and `null` beyond.
   Other routes populate it only where a precomputed count makes it
   cheap or where they explicitly document `include=total_count`; they must not
   otherwise run unconditional full counts on the request path.

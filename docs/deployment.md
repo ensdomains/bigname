@@ -5580,3 +5580,96 @@ every index is in place. The phase runner logs
 and `install.sql` builds only what is missing and fails unless every index is valid, ready
 and of the reviewed definition. When one is missing, let the phase runner build it or run
 `install.sql` first.
+
+## A parent key index for the names listing
+
+The build that adds `name_surfaces_project_parent_key_idx` changes how `GET /v1/names` with
+`parent` selects the names one label below the parent
+([table ownership](storage.md#table-ownership)).
+
+- Before, the statement in `crates/storage/src/families/name/list/expiring.rs` tested every
+  name of the expiry window against the parent's text with `LIKE`. A parent with few names
+  below it read the whole window before it could answer, and a wide window ran into the API's
+  statement timeout.
+- The statement now matches the parent by labelhash path, and the new index keys each surface
+  by its parent's path. A parent with few names below it is read from the index. A parent
+  above most names, such as `eth`, is still read in expiry order. A selection with a parent
+  is planned for its own values, so the planner chooses by the parent's statistics.
+- A name is now listed by its place in the tree, not by the text it is served under. A parent
+  label spelled as its labelhash lists the names below that node, and a name whose middle
+  label has no known text is listed under the parent spelled in text.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the changed statements are in serving readers, not hashed files. No redo is needed. The
+  change ships as an image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order:
+
+1. Prebuild the index with the statements below.
+2. Apply schema-migration `20261104120000_name_surfaces_project_parent_key_index.sql`.
+3. Swap the image.
+
+The schema-migration installs the index. Where an index of that name already exists, valid and
+ready, with the reviewed definition, it adopts it without a build and without a lock, so it is
+a no-op on a database where the index was already built by hand with the statement below. An
+empty `name_surfaces` builds it directly. A populated table without it is refused, so on an
+initialized database prebuild it concurrently first, outside a transaction. The phase runner
+and API can keep running while it builds. The previous image does not read the index, and
+Interpret keeps it current like the table's other indexes. It holds one hash and the namespace
+for each surface, about the size of `name_surfaces_project_path_hash_idx`. It is not partial:
+PostgreSQL estimates an expression from an index's statistics only when the index has no
+predicate, and the planner needs those statistics to tell a parent with few names below it
+from `eth`. The statement keeps its visibility and root-name terms as filters.
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_parent_key_idx
+    ON bigname_phase.name_surfaces
+        (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), 0));
+ANALYZE bigname_phase.name_surfaces;
+```
+
+The `ANALYZE` is part of the step. Until it runs, the planner has no statistics for the indexed
+expression and cannot tell a parent with few names below it from `eth`.
+
+`IF NOT EXISTS` matches the index name only, and an interrupted concurrent build leaves an
+invalid index. Check the index after the build:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'name_surfaces_project_parent_key_idx';
+RESET search_path;
+```
+
+It must return one row with `relkind` `i`, `indrelid` `bigname_phase.name_surfaces`, and
+`indisvalid` and `indisready` true. The definition must be exactly this line, which is the text
+the schema-migration compares:
+
+```text
+CREATE INDEX name_surfaces_project_parent_key_idx ON bigname_phase.name_surfaces USING btree (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), (0)::bigint))
+```
+
+The schema-migration refuses a name that is not an index, an index on another table or one
+that is not valid and ready, and another definition. Its error names the index and, for
+another definition, prints the definition it found and the one it expects. The recovery
+steps:
+
+- A name that is not an index: remove or rename that relation, then build the index with the
+  statements above.
+- Any other refusal: confirm in `pg_stat_progress_create_index` that no build of the index is
+  still running, drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.name_surfaces_project_parent_key_idx`, then build it
+  again with the statements above.
+
+Then run the schema-migrations again. The new image without the index gives the same
+answers, but a `parent` request reads every name of its expiry window.
+
+The index reads `bigname_phase.entry_key_hashes`, so that function can no longer be dropped
+while the index exists. Where the recovery of
+`20261012120000_name_surfaces_project_path_indexes.sql` drops the function, drop this index
+first and build it again afterwards with the statements above.

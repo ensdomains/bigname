@@ -687,7 +687,7 @@ collection route carry neither header.
 | `grace_ends_before` | query | string | no | none | Exclusive finite grace-deadline upper bound, as decimal Unix seconds or RFC 3339; later than grace_ends_after when both are supplied. Cannot combine with expiry parameters. |
 | `grace_ends_window` | query | repeated array [1, 32] of string | no | none | Repeat for disjoint half-open grace-deadline windows with the same rules as expires_window. Input order defines grace_ends_window_index. Cannot combine with scalar grace or any expiry parameter. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
-| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by labelhash path, are listed. A bracketed labelhash label names the node it hashes. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `sort` | query | enum `expires_at`, `grace_ends_at` | no | none | Defaults to the supplied date family; explicit sort must match it. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -736,9 +736,12 @@ collection route carry neither header.
   unordered comma-separated set of served authority values using the grammar
   of [address names](#get-v1addressesaddressnames); rows that serve no authority
   match no set. `parent` selects names exactly one label below the supplied
-  ENSIP-15-normalized name by served spelling, including its
-  [rendered-name](glossary.md#rendered-name) rules, not registry topology.
-  `parent=eth` selects second-level `.eth` names and excludes deeper subnames.
+  ENSIP-15-normalized name by labelhash path, not by served spelling. A
+  bracketed labelhash label in `parent` names the node it hashes, and a name is
+  listed whatever text its labels are served under, a
+  [rendered-name](glossary.md#rendered-name) label with no verified text
+  included. `parent=eth` selects second-level `.eth` names and excludes deeper
+  subnames.
   Both filters apply before paging. Empty or invalid parents and invalid
   authority sets return `400 invalid_input`.
 - A proved canonical allocation remains discoverable when current authority is
@@ -765,9 +768,10 @@ collection route carry neither header.
   before selecting at most `page_size + 1` names for composition. A repeated
   request selects at most that many narrow keys per window, then composes only
   the global first `page_size + 1` once. Namespace/deadline and
-  namespace/authority/deadline indexes support both families. Composition is
-  bounded even when a sparse parent filter or many names sharing a deadline
-  require inspecting more narrow keys; the database chooses the query plan.
+  namespace/authority/deadline indexes support both families, and a parent key
+  index reads the names below a parent with few names below it. Composition is
+  bounded even when many names sharing a deadline require inspecting more
+  narrow keys. With `parent`, the database chooses the query plan for each request's values.
   A mismatch between a selected stored deadline and its composed row fails
   with `500 internal_error` rather than returning a shortened page.
 - Each page reads one publication snapshot. Its cursor binds the date family,
@@ -3574,7 +3578,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_owner. Former owners accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. relation=former_owner accepts only omitted dedupe or dedupe=name; dedupe=registration returns 400 invalid_input. |
-| `include` | query | array of enum `counts`, `role_summary`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the candidate cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner. |
+| `include` | query | array of enum `counts`, `role_summary`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the candidate cap, up to 10,000 candidate names, and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -3619,10 +3623,10 @@ introduces it rebuilds Project from full history before serving the option; see
   `authority` (Basenames rows and ownerless registry rows) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
-  `parent` keeps only names exactly one label below the given name, by the
-  rule it has on [`GET /v1/names`](#get-v1names): the value is normalized as a
-  path name, and a row matches by its normalized name spelling, not by node or
-  registry topology, so `parent=eth` keeps the `.eth` second-level names and
+  `parent` keeps only names exactly one label below the given name. The value
+  is normalized as a path name, and a row matches by its normalized name
+  spelling, not by node or registry topology. [`GET /v1/names`](#get-v1names)
+  matches by labelhash path instead. Here `parent=eth` keeps the `.eth` second-level names and
   no deeper subname, wrapped or not (see the
   [naming dictionary](api-v1.md#naming-dictionary)). An ENSv1 registry child
   with no name row matches by the name it serves, which spells an unknown
@@ -3641,7 +3645,9 @@ introduces it rebuilds Project from full history before serving the option; see
   its cursor, with the same relations, `q` and `match` predicate, `authority`
   set, `parent`, migration predicate and deduplication as the rows. It is exact
   when the address has at most 1,000 candidate names, and `null` above that
-  unless `include=total_count` asks for the exact total. The candidate names are
+  unless `include=total_count` asks for the exact total. With
+  `include=total_count` it is exact up to 10,000 candidate names and `null`
+  above that. The candidate names are
   counted before the `q`, `match`, `authority`, `parent` and migration filters:
   the names on which some admission could make the address the `owner` or
   `manager` (the address index of
@@ -3650,16 +3656,18 @@ introduces it rebuilds Project from full history before serving the option; see
   `role_holder` (as it does by default), the names of registrations on which it
   holds an ENSv2 registry role, all in the requested namespace. An address with
   more than 1,000 candidates therefore reports `null` even when its filtered
-  collection is small. Above the cap a page composes candidates in sort order,
+  collection is small, and one with more than 10,000 does so with
+  `include=total_count` too. Above the cap a page composes candidates in sort order,
   in growing batches, and stops once later candidates can no longer change it,
   so an ordinary page composes about as many names as it returns. A filter that
   matches few names can still compose every candidate. `sort=created_at`
   always composes every candidate first, a batch at a time, because a name's
   first observation can be dated by a registrar event bound to it only later.
-  `include=total_count` does the same to count every group. The page itself
-  is then composed in sort order as above. On an address with tens of
-  thousands of names these reads can reach the request deadline
-  (`408 request_timeout`).
+  `include=total_count` does the same to count every group, on an address
+  with at most 10,000 candidates. Above that it composes nothing for the
+  count. The page itself is then composed in sort order as above.
+  `sort=created_at` on an address with tens of thousands of names can still
+  reach the request deadline (`408 request_timeout`).
   The flag changes no row, order or cursor and does not bind cursors, so a
   client can request it on the first page only.
   `owner` also lists names with no token for their registry owner, such as
@@ -3667,15 +3675,17 @@ introduces it rebuilds Project from full history before serving the option; see
   counts those as well. For the registrations an address holds, add
   `parent=eth`: `GET /v1/addresses/{address}/names?relation=owner&parent=eth&dedupe=registration&page_size=1&include=total_count`
   returns a `page.total_count` with one entry per `.eth` registration the
-  address holds, a wrapped `.eth` name once, and no subname;
+  address holds, a wrapped `.eth` name once, and no subname, for an address
+  with at most 10,000 candidate names and `null` above that;
   `parent=base.eth&namespace=basenames` counts Basenames registrations. The count
   covers the registrations this route lists: it misses a `.eth` name with no name
   surface that `registerOnly` granted onto a registry record another address owns
   (a known residual below), and it lists no Basenames registry child without a name
   row. A name
   count uses `dedupe=name`.
-  With `include=total_count` this GET route supplies exact totals even for
-  single relations whose `POST /v1/lookup` result count remains unknown.
+  With `include=total_count` this GET route supplies exact totals, up to
+  10,000 candidate names, even for single relations whose `POST /v1/lookup`
+  result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
   the complete `q` value as an ENSIP-15 name prefix and normalizes it with the
   same normalizer used for indexed names before comparing it directly with the
@@ -4880,7 +4890,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
-| `include` | query | array of enum `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests the exact number of bound names. Without it bound_names.page.total_count is null. |
+| `include` | query | array of enum `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests the number of bound names, exact up to 100,000 and null above. Without it bound_names.page.total_count is null. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address} -->
@@ -4976,10 +4986,13 @@ For a registrar lease first identified by a later readable observation, registra
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
   `bound_names.page.total_count` is `null` unless the request has
-  `include=total_count`. Then it is the exact number of names in the whole
+  `include=total_count`. Then it is the number of names in the whole
   listing, counted from the same filtered names as the page on the same
   database snapshot, so it is the same on every page of an unchanged
-  publication, whatever the cursor.
+  publication, whatever the cursor. It is exact up to 100,000 names and
+  `null` above that, on every page. The count reads the listing in page order
+  and stops after 100,001 names. The rows, cursor and `has_more` do not depend
+  on it.
 - Snapshot behavior: the resolver overview and bound names read
   `bigname_phase` projections from one completed projection-phase generation. A row
   target may precede the selected position when the row was unchanged by later
