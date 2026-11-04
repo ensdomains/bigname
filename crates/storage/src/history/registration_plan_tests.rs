@@ -146,7 +146,23 @@ async fn registration_reads_keep_subqueries_off_the_lineage_join() -> Result<()>
                             failures.extend(prefixed(&cell_label, order_failures(&after, order)));
                         }
                         if lineage == Lineage::Inflated {
-                            failures.extend(prefixed(&cell_label, keyed_failures(&after)));
+                            let keyed = keyed_failures(&after);
+                            if !keyed.is_empty() && mode == "force_custom_plan" {
+                                raw_sql("SET enable_seqscan = off")
+                                    .execute(&mut *connection)
+                                    .await?;
+                                let forced =
+                                    explain(connection, mode, &name, &bound.literals, false)
+                                        .await?;
+                                raw_sql("RESET enable_seqscan")
+                                    .execute(&mut *connection)
+                                    .await?;
+                                println!(
+                                    "{cell_label}\n  with enable_seqscan off: {}",
+                                    outline(&forced)
+                                );
+                            }
+                            failures.extend(prefixed(&cell_label, keyed));
                             if cell.previous_hashes && !lineage_scanned(&before) {
                                 failures.push(format!(
                                     "{cell_label}: the previous text probes the inflated lineage, \
@@ -1332,6 +1348,26 @@ fn outline(plan: &Value) -> String {
         }
         if let Some(index) = node["Index Name"].as_str() {
             line.push_str(&format!(" using {index}"));
+        }
+        line.push_str(&format!(
+            " rows={} cost={}..{}",
+            node["Plan Rows"], node["Startup Cost"], node["Total Cost"]
+        ));
+        for key in [
+            "Join Type",
+            "Inner Unique",
+            "Index Cond",
+            "Hash Cond",
+            "Merge Cond",
+            "Join Filter",
+            "Filter",
+        ] {
+            if let Some(text) = node.get(key) {
+                let text = text.to_string();
+                if !text.contains("SubPlan") && text.len() < 400 {
+                    line.push_str(&format!(" {key}={text}"));
+                }
+            }
         }
         for key in ["Filter", "Join Filter"] {
             if node[key]
