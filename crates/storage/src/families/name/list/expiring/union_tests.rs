@@ -44,28 +44,36 @@ async fn expiring_union_seeks_each_window_before_global_order_and_limit() -> Res
     with_database("family_expiring_union", async |connection| {
         super::tests::install_fixture(connection).await?;
         raw_sql("SET enable_seqscan = off").execute(&mut *connection).await?;
+        // A known label spelled as its labelhash, and a label with no preimage, both by position.
+        let bracketed_p = format!("[{}].eth", &super::tests::fixture_labelhash("p")[2..]);
         for descending in [false, true] {
             let order = if descending { NameCurrentListOrder::Desc } else { NameCurrentListOrder::Asc };
             let all = super::tests::listed(connection, descending).await?;
+            let paths: std::collections::HashMap<String, Vec<String>> =
+                super::parent_tests::positioned(connection, crate::NameCurrentDeadline::Expiry, descending)
+                    .await?.into_iter().map(|row| (row.id, row.path)).collect();
             for count in [1, 7, 32] {
                 for (authorities, parent) in [
                     (None, None),
                     (Some(vec!["ens_v1".to_owned()]), Some("eth")),
                     (Some(vec!["ens_v0".to_owned(), "ens_v2".to_owned()]), Some("p.eth")),
                     (None, Some("empty.eth")),
+                    (None, Some(bracketed_p.as_str())),
+                    (None, Some("zz.eth")),
+                    (Some(vec!["ens_v2".to_owned()]), Some("few.eth")),
                 ] {
                     let mut filter = filter(count)?;
                     filter.authorities = authorities;
                     filter.parent = parent.map(str::to_owned);
                     filter.validate_windows()?;
-                    let expected = all.iter().filter(|(id, at, name, _)| {
+                    let expected = all.iter().filter(|(id, at, _, _)| {
                         let at: UnixSeconds = at.parse().unwrap();
                         let n = usize::from_str_radix(id.trim_start_matches("ens:0x"), 16).unwrap();
                         let authority = [Some("ens_v0"), Some("ens_v1"), Some("ens_v2"), None][n % 4];
                         filter.windows.iter().any(|window| window.expires_after.is_none_or(|after| at >= after)
                             && window.expires_before.is_none_or(|before| at < before))
                             && filter.authorities.as_ref().is_none_or(|values| authority.is_some_and(|authority| values.iter().any(|v| v == authority)))
-                            && parent.is_none_or(|parent| name.strip_suffix(&format!(".{parent}")).is_some_and(|label| !label.contains('.')))
+                            && parent.is_none_or(|parent| super::parent_tests::one_below(&paths[id], &super::parent_tests::parent_path(parent)))
                     }).collect::<Vec<_>>();
                     for mode in PLAN_MODES {
                         raw_sql(&format!("SET plan_cache_mode = {mode}")).execute(&mut *connection).await?;
