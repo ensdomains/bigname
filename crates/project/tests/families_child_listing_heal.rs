@@ -265,10 +265,11 @@ async fn heals_the_one_child(fixture: &Fixture) -> Result<()> {
     assert_served(fixture, &name(1)).await
 }
 
-// Label-only row 2: an observation of a label with no name, as an ENSv2 registry's
-// `LabelRegistered` writes one, heals the stored row whose own label it is at its block. A work
-// list that reached labels only through the surfaces of observed names would miss it, and the
-// stored row would differ from a rebuild, which reads the stored preimage.
+// Label-only row 2: an observation of a label with no name heals the stored row whose own label
+// it is at its block. The adapter writes one for a label an ENSv2 registry registers before the
+// registry's parent name is known: the event has no name, and its after state carries the label
+// hash. A work list that reached labels only through the surfaces of observed names would miss
+// it, and the stored row would differ from a rebuild, which reads the stored preimage.
 #[tokio::test]
 async fn a_label_only_observation_heals_a_rows_own_label() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_label_only_own", 20).await?;
@@ -351,22 +352,25 @@ async fn a_label_only_observation_heals_holders_under_every_parent() -> Result<(
     fixture.cleanup().await
 }
 
-// Label-only row 5: a label-only observation of a label no stored row holds derives nothing
-// and changes nothing.
+// Label-only row 5: a label-only observation of a label no stored row holds changes nothing:
+// the row that holds another unknown label keeps it.
 #[tokio::test]
 async fn a_label_only_observation_no_row_holds_changes_nothing() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_label_only_none", 20).await?;
-    let k = labelhash("k");
+    let (k, u) = (labelhash("k"), labelhash("u"));
     preimage(&fixture, &k, "k").await?;
     fixture.surface(&name(1), &node(1)).await?;
     edge(&fixture, (10, 0), 1, 11, &k, OWNER).await?;
+    edge(&fixture, (10, 1), 1, 12, &u, OWNER).await?;
     fixture.apply(11, FamilyMode::Normal).await?;
+    ensure!(unhealed(&fixture, &name(12)).await? == std::slice::from_ref(&u));
     let before = listed(&fixture, &name(1)).await?;
 
     observe_label(&fixture, 12, 0, "z").await?;
     preimage(&fixture, &labelhash("z"), "z").await?;
     fixture.apply(12, FamilyMode::Normal).await?;
     ensure!(listed(&fixture, &name(1)).await? == before);
+    ensure!(unhealed(&fixture, &name(12)).await? == std::slice::from_ref(&u));
     ensure!(journalled(&fixture, 12, "project_child_listing").await? == (0, 0));
     assert_served(&fixture, &name(1)).await?;
     fixture.assert_rebuild_equal(12).await?;
@@ -392,8 +396,8 @@ async fn a_label_observed_alone_and_by_name_in_one_block_heals_once() -> Result<
 }
 
 // Label-only row 7: the block of a label-only observation is undone, as a reorg's undo does, and
-// its replacement at the same height observes the label again: the undo restores the unhealed
-// row byte for byte, and the replacement heals it again.
+// the block is applied again with the label observed again. The undo restores the unhealed row
+// byte for byte, and the second apply heals it again.
 #[tokio::test]
 async fn a_label_only_observation_replayed_after_an_undo_heals_again() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_label_only_undo", 20).await?;

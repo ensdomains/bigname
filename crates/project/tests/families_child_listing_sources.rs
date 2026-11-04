@@ -989,7 +989,7 @@ async fn a_label_observed_alone_on_another_chain_heals_a_holder() -> Result<()> 
 
 // Label-only row 9: the other chain's only observations are label-only, its last at block 6
 // healing a holder here. The read's cutoff counts them, so block 12 reads through block 6, heals
-// the holder and moves the watermark there; a rebuild's pass starts the watermark at block 6 too,
+// the holder and moves the watermark there. A rebuild's pass starts the watermark at block 6 too,
 // the last observation. A cutoff or a start that counted only named observations would stop
 // below block 6, or find none.
 #[tokio::test]

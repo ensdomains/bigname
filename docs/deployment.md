@@ -6222,11 +6222,13 @@ composition pass derives every parent's rows in a children stream after the name
   index on a populated table in its own transaction, so apply it in the redo's maintenance window.
   It resets nothing: the new tables start empty and the redo fills them.
 - Each listing row keeps the label hashes its stored name still spells as `[labelhash]`
-  (`unhealed_labelhashes`), with a GIN index. A preimage observation derives again only the rows
-  that hold one of the observed name's labels, by that index. On mainnet most blocks carry a
-  preimage observation and most labels are unhealed, so selecting by label instead would derive
-  every unspelled name under a shared label, such as every unspelled `.eth` name, at nearly
-  every block.
+  (`unhealed_labelhashes`), with a GIN index. A preimage observation derives again, by that
+  index, only the rows that hold one of its labels. Those are the labels of the observed name, or
+  the one label an observation with no name carries. The adapter writes such an observation for
+  a label whose full name it does not know yet, such as a label an ENSv2 registry registers before
+  the registry's parent name is known. On mainnet most blocks carry a preimage observation and
+  most labels are unhealed, so selecting by label instead would derive every unspelled name under
+  a shared label, such as every unspelled `.eth` name, at nearly every block.
 - A label first learned on another chain reaches the stored name at this chain's next block.
   An imported label reaches it only when its row is derived again for another reason
   (TYR-373/374). Served names heal at read time.

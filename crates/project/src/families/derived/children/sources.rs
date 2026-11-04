@@ -98,7 +98,8 @@ const CUTOFF: &str = "/* project:families.derived.child_listing_source_cutoff */
 
 /// The rows of chain `$1` whose stored name still holds a label chain `$2` observed in blocks
 /// `$3` (exclusive) to `$4`: a label of an observed name, whose surface is probed by its key, or
-/// the label an observation of a label with no name carries in its after state.
+/// the label hash an observation carries in its after state, as an observation of a label with no
+/// name does.
 const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders */
     WITH observation AS MATERIALIZED (
         SELECT event.logical_name_id, event.labelhash
