@@ -633,15 +633,19 @@ Family indexes serve these concrete readers:
   names are composed, and the listing rules run again over them. The page shows each name as
   served, imported preimages included. The capability gate is never stored, because a
   classification can change while no name is composed again. `include=total_count` counts
-  the same names on the same snapshot, with the surface fences as one semi-join, so it reads
-  every listed name of the resolver. The count is sent unprepared, inside a savepoint that sets
-  `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count with the resolver's own
-  values even on a session set to `force_generic_plan`. A cached generic plan guesses a few hundred names and
-  probes every name's surfaces in a nested loop. On the plan test's 1.1 million names the
-  unprepared count takes about 0.4 s and that generic plan about 3.7 s. The unprepared count
-  hashes the surfaces in a parallel semi-join. On those 1.1 million names, with the default
-  `work_mem` and 2 parallel workers, it writes about 243 MB of temp files per count, an amount
-  that grows with the chain's surfaces. Interpret writes a surface's raw bytes and its shadow
+  the same names on the same snapshot with the page's statement under a limit: the same index
+  range in page order, the surface fences as the same scalar subquery, and no cursor. It stops
+  after 100,001 names pass the fences, and the API serves `null` above 100,000. So a count
+  reads index rows in page order until 100,001 pass, whatever the resolver's size. The
+  fences are not written as `EXISTS`, which the planner can run as a semi-join that hashes
+  every surface before the first row, past any limit. The count is sent unprepared, inside a
+  savepoint that sets `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count
+  with the resolver's own values and limit even on a session set to `force_generic_plan`.
+  The savepoint also sets `enable_sort = off`. A resolver whose size the planner estimates
+  below the limit would otherwise be read by a bitmap scan of every listed row, each probed
+  by the fences, and then sorted. Without a sort only the index range in page order meets the
+  count's order.
+  Interpret writes a surface's raw bytes and its shadow
   state in place when it observes a preimage for it, and keeps the surface's block. The summary
   writer reads them as the composed block does (`loaders::surfaces_at`): only when the surface's
   preimage witness is a readable `PreimageObserved` at or below the block. Otherwise the surface

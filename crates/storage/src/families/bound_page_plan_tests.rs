@@ -13,10 +13,16 @@
 //! `project_name_summary_bound_exempt_order_idx`. A page of [`PAGE`] names, first or deep, must
 //! read at most `PAGE + 1` rows of its index under either plan, so the names the gate drops cost
 //! nothing.
+//!
+//! The count reads the same index in the same order under a limit. Capped, it reads at most
+//! `CAP + 1` rows of the index under either plan and runs the surface fences once for each. A
+//! thousand more listed names, after every other in page order, have a surface above the family
+//! marker, so the fences drop them and the uncapped count leaves them out, as the fences written
+//! as `EXISTS` do.
 
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use sqlx::{PgConnection, Row, raw_sql};
+use sqlx::{Connection, PgConnection, Row, raw_sql};
 
 use super::{
     id_index_plan_tests::{PLAN_MODES, with_database},
@@ -39,6 +45,10 @@ const EXEMPT_INDEX: &str = "project_name_summary_bound_exempt_order_idx";
 const ETH: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 /// The raw name listed in both namespaces, exempt in both.
 const TWIN: i64 = 900_000;
+/// The cap of the capped count legs, below both listed totals.
+const CAP: i64 = 50_000;
+/// Listed names whose surface is above the family marker, exempt, sorting after every other.
+const FENCED: i64 = 1_000;
 
 fn resolver(digit: char) -> String {
     format!("0x{}", digit.to_string().repeat(40))
@@ -174,7 +184,7 @@ async fn a_bound_name_page_reads_one_page_of_summary_rows_at_a_million_names() -
                     );
                 }
             }
-            count(connection, supported, total).await?;
+            count(connection, (supported, index, total), &mut failures).await?;
         }
         ensure!(failures.is_empty(), "{}", failures.join("\n\n"));
         reader_count(connection).await
@@ -182,64 +192,175 @@ async fn a_bound_name_page_reads_one_page_of_summary_rows_at_a_million_names() -
     .await
 }
 
-/// The prepared count reads every listed name once under either plan, and counts `total`.
-async fn count(connection: &mut PgConnection, supported: bool, total: i64) -> Result<()> {
+/// The prepared count under either plan, with sorts off as the reader's savepoint sets them, for
+/// a resolver whose support is `supported`, whose listing reads `index` and holds `total` names.
+/// Uncapped it counts `total`, as the fences written as `EXISTS` do. Capped it counts
+/// `CAP + 1`: a `Limit` holds the scan of `index` to `CAP + 1` rows, the other index is not
+/// read, and the fences run as a subplan once for each row, never as a join over the surfaces.
+async fn count(
+    connection: &mut PgConnection,
+    (supported, index, total): (bool, &str, i64),
+    failures: &mut Vec<String>,
+) -> Result<()> {
     raw_sql(&format!(
-        "PREPARE bound_count_{supported} (text, text, text) AS {}",
+        "PREPARE bound_count_{supported} (text, text, text, bigint) AS {}",
         bound_count_sql(supported)
     ))
     .execute(&mut *connection)
     .await
     .context("prepare the bound-name count")?;
-    let count_values = format!("'{CHAIN}', '{}', NULL", resolver('a'));
+    raw_sql("SET enable_sort = off")
+        .execute(&mut *connection)
+        .await?;
     for mode in PLAN_MODES {
         raw_sql(&format!("SET plan_cache_mode = {mode}"))
             .execute(&mut *connection)
             .await?;
-        let started = std::time::Instant::now();
-        let counted: i64 =
-            sqlx::query_scalar(&format!("EXECUTE bound_count_{supported} ({count_values})"))
-                .fetch_one(&mut *connection)
-                .await?;
-        let elapsed = started.elapsed().as_millis();
-        let text: Vec<String> = raw_sql(&format!(
-            "EXPLAIN (ANALYZE, BUFFERS) EXECUTE bound_count_{supported} ({count_values})"
-        ))
-        .fetch_all(&mut *connection)
-        .await?
-        .iter()
-        .map(|row| row.try_get(0).map_err(Into::into))
-        .collect::<Result<_>>()?;
-        eprintln!(
-            "BOUND COUNT (supported {supported}, {mode}) of {counted} names: {elapsed} ms\n{}",
-            text.join("\n")
-        );
-        ensure!(
-            counted == total,
-            "counted {counted} under {mode}, supported {supported}"
-        );
+        for (limit, expected) in [(None, total), (Some(CAP + 1), CAP + 1)] {
+            let label = format!("count (supported {supported}, {mode}, limit {limit:?})");
+            let values = format!(
+                "'{CHAIN}', '{}', NULL, {}",
+                resolver('a'),
+                limit.map_or("NULL".to_owned(), |limit| limit.to_string())
+            );
+            let started = std::time::Instant::now();
+            let counted: i64 =
+                sqlx::query_scalar(&format!("EXECUTE bound_count_{supported} ({values})"))
+                    .fetch_one(&mut *connection)
+                    .await?;
+            eprintln!(
+                "BOUND {label} of {counted} names: {} ms",
+                started.elapsed().as_millis()
+            );
+            if counted != expected {
+                failures.push(format!("{label}: counted {counted}, expected {expected}"));
+            }
+            if limit.is_none() {
+                continue;
+            }
+            let plan: Value = sqlx::query_scalar::<_, sqlx::types::Json<Value>>(&format!(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE bound_count_{supported} ({values})"
+            ))
+            .fetch_one(&mut *connection)
+            .await
+            .with_context(|| format!("explain the {label}"))?
+            .0;
+            let read = visited(&plan, index);
+            let other = visited(&plan, ORDER_INDEX) + visited(&plan, EXEMPT_INDEX) - read;
+            let scanned = sequential_scans(&plan);
+            let surfaces = scans_of(&plan, "name_surfaces");
+            let probes: i64 = nodes(&plan)
+                .iter()
+                .filter(|node| node["Parent Relationship"] == "SubPlan")
+                .map(|node| node["Actual Loops"].as_i64().unwrap_or_default())
+                .sum();
+            if read == 0
+                || probes == 0
+                || read > CAP + 1
+                || other > 0
+                || !scanned.is_empty()
+                || !limits(&plan, index)
+                || surfaces.is_empty()
+                || surfaces.iter().any(|(_, held)| !held)
+                || probes > CAP + 1
+                || nodes(&plan).iter().any(|node| node["Join Type"] == "Semi")
+            {
+                failures.push(format!(
+                    "{label}: read {read} rows of {index}, {other} of the other index, scanned \
+                     {scanned:?}, probed the surfaces {probes} times\n{plan:#}"
+                ));
+            }
+            eprintln!(
+                "BOUND {label}: {:.1} ms, {read} rows of {index}",
+                plan[0]["Execution Time"].as_f64().unwrap_or_default()
+            );
+        }
     }
-    raw_sql("RESET plan_cache_mode")
+    raw_sql("RESET plan_cache_mode; RESET enable_sort")
         .execute(&mut *connection)
         .await?;
+    let existing: i64 = sqlx::query_scalar(&exists_count_sql(supported))
+        .bind(CHAIN)
+        .bind(resolver('a'))
+        .bind(None::<&str>)
+        .persistent(false)
+        .fetch_one(&mut *connection)
+        .await?;
+    if existing != total {
+        failures.push(format!(
+            "the fences written as EXISTS count {existing} (supported {supported}), the listing \
+             holds {total}"
+        ));
+    }
     Ok(())
 }
 
-/// The prepared count's generic plan probes each name's surfaces in a nested loop, so the reader
-/// sends the count unprepared. It is planned with the resolver's own values on every run, past
-/// the five runs after which PostgreSQL may switch a prepared statement to its generic plan.
+/// The count statement as it was before it took a limit: the same listed rows, with the fences
+/// written as `EXISTS`. The capped statement must count the same names below its cap.
+fn exists_count_sql(supported: bool) -> String {
+    let gate = if supported {
+        ""
+    } else {
+        "AND summary.resolver_support_exempt"
+    };
+    format!(
+        "SELECT count(*)
+         FROM bigname_phase.project_name_summary summary
+         WHERE summary.resolver_chain_id = $1
+           AND summary.resolver_address = lower($2)
+           AND summary.resolver_listing_eligible
+           AND octet_length(summary.order_name) <= 2000
+           {gate}
+           AND ($3::text IS NULL OR summary.namespace = $3)
+           AND EXISTS (
+             SELECT 1 FROM bigname_phase.name_surfaces surface
+             JOIN bigname_phase.chain_lineage lineage
+               ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+             JOIN bigname_phase.project_family_marker marker
+               ON marker.chain_id = surface.chain_id
+             WHERE surface.logical_name_id = summary.logical_name_id
+               AND surface.visibility_state = 'active'
+               AND surface.block_number <= marker.current_block_number
+               AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))"
+    )
+}
+
+/// The reader sends the count unprepared, so it is planned with the resolver's own values and
+/// its limit on every run, past the five runs after which PostgreSQL may switch a prepared
+/// statement to its generic plan. It reads `CAP + 1` names under the cap. Under a namespace the
+/// limit applies to that namespace's names: 0xaa.. lists one name in `basenames`, exempt, and
+/// none in a namespace it does not serve.
 async fn reader_count(connection: &mut PgConnection) -> Result<()> {
     let address = resolver('a');
+    let cap = Some(u64::try_from(CAP)?);
     for run in 1..=6 {
         let started = std::time::Instant::now();
-        let total = bound_count(&mut *connection, (CHAIN, &address, None), true).await?;
+        let total = bound_count(&mut *connection, (CHAIN, &address, None), true, cap).await?;
         eprintln!(
             "BOUND COUNT (reader, run {run}) of {total} names: {} ms",
             started.elapsed().as_millis()
         );
         ensure!(
-            i64::try_from(total)? == LISTED + TEXTLESS + 1,
+            i64::try_from(total)? == CAP + 1,
             "the reader counted {total} on run {run}"
+        );
+    }
+    for (supported, namespace, expected) in [
+        (true, "basenames", 1),
+        (false, "basenames", 1),
+        (true, "unserved", 0),
+    ] {
+        let total = bound_count(
+            &mut *connection,
+            (CHAIN, &address, Some(namespace)),
+            supported,
+            cap,
+        )
+        .await?;
+        ensure!(
+            total == expected,
+            "the reader counted {total} in {namespace} (supported {supported})"
         );
     }
     let cached: i64 = sqlx::query_scalar(
@@ -260,6 +381,7 @@ async fn reader_count(connection: &mut PgConnection) -> Result<()> {
     .bind(CHAIN)
     .bind(&address)
     .bind(None::<&str>)
+    .bind(CAP + 1)
     .persistent(false)
     .fetch_all(&mut *connection)
     .await?;
@@ -269,6 +391,39 @@ async fn reader_count(connection: &mut PgConnection) -> Result<()> {
         text.contains(&format!("'{CHAIN}'::text")),
         "the reader's count was planned without the resolver's values\n{text}"
     );
+    // The reader's own savepoint reads either index in page order under the limit, with no
+    // bitmap scan or sort, whatever the planner estimates for the resolver.
+    for (supported, index) in [(true, ORDER_INDEX), (false, EXEMPT_INDEX)] {
+        let plan =
+            bound_count_plan(&mut *connection, (CHAIN, &address, None), supported, cap).await?;
+        ensure!(
+            plan.contains("Limit")
+                && plan.contains(&format!("Index Scan using {index}"))
+                && !plan.contains("Sort")
+                && !plan.contains("Bitmap"),
+            "the reader's count (supported {supported}) does not read {index} in order\n{plan}"
+        );
+    }
+    let setting: String = sqlx::query_scalar("SHOW enable_sort")
+        .fetch_one(&mut *connection)
+        .await?;
+    ensure!(setting == "on", "the count left enable_sort {setting}");
+    // Inside a read's transaction the count runs in a savepoint. Rolling it back restores the
+    // setting for the rest of the read.
+    let mut read = connection.begin().await?;
+    let total = bound_count(&mut read, (CHAIN, &address, None), true, cap).await?;
+    ensure!(
+        i64::try_from(total)? == CAP + 1,
+        "the reader counted {total} inside a read"
+    );
+    let setting: String = sqlx::query_scalar("SHOW enable_sort")
+        .fetch_one(&mut *read)
+        .await?;
+    ensure!(
+        setting == "on",
+        "the count left enable_sort {setting} inside the read"
+    );
+    read.rollback().await?;
     forced_generic_count(connection).await
 }
 
@@ -276,16 +431,17 @@ async fn reader_count(connection: &mut PgConnection) -> Result<()> {
 /// custom plan, and keeps its own setting after the count.
 async fn forced_generic_count(connection: &mut PgConnection) -> Result<()> {
     let address = resolver('a');
+    let cap = Some(u64::try_from(CAP)?);
     raw_sql("SET plan_cache_mode = force_generic_plan")
         .execute(&mut *connection)
         .await?;
     let started = std::time::Instant::now();
-    let total = bound_count(&mut *connection, (CHAIN, &address, None), true).await?;
+    let total = bound_count(&mut *connection, (CHAIN, &address, None), true, cap).await?;
     eprintln!(
         "BOUND COUNT (reader, session force_generic_plan) of {total} names: {} ms",
         started.elapsed().as_millis()
     );
-    let plan = bound_count_plan(&mut *connection, (CHAIN, &address, None), true).await?;
+    let plan = bound_count_plan(&mut *connection, (CHAIN, &address, None), true, cap).await?;
     let setting: String = sqlx::query_scalar("SHOW plan_cache_mode")
         .fetch_one(&mut *connection)
         .await?;
@@ -294,7 +450,7 @@ async fn forced_generic_count(connection: &mut PgConnection) -> Result<()> {
         .await?;
     eprintln!("BOUND COUNT (reader plan, session force_generic_plan)\n{plan}");
     ensure!(
-        i64::try_from(total)? == LISTED + TEXTLESS + 1,
+        i64::try_from(total)? == CAP + 1,
         "the reader counted {total} under a forced generic plan"
     );
     ensure!(
@@ -348,7 +504,14 @@ async fn install(connection: &mut PgConnection) -> Result<()> {
              CREATE TEMP TABLE fixture_textless AS
              SELECT n, '0xf' || lpad(to_hex(n), 63, '0') AS namehash,
                     lpad(to_hex(32256 + n), 64, '0') AS label
-             FROM generate_series(1, {TEXTLESS}) n"
+             FROM generate_series(1, {TEXTLESS}) n;
+             INSERT INTO chain_lineage
+                 (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+             VALUES ('{CHAIN}', 'block-2', 2, to_timestamp(2), 'canonical');
+             CREATE TEMP TABLE fixture_fenced AS
+             SELECT n, '0xe' || lpad(to_hex(n), 63, '0') AS namehash,
+                    'zfenced' || lpad(n::text, 7, '0') || '.eth' AS raw_name
+             FROM generate_series(1, {FENCED}) n"
         ),
         format!(
             "{surfaces}
@@ -387,7 +550,15 @@ async fn install(connection: &mut PgConnection) -> Result<()> {
              SELECT '{CHAIN}', 'basenames:' || namehash, 'basenames', false, false, false,
                     false, '{CHAIN}', '{listed}', true, true, raw_name, raw_name, namehash
              FROM fixture_name WHERE n = {TWIN};
-             DROP TABLE fixture_name, fixture_textless"
+             {surfaces}
+             SELECT 'ens:' || namehash, 'ens', raw_name, ARRAY[raw_name], '\\x00', namehash,
+                    ARRAY[namehash], 'v1', 'active', '{CHAIN}', 'block-2', 2, 'canonical'
+             FROM fixture_fenced;
+             {summaries}
+             SELECT '{CHAIN}', 'ens:' || namehash, 'ens', false, false, false, false, '{CHAIN}',
+                    '{listed}', true, true, raw_name, raw_name, namehash
+             FROM fixture_fenced;
+             DROP TABLE fixture_name, fixture_textless, fixture_fenced"
         ),
     ];
     for statement in statements {
@@ -487,4 +658,43 @@ fn sequential_scans(plan: &Value) -> Vec<String> {
         .filter_map(|node| node["Relation Name"].as_str().map(str::to_owned))
         .filter(|relation| relation == "project_name_summary" || relation == "name_surfaces")
         .collect()
+}
+
+/// Whether a `Limit` holds a scan of `index`, outside any subplan below it.
+fn limits(plan: &Value, index: &str) -> bool {
+    nodes(plan)
+        .into_iter()
+        .filter(|node| node["Node Type"] == "Limit")
+        .any(|limit| {
+            let mut pending = vec![limit];
+            while let Some(node) = pending.pop() {
+                if node["Index Name"] == index {
+                    return true;
+                }
+                if let Some(children) = node["Plans"].as_array() {
+                    pending.extend(
+                        children
+                            .iter()
+                            .filter(|child| child["Parent Relationship"] != "SubPlan"),
+                    );
+                }
+            }
+            false
+        })
+}
+
+/// The scans of `relation`, each with whether a subplan holds it.
+fn scans_of<'a>(plan: &'a Value, relation: &str) -> Vec<(&'a Value, bool)> {
+    let mut out = Vec::new();
+    let mut pending = vec![(&plan[0]["Plan"], false)];
+    while let Some((node, held)) = pending.pop() {
+        let held = held || node["Parent Relationship"] == "SubPlan";
+        if node["Relation Name"] == relation {
+            out.push((node, held));
+        }
+        if let Some(children) = node["Plans"].as_array() {
+            pending.extend(children.iter().map(|child| (child, held)));
+        }
+    }
+    out
 }
