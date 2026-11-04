@@ -5755,7 +5755,7 @@ composition pass derives every parent's rows in a children stream after the name
   every block.
 - A label first learned on another chain reaches the stored name at this chain's next block.
   An imported label reaches it only when its row is derived again for another reason
-  (TYR-373, TYR-374). Served names heal at read time.
+  (TYR-373/374). Served names heal at read time.
 - Each chain keeps, per other chain, the highest block whose preimage observations its family step
   has read (`project_child_preimage_watermark`), journalled with its block. The watermark never
   passes the other chain's finalized block (its safe block when finalized is unset), so a reorg of
@@ -5781,11 +5781,11 @@ composition pass derives every parent's rows in a children stream after the name
   `WARN` naming the chain, block, parent and row count, so a large undo journal can be traced to
   its block.
 - The subnames page, the registry labels page and the child counts read the stored rows.
-  The API startup preflight requires both tables, so an API of this build refuses to start on a
-  schema without them.
-- The readers need `SELECT` on both tables. Before restarting an existing API role, apply the
-  grant below on the primary and let it replay on any serving standby. Fresh role setup above
-  already includes it. Startup preflight refuses an API role without it.
+  The API startup preflight requires the listing and count tables, so an API of this build
+  refuses to start on a schema without them.
+- The readers need `SELECT` on the listing and count tables. Before restarting an existing API
+  role, apply the grant below on the primary and let it replay on any serving standby. Fresh role
+  setup above already includes it. Startup preflight refuses an API role without it.
 
   ```sql
   GRANT SELECT ON bigname_phase.project_child_listing, bigname_phase.project_child_listing_count
