@@ -147,11 +147,17 @@ pub(crate) fn parent_labelhash_path(parent: &str) -> Vec<String> {
 /// labelhash path is `path`: its labelhashes after the first are `path`, compared without
 /// regard to hex case, whatever text its labels are served under. The first conjunct is the
 /// key of `name_surfaces_project_parent_key_idx`, a hash of each stored labelhash with its
-/// low 32 bits cleared. The second decides, so a hash collision never lists a name. It is
-/// wrapped in `COALESCE` so the planner does not count it again. An equality on an expression
-/// with no statistics is estimated to keep one row in two hundred, which would make a parent
-/// above most names, such as `eth`, look sparse. A boolean expression is estimated to keep
-/// half, and the key's own statistics then decide the plan.
+/// low 32 bits cleared. The second decides, so a hash collision never lists a name.
+///
+/// The second conjunct is wrapped in `COALESCE` on purpose, so keep it wrapped. A row that
+/// matches the key also matches the path unless two paths' hashes collide, so the recheck only
+/// excludes collisions and its true selectivity is about 1. PostgreSQL has no statistics for
+/// the expression and estimates a bare equality at 0.005. That makes a parent above most names,
+/// such as `eth`, look sparse, and it is then planned through the key and a sort of every name
+/// below it. PostgreSQL estimates the `COALESCE` at 0.5, so the key's own statistics decide
+/// the plan. The rows are unchanged, because inside the top-level `AND` a NULL and a FALSE both
+/// exclude the row. The expiry and grace plan tests in
+/// `families/name/list/expiring/parent_tests.rs` guard this.
 pub(crate) fn push_parent_key_predicate(
     builder: &mut QueryBuilder<'_, Postgres>,
     surface: &str,
