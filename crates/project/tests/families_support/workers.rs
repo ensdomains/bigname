@@ -1,7 +1,7 @@
 //! What the composition pass worker tests (families_compose_workers.rs) watch a pass with: a
 //! connection of the test's own, a hold that stops one names chunk at its commit until the test
-//! lets it go, a log of every work list row a committed chunk marked composed, and a sampler of
-//! the lock waits of the database's backends.
+//! lets it go, a log of every work list row a committed chunk marked composed, a sampler of the
+//! lock waits of the database's backends, and the fixture's sessions left in a transaction.
 use std::{
     sync::{
         Arc,
@@ -14,7 +14,7 @@ use anyhow::{Result, ensure};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions, raw_sql};
 use tokio::task::JoinHandle;
 
-use super::{CHAIN, Fixture};
+use super::{CHAIN, FIXTURE_APPLICATION, Fixture};
 
 /// A pool of the test's own, beside the fixture's pool the pass uses, for the test's reads. A
 /// hold takes a connection from it and detaches it, so the hold's session counts against
@@ -22,8 +22,30 @@ use super::{CHAIN, Fixture};
 pub async fn side(fixture: &Fixture) -> Result<PgPool> {
     Ok(PgPoolOptions::new()
         .max_connections(3)
-        .connect_with(fixture.pool.connect_options().as_ref().clone())
+        .connect_with(
+            fixture
+                .pool
+                .connect_options()
+                .as_ref()
+                .clone()
+                .application_name("families_side"),
+        )
         .await?)
+}
+
+/// The fixture's sessions in a transaction, each as its pid, state, transaction start and
+/// statement: once a run has returned, a chunk the pass left open or a read the fixture left
+/// open. The test's own sessions are not counted.
+pub async fn open_transactions(side: &PgPool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT format('%s %s since %s: %s', pid, state, xact_start, left(query, 200))
+         FROM pg_stat_activity
+         WHERE datname = current_database() AND application_name = $1
+           AND xact_start IS NOT NULL",
+    )
+    .bind(FIXTURE_APPLICATION)
+    .fetch_all(side)
+    .await?)
 }
 
 /// The lowest work list serial, of the ids a lookup name row is composed for, as a SQL
