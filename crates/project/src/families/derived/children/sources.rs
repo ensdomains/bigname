@@ -336,9 +336,7 @@ pub(crate) async fn seed(
             continue;
         };
         let token = input::token_in(transaction, &source).await?;
-        let Some(revision) = token.revision() else {
-            continue;
-        };
+        let revision = token.revision().unwrap_or((None, None));
         let top: Option<i64> = sqlx::query_scalar(TOP)
             .bind(&source)
             .fetch_one(&mut **transaction)
