@@ -785,7 +785,7 @@ Rules:
   `resolver` anchors the read. The exception is a
   `/v1/events` read that only `resolver` or `contract_address` anchors, with
   no `name`, `registration_id`, or `address`. There `include=total_count`
-  counts exactly up to 100,000 rows and reports `null` beyond. On name history with
+  counts exactly up to 10,000 rows and reports `null` beyond. On name history with
   `include=child_registrations` the count covers the name's rows and its direct
   child registration rows together, each event once. It is always `null` for unanchored event
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
@@ -3511,7 +3511,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | --- | --- | --- | --- |
 | `labels` | nullable integer | optional | Current label count; only with include=counts. Exact when the registry holds at most 10,000 registrations under its name, and null otherwise or for a historical selection, where a current label count is not meaningful. |
 | `roles` | integer | optional | Count of observed nonzero declared role assignments; only with include=counts. |
-| `events` | nullable integer | optional | Count of product-visible events emitted by the registry, exact up to 100,000 and null above; only with include=counts. |
+| `events` | nullable integer | optional | Count of product-visible events emitted by the registry, exact up to 10,000 and null above; only with include=counts. |
 
 ### ReferencedBy
 
