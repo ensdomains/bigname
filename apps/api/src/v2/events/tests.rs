@@ -484,13 +484,14 @@ async fn events_summary_mode_caps_only_emitter_anchored_opt_ins() {
             },
             HistorySummaryMode::None,
         ),
+        // Without the flag no read counts, whatever anchors it.
         (
             "resolver without the flag",
             RawQueryParams {
                 resolver: some(RESOLVER),
                 ..RawQueryParams::default()
             },
-            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP),
+            HistorySummaryMode::None,
         ),
         (
             "contract_address without the flag",
@@ -506,7 +507,33 @@ async fn events_summary_mode_caps_only_emitter_anchored_opt_ins() {
                 name: some("alice.eth"),
                 ..RawQueryParams::default()
             },
-            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP),
+            HistorySummaryMode::None,
+        ),
+        (
+            "registration_id without the flag",
+            RawQueryParams {
+                registration_id: some(REGISTRATION_ID),
+                include: some("data,raw"),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::None,
+        ),
+        (
+            "address without the flag",
+            RawQueryParams {
+                address: some(ADDRESS),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::None,
+        ),
+        (
+            "resolver and name without the flag",
+            RawQueryParams {
+                resolver: some(RESOLVER),
+                name: some("alice.eth"),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::None,
         ),
     ];
     with_emitter_count_cap(12_345, async {

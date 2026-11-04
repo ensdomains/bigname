@@ -735,7 +735,7 @@ async fn record_events_carry_their_locator_and_no_name() -> Result<()> {
     assert_eq!(record_rows.len(), 7);
     assert!(record_rows.iter().all(|row| row.get("name").is_none()
         && row["data"]["record_id"].is_string()));
-    for route in ["/v1/events?name=legal.eth", "/v1/names/legal.eth/history?scope=both"] {
+    for route in ["/v1/events?name=legal.eth&include=total_count", "/v1/names/legal.eth/history?scope=both"] {
         let query = format!("{route}&record_key=text:description&order=asc");
         let (ids, total) = hkw_baseline(&database, &query).await?;
         assert_eq!(total, json!(3));

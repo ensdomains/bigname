@@ -3134,6 +3134,12 @@ by another relation stops Project instead. The
 [walk index set README](../ops/walk-index-set/README.md#the-phase-runners-rebuild) describes the
 rebuild, its log lines and its failures.
 
+The API reads the same state at startup and refuses to start while any of these indexes is
+missing, not valid and ready, or under a name another relation holds, unless
+`BIGNAME_API_WALK_INDEX_SET_CHECK=warn` (`apps/api/src/startup_preflight.rs`,
+[the API's startup check](../ops/walk-index-set/README.md#the-apis-startup-check)). It reads
+an index with another definition as found, as the runner does.
+
 ## Projection publication
 
 Project is the only projection writer. A normal follow block atomically commits

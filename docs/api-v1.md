@@ -777,12 +777,12 @@ Rules:
   deduplicated entries before the cursor.
   Address history returns `total_count=null` by default; `include=total_count`
   requests an exact total over the same filters and published snapshot as its
-  page. Other anchored history collections (name history and
-  `/v1/events` with a `name`, `registration_id`, `address`, or `resolver`
-  anchor) populate
-  it with a capped count over the page's exact filters: exact up to 10,000
-  product-visible rows and `null` beyond by default; `include=total_count`
-  requests an exact uncapped count on anchored history. The exception is a
+  page. Name history populates it with a capped count over the page's exact
+  filters: exact up to 10,000 product-visible rows and `null` beyond by
+  default. `include=total_count` requests an exact uncapped count.
+  `/v1/events` populates it only with `include=total_count`, which requests an
+  exact uncapped count when a `name`, `registration_id`, `address`, or
+  `resolver` anchors the read. The exception is a
   `/v1/events` read that only `resolver` or `contract_address` anchors, with
   no `name`, `registration_id`, or `address`. There `include=total_count`
   counts exactly up to 10,000 rows and reports `null` beyond. On name history with
@@ -863,6 +863,9 @@ Rules:
 - There is no `meta` query parameter and no stripped envelope variant.
 - There are no `declared_state`/`verified_state` parallel trees and no `both`
   mode.
+- Cross-origin requests are allowed from any origin, without credentials. A
+  CORS preflight answer carries `Access-Control-Max-Age: 86400`, so a browser
+  may reuse it for up to a day, or for its own shorter limit.
 
 ## Field Budgets
 
