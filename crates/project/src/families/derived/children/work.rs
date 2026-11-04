@@ -36,12 +36,13 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
         WHERE journal.family = 'project_lifecycle_event'
     ),
     -- Each observation state is probed on its own, as the summary work list's `revealed` does,
-    -- so `normalized_events_projection_idx` bounds the range to the blocks.
+    -- so `normalized_events_projection_idx` bounds the range to the blocks. An observation of a
+    -- label with no name has no `logical_name_id` and carries its label hash in its after state.
     revealed AS (
-        SELECT revealed_event.logical_name_id
+        SELECT revealed_event.logical_name_id, revealed_event.labelhash
         FROM unnest('{canonical,safe,finalized}'::canonicality_state[]) AS state(canonicality_state)
         CROSS JOIN LATERAL (
-            SELECT observed.logical_name_id
+            SELECT observed.logical_name_id, observed.after_state ->> 'labelhash' AS labelhash
             FROM normalized_events observed
             WHERE observed.event_kind = 'PreimageObserved'
               AND observed.canonicality_state = state.canonicality_state
@@ -49,15 +50,20 @@ const WORK_LIST: &str = r#"/* project:families.derived.child_listing_work */
               AND observed.block_number > $3 AND observed.block_number <= $2
             OFFSET 0
         ) revealed_event
-        WHERE revealed_event.logical_name_id IS NOT NULL
     ),
-    -- The labels of the observed names, as the stored rows keep them: a label observed for one
-    -- name spells every other name that carries it.
+    -- The observed labels, as the stored rows keep them: those of each observed name's surface,
+    -- and the label an observation names directly. A label observed for one name spells every
+    -- other name that carries it.
     observed AS MATERIALIZED (
-        SELECT array_agg(DISTINCT lower(label.labelhash)) AS labelhashes
-        FROM revealed
-        JOIN name_surfaces surface ON surface.logical_name_id = revealed.logical_name_id
-        CROSS JOIN LATERAL unnest(surface.labelhashes) label (labelhash)
+        SELECT array_agg(DISTINCT label.labelhash) AS labelhashes
+        FROM (
+            SELECT lower(surface_label.labelhash) AS labelhash
+            FROM revealed
+            JOIN name_surfaces surface ON surface.logical_name_id = revealed.logical_name_id
+            CROSS JOIN LATERAL unnest(surface.labelhashes) surface_label (labelhash)
+            UNION ALL
+            SELECT lower(revealed.labelhash) FROM revealed WHERE revealed.labelhash IS NOT NULL
+        ) label
     ),
     children AS (
         SELECT name.id FROM unnest($5::text[]) name (id)
