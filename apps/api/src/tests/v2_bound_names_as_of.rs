@@ -263,6 +263,7 @@ async fn as_of_state(database: &TestDatabase) -> Result<Value> {
         None,
         1_000,
         true,
+        None,
     )
     .await?;
     let keys: Vec<(String, String)> = page
@@ -663,6 +664,7 @@ async fn a_shadow_keeps_a_summary_row_that_no_bound_name_reader_lists() -> Resul
         None,
         1_000,
         true,
+        None,
     )
     .await?;
     assert!(page.rows.iter().all(|name| name.row.logical_name_id != paging.first));

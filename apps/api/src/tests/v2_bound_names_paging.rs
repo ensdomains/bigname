@@ -263,6 +263,7 @@ async fn a_bound_name_page_composes_only_its_names_among_many_unlisted_names() -
                 cursor.as_ref(),
                 2,
                 false,
+                None,
             ),
         )
         .await?;

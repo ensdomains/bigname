@@ -561,7 +561,7 @@ async fn the_bound_name_listing_refuses_after_the_migration_until_the_rebuild() 
     fixture.apply(7, FamilyMode::Normal).await?;
     let listing = |pool: PgPool| async move {
         bigname_storage::families::name::load_family_bound_names(
-            &pool, CHAIN, RESOLVER, None, None, 10, true,
+            &pool, CHAIN, RESOLVER, None, None, 10, true, None,
         )
         .await
     };
