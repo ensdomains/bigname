@@ -411,7 +411,7 @@ async fn reader_count(connection: &mut PgConnection) -> Result<()> {
     // Inside a read's transaction the count runs in a savepoint. Rolling it back restores the
     // setting for the rest of the read.
     let mut read = connection.begin().await?;
-    let total = bound_count(&mut *read, (CHAIN, &address, None), true, cap).await?;
+    let total = bound_count(&mut read, (CHAIN, &address, None), true, cap).await?;
     ensure!(
         i64::try_from(total)? == CAP + 1,
         "the reader counted {total} inside a read"
