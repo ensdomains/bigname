@@ -89,13 +89,6 @@ impl Default for ChildrenCurrentPageFilter<'_> {
     }
 }
 
-impl ChildrenCurrentPageFilter<'_> {
-    /// True when the page admits every row the per-parent summary counts.
-    pub const fn admits_every_child(&self) -> bool {
-        self.q.is_none() && self.include_expired
-    }
-}
-
 /// Sort-specific keyset position for declared direct child page reads. The name sort orders by
 /// the served name the cursor already carries, so it needs no value of its own; the timestamp
 /// sorts carry the row's (possibly absent) timestamp.
@@ -126,14 +119,14 @@ pub struct ChildrenCurrentSummary {
     pub last_recomputed_at: Option<OffsetDateTime>,
 }
 
-/// Bounded declared direct child page plus full-filter summary metadata.
+/// Bounded declared direct child page and its total.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildrenCurrentPage {
-    /// Exact number of children admitted by the page filters, before its cursor.
+    /// Exact number of children admitted by the page filters, before its cursor. A page read
+    /// with a total cap stops counting at `cap + 1`, so a total above the cap reads `cap + 1`.
     pub total_count: u64,
     pub rows: Vec<ChildrenCurrentRow>,
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
-    pub summary: ChildrenCurrentSummary,
 }
 
 /// A registry labels page's filter on the owner each label serves: the owner of the label's

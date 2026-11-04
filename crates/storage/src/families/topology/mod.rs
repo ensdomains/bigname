@@ -21,7 +21,7 @@ pub use children_page::{
     FamilyChildRow, FamilyChildrenPage, count_children_shadow, load_children_shadow_page,
 };
 pub(crate) use children_page::{
-    RegistryLabels, count as count_children_on, counts as count_children_of_parents_on,
+    RegistryLabels, count_registry_labels, counts as count_children_of_parents_on,
     page as children_page_on, require_publication,
 };
 pub use collections::{

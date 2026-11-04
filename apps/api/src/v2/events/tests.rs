@@ -387,3 +387,132 @@ fn events_filter_builds_storage_filter_and_cursor_filters() {
         None
     );
 }
+
+fn summary_mode_for(raw: RawQueryParams) -> HistorySummaryMode {
+    let params = QueryParams::try_from(raw).expect("params must parse");
+    let parsed = parse_events_filter(&params, Some("ens")).expect("filter must parse");
+    events_summary_mode(&params, parsed.anchored)
+}
+
+#[tokio::test]
+async fn events_summary_mode_caps_only_emitter_anchored_opt_ins() {
+    const RESOLVER: &str = "1:0x0000000000000000000000000000000000000abc";
+    const CONTRACT: &str = "0x0000000000000000000000000000000000000abc";
+    let some = |value: &str| Some(value.to_owned());
+    let flag = || some("total_count");
+    let cases = [
+        (
+            "resolver",
+            RawQueryParams {
+                resolver: some(RESOLVER),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(12_345),
+        ),
+        (
+            "contract_address",
+            RawQueryParams {
+                contract_address: some(CONTRACT),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(12_345),
+        ),
+        (
+            "resolver and contract_address",
+            RawQueryParams {
+                resolver: some(RESOLVER),
+                contract_address: some(CONTRACT),
+                include: some("data,raw,total_count"),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(12_345),
+        ),
+        (
+            "resolver and name",
+            RawQueryParams {
+                resolver: some(RESOLVER),
+                name: some("alice.eth"),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::Count,
+        ),
+        (
+            "contract_address and address",
+            RawQueryParams {
+                contract_address: some(CONTRACT),
+                address: some(ADDRESS),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::Count,
+        ),
+        (
+            "name",
+            RawQueryParams {
+                name: some("alice.eth"),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::Count,
+        ),
+        (
+            "registration_id",
+            RawQueryParams {
+                registration_id: some(REGISTRATION_ID),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::Count,
+        ),
+        (
+            "address",
+            RawQueryParams {
+                address: some(ADDRESS),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::Count,
+        ),
+        (
+            "no anchor",
+            RawQueryParams {
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::None,
+        ),
+        (
+            "resolver without the flag",
+            RawQueryParams {
+                resolver: some(RESOLVER),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP),
+        ),
+        (
+            "contract_address without the flag",
+            RawQueryParams {
+                contract_address: some(CONTRACT),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::None,
+        ),
+        (
+            "name without the flag",
+            RawQueryParams {
+                name: some("alice.eth"),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP),
+        ),
+    ];
+    with_emitter_count_cap(12_345, async {
+        for (label, raw, expected) in cases {
+            assert_eq!(summary_mode_for(raw), expected, "{label}");
+        }
+    })
+    .await;
+}

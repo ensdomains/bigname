@@ -18,9 +18,8 @@ use super::{
     CursorPayload, Envelope, EventDetail, HISTORY_TOTAL_COUNT_CAP, HistoryEventType,
     HistoryInclude, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result,
     build_event_detail, decode, encode, format_timestamp, history_event_type, history_include,
-    history_sort_token, history_storage_order, history_total_count, insert_history_filter_keys,
-    map_history_page_error, raw_event_kind, resolve_history_block_window,
-    validate_latest_collection_selectors,
+    history_sort_token, history_storage_order, insert_history_filter_keys, map_history_page_error,
+    raw_event_kind, resolve_history_block_window, validate_latest_collection_selectors,
 };
 
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -138,14 +137,7 @@ pub(crate) async fn get_events(
         &snapshot.block_bounds(),
     ));
     parsed.storage_filter.publication_block_bounds = Some(snapshot.block_bounds());
-    let exact_count = params.include.iter().any(|v| v == "total_count");
-    let summary_mode = if exact_count && (parsed.anchored || params.contract_address.is_some()) {
-        HistorySummaryMode::Count
-    } else if parsed.anchored {
-        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
-    } else {
-        HistorySummaryMode::None
-    };
+    let summary_mode = events_summary_mode(&params, parsed.anchored);
 
     let storage_page = bigname_storage::load_event_history_page_with_redo_policy(
         &state.pool,
@@ -176,11 +168,15 @@ pub(crate) async fn get_events(
         ))
     });
     let has_more = next_cursor.is_some();
-    let total_count = if params.include.iter().any(|v| v == "total_count") {
-        storage_page.summary.as_ref().map(|s| s.total_count)
-    } else {
-        history_total_count(storage_page.summary.as_ref())
-    };
+    // A capped count above its cap means the exact count was not computed.
+    let total_count = storage_page
+        .summary
+        .as_ref()
+        .map(|summary| summary.total_count)
+        .filter(|total_count| match summary_mode {
+            HistorySummaryMode::CappedCount(cap) => *total_count <= cap,
+            _ => true,
+        });
     let context = super::history_context::load_history_row_context(
         &state.pool,
         &storage_page.rows,
@@ -333,6 +329,54 @@ pub(crate) fn events_storage_cursor(
         event_identity,
         position: None,
     })
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static EMITTER_EXACT_COUNT_CAP: u64;
+}
+
+/// Runs `future` with `cap` in place of the opt-in count cap on emitter-anchored reads.
+#[cfg(test)]
+pub(crate) async fn with_emitter_count_cap<F: std::future::Future>(
+    cap: u64,
+    future: F,
+) -> F::Output {
+    EMITTER_EXACT_COUNT_CAP.scope(cap, future).await
+}
+
+/// `include=total_count` on a `/v1/events` read that only an emitting contract anchors
+/// (`resolver` or `contract_address`, with no `name`, `registration_id` or `address`) counts at
+/// most this many rows and reports `total_count=null` above it. Such a contract can emit more
+/// rows than an exact count reads inside the request deadline. The registry overview's
+/// `counts.events` uses the same cap. Sized from a staging timing, 2026-11-02.
+const EVENTS_EMITTER_EXACT_COUNT_CAP: u64 = 100_000;
+const _: () = assert!(EVENTS_EMITTER_EXACT_COUNT_CAP > HISTORY_TOTAL_COUNT_CAP);
+
+pub(crate) fn emitter_exact_count_cap() -> u64 {
+    #[cfg(test)]
+    if let Ok(cap) = EMITTER_EXACT_COUNT_CAP.try_with(|cap| *cap) {
+        return cap;
+    }
+    EVENTS_EMITTER_EXACT_COUNT_CAP
+}
+
+/// The summary a `/v1/events` read runs for its anchors and `include=total_count`.
+pub(crate) fn events_summary_mode(params: &QueryParams, anchored: bool) -> HistorySummaryMode {
+    let exact_count = params.include.iter().any(|v| v == "total_count");
+    let emitter_only = params.name.is_none()
+        && params.registration_id.is_none()
+        && params.address.is_none()
+        && (params.resolver.is_some() || params.contract_address.is_some());
+    if exact_count && emitter_only {
+        HistorySummaryMode::CappedCount(emitter_exact_count_cap())
+    } else if exact_count && anchored {
+        HistorySummaryMode::Count
+    } else if anchored {
+        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+    } else {
+        HistorySummaryMode::None
+    }
 }
 
 pub(crate) fn resolve_events_namespace(params: &QueryParams) -> V2Result<Option<String>> {

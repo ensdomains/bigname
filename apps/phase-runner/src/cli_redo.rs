@@ -79,5 +79,6 @@ pub(super) fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
             require_hydration_url: false,
             ..args.project_families.into()
         },
+        index_build: args.index_build.into(),
     })
 }

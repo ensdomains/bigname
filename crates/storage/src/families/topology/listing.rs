@@ -57,6 +57,7 @@ pub fn listing_rows<'a>(
         Parents::Many(parents),
         None,
         children,
+        None,
         Relation::Stored(block),
     );
     builder.push(format!(

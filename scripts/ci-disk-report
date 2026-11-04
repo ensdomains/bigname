@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Usage: scripts/ci-disk-report <label> [postgres-container]
+#
+# Prints free space on the runner's filesystems and the size of the
+# directories a Rust test job fills: the Cargo target directory and its build
+# outputs, the Cargo registry and git checkouts, the Rust toolchains, the
+# temporary directories and Docker's storage. With a PostgreSQL service
+# container it also prints the size of the server's data directory, read
+# through `docker exec`, and the result of scripts/ci-free-disk once it has
+# finished. It appends one line with the free space on / to the
+# job summary. Each directory is measured on its own, because one `du` over
+# nested paths counts every file once only. Every probe has a time limit, and
+# the script never fails the job.
+set -u
+
+label=${1:-} container=${2:-}
+[ -n "$label" ] || label=unlabelled
+
+echo "== disk report: $label"
+if [ -n "${RUNNER_TEMP:-}" ] && [ -f "$RUNNER_TEMP/ci-free-disk.log" ]; then
+  if pgrep -f scripts/ci-free-disk >/dev/null 2>&1; then
+    echo "scripts/ci-free-disk is still running."
+  else
+    cat "$RUNNER_TEMP/ci-free-disk.log"
+  fi
+fi
+timeout 10 df -h / /mnt /tmp 2>/dev/null | awk '!seen[$0]++'
+
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+for path in \
+  target target/debug/deps target/debug/build target/nextest \
+  "$cargo_home/registry" "$cargo_home/git" "${RUSTUP_HOME:-$HOME/.rustup}" \
+  "${RUNNER_TEMP:-}" /tmp; do
+  [ -n "$path" ] && [ -e "$path" ] || continue
+  # Unreadable entries, such as root-only directories under /tmp, make du exit
+  # 1 while still printing a total.
+  timeout 60 du -sh -- "$path" 2>/dev/null
+  [ "$?" -ne 124 ] || echo "du $path did not finish within 60 s"
+done
+
+if command -v docker >/dev/null 2>&1; then
+  timeout 30 docker system df 2>/dev/null || echo "docker system df failed or timed out"
+  if [ -n "$container" ]; then
+    timeout 30 docker exec "$container" du -sh /var/lib/postgresql/data 2>/dev/null ||
+      echo "PostgreSQL data directory size unavailable"
+  fi
+fi
+
+line=$(timeout 10 df -h --output=avail,size / | tail -n 1 | awk '{print $1 " free of " $2}')
+echo "disk report $label: / has $line"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  echo "- Disk, $label: / has $line" >>"$GITHUB_STEP_SUMMARY"
+fi
+exit 0

@@ -1,8 +1,8 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -14,10 +14,12 @@ use crate::progress_monitor::RunnerPhaseProgress;
 
 mod ingest_rpc;
 mod interpret_skips;
+mod loop_heartbeat;
 mod project_writes;
 mod rpc_chain;
 mod served_lag;
 mod universal_resolver;
+pub use loop_heartbeat::RunnerLoopHeartbeat;
 use project_writes::ProjectWriteGauges;
 pub use served_lag::RunnerMetricsFeed;
 use served_lag::ServedLagGauges;
@@ -26,50 +28,6 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const PHASE_STATUSES: [&str; 5] = ["idle", "running", "paused", "completed", "failed"];
 const VERIFICATION_LEVELS: [&str; 3] = ["quick_synced", "cross_checked", "node_checked"];
 const REDO_MODES: [&str; 2] = ["redo", "recompute_flags"];
-
-#[derive(Clone, Default)]
-pub struct RunnerLoopHeartbeat {
-    last_progress: Arc<Mutex<BTreeMap<String, Instant>>>,
-}
-
-impl RunnerLoopHeartbeat {
-    pub fn record_progress(&self, chain: &str) {
-        self.last_progress
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(chain.to_owned(), Instant::now());
-    }
-
-    pub fn age_seconds(&self, chain: &str) -> Option<i64> {
-        self.last_progress
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(chain)
-            .map(elapsed_seconds)
-    }
-
-    pub fn remove_progress(&self, chain: &str) {
-        self.last_progress
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(chain);
-    }
-
-    fn ages_seconds(&self) -> BTreeMap<String, i64> {
-        let last_progress = self
-            .last_progress
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        last_progress
-            .iter()
-            .map(|(chain, instant)| (chain.clone(), elapsed_seconds(instant)))
-            .collect()
-    }
-}
-
-fn elapsed_seconds(instant: &Instant) -> i64 {
-    i64::try_from(instant.elapsed().as_secs()).unwrap_or(i64::MAX)
-}
 
 #[derive(Clone)]
 struct PipelineMetrics {
@@ -95,6 +53,7 @@ struct PipelineMetrics {
     ingest_rpc: ingest_rpc::IngestRpcCounters,
     interpret_skips: interpret_skips::InconsistentLogSkipCounters,
     universal_resolver: universal_resolver::UniversalResolverGauges,
+    walk_index_capacity: loop_heartbeat::WalkIndexCapacityGauge,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
     loop_heartbeat: RunnerLoopHeartbeat,
@@ -232,6 +191,7 @@ impl PipelineMetrics {
         let ingest_rpc = ingest_rpc::IngestRpcCounters::new(&registry)?;
         let interpret_skips = interpret_skips::InconsistentLogSkipCounters::new(&registry)?;
         let universal_resolver = universal_resolver::UniversalResolverGauges::new(&registry)?;
+        let walk_index_capacity = loop_heartbeat::WalkIndexCapacityGauge::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
             "Whether the latest database refresh succeeded.",
@@ -263,6 +223,7 @@ impl PipelineMetrics {
             ingest_rpc,
             interpret_skips,
             universal_resolver,
+            walk_index_capacity,
             refresh_success,
             last_refresh_timestamp_seconds,
             loop_heartbeat,
@@ -338,6 +299,8 @@ impl PipelineMetrics {
                 .insert((row.chain_id.clone(), row.phase_name.clone()));
             self.apply_row(row);
         }
+        self.walk_index_capacity
+            .apply(&next.chains, &self.loop_heartbeat);
         for (chain, age) in self.loop_heartbeat.ages_seconds() {
             self.loop_heartbeat_age_seconds
                 .with_label_values(&[&chain])
@@ -442,6 +405,7 @@ impl PipelineMetrics {
     }
 
     fn remove_chain(&self, chain: &str) {
+        self.walk_index_capacity.remove(chain);
         let _ = self.chain_head_block.remove_label_values(&[chain]);
         let _ = self.reinterpretation_required.remove_label_values(&[chain]);
         for level in VERIFICATION_LEVELS {

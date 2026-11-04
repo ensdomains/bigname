@@ -152,6 +152,12 @@ async fn v2_name_detail_and_lookup_serve_ens_v0_on_the_ownerless_lease() -> Resu
             "{name}: {detail}"
         );
     }
+    // The lease's grant names HOLDER, which serves as the ownerless name's owner, with no
+    // manager, since its registry owner is zero.
+    let shared = v2_get_json(&database, "/v1/names/shared-one.eth").await?;
+    assert_eq!(shared["data"]["owner"], HOLDER, "{shared}");
+    assert!(shared["data"].get("manager").is_none(), "{shared}");
+    assert_eq!(shared["data"]["status"], "active", "{shared}");
     let lookup = v2_lookup_json(
         &database,
         json!({

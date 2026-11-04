@@ -706,6 +706,23 @@ Family indexes serve these concrete readers:
   can reach its rows through the same index when the statement names the namespace. With no
   such surface the cost is those probes. The cost of rendering before `LIMIT` with a large
   population of such surfaces has not been measured.
+- A prefix search over a class of [search documents](#durable-search-data) with more than
+  1,024 postings for every term of the prefix reads `name_search_documents`, one statement
+  per bucket length (`storage:families.name.search_candidates.prefix1` to `prefix3`). Each
+  walks `name_search_documents_prefix{k}_idx`, `(spelling_class, left(name, k), name,
+  namespace, namehash)` over the raw-backed and short structural classes. Equality on the
+  class and on the first `k` characters of the prefix leaves the entries in page order under
+  the database collation, so the keyset cursor is the start key and the page limit stops the
+  walk. Every index condition is a plain equality or the cursor, so a generic plan can take
+  the same path. That bounds what a short prefix reads by the page, not by the names that
+  sort before it. A prefix of four or more characters reads the three-character bucket and
+  filters it by the prefix. A class with at most 1,024 postings for some term reads its
+  matching documents by id instead. A contains or exact search over a raw-backed or short
+  structural class with more than 1,024 postings for every term walks
+  `name_surfaces_name_order_idx` (raw-backed) or `name_search_documents_structural_order_idx`
+  (short structural) in name order, as before. The long structural class, names over 2000
+  bytes, reads every posting id of its first term in that state, in any match mode, and then
+  those documents by id.
 - The address-names walk (`storage:families.records.address_name_walk`) orders one address's
   candidate names, read from `project_address_name_index` by its primary key, by their sort
   key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,
@@ -721,6 +738,15 @@ Family indexes serve these concrete readers:
   `project_registry_binding_observation_target_idx`, the
   `project_registry_binding_observation` primary key and
   `project_binding_candidate_resource_idx`.
+- The resolver links page (`storage:families.topology.resolver_links`, for
+  `GET /v1/resolvers/{chain_id}/{address}/links`) walks `project_resolver_link_order_idx`,
+  `(chain_id, resolver_address, lpad(record_id, 78, '0'), node)` over the links with a
+  non-zero record, in page order from the keyset cursor, and stops at the page size. Only the
+  page's links are rendered with their names and link events. The total counts the resolver's
+  links on the same snapshot, so it reads all of them. Schema-migration
+  `20261103130000_project_resolver_link_order_index.sql` adds the index.
+  `crates/storage/src/families/topology/collections_tests.rs` checks the plan under both plan
+  modes and compares every page with the statement it replaced.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
   the registry operator read will use, two of which no reader uses yet:
   `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
@@ -796,6 +822,16 @@ so a `LIKE` prefix becomes a range on it under any database collation. The name 
 gives that range only under the C collation. The prefix index has the name order index's
 predicate, and the reader carries the same bounds. Its order is byte order, so the reader
 sorts the matched rows into name order.
+
+Interpret and the verified label-preimage importer write `name_search_documents`. The
+API's prefix search adds three read-only indexes on it, installed by the identity baseline
+and `20261029120000_search_prefix_bucket_indexes.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_search_documents_prefix1_idx` | `storage:families.name.search_candidates.prefix1`: a dense class's one-character prefix bucket in name order after the keyset cursor |
+| `name_search_documents_prefix2_idx` | `storage:families.name.search_candidates.prefix2`: the same for a two-character prefix |
+| `name_search_documents_prefix3_idx` | `storage:families.name.search_candidates.prefix3`: the same for a prefix of three or more characters, filtered by the whole prefix |
 
 The same reader, `storage:families.records.reverse_candidates` and Project's raw-name sweep
 (`project:families.derived.summary_raw_name_sweep`) also read
@@ -941,17 +977,49 @@ populated upgrades require the [concurrent prebuild and verifier](../ops/history
 They change no rows, hash inputs, catalogue encoding or phase markers and require no replay.
 
 History's registry handoff read (`load_history_registry_handoffs` in
-`crates/storage/src/history/registry_handoffs.rs`) reads two indexes on `normalized_events`.
-The normalized-events baseline and `20260917131000_project_scoped_history_indexes.sql`
-install them:
+`crates/storage/src/history/registry_handoffs.rs`) reads two indexes on `normalized_events`
+for its owner arms. The normalized-events baseline installs both.
+`20260917131000_project_scoped_history_indexes.sql` installs the first, and
+`20261102130000_normalized_events_v1_transfer_node_index.sql` the second:
 
 | Index | Serves |
 | --- | --- |
 | `normalized_events_project_name_child_idx` | the `SubregistryChanged` arm of `owner_probe`: the `SubregistryChanged` events of one name in source family `ens_v1_registry_l1`, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'child_node')` |
-| `normalized_events_project_name_node_idx` | the `AuthorityTransferred` arm of `owner_probe`: the `AuthorityTransferred` events of one name in source family `ens_v1_registry_l1`, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'node')` |
+| `normalized_events_v1_transfer_node_idx` | the `AuthorityTransferred` arm of `owner_probe`: the `AuthorityTransferred` events with source event `Transfer` of one name in source family `ens_v1_registry_l1`, by chain and name key, the namespace joined by `:` to `lower(after_state ->> 'node')` |
 
 Neither index restricts `consumer_visibility`. The statement filters it.
-`history/registry_handoffs_tests.rs` checks that each arm reads its index.
+
+The Transfer arm needs its own partial index. A registry `NewOwner(node, label, owner)` log is
+stored as a `SubregistryChanged` and an `AuthorityTransferred` event, and both carry the parent
+in `after_state ->> 'node'`. `normalized_events_project_name_node_idx` has the same key and
+admits both, so under a top-level node such as `eth` it holds every second-level name's
+`NewOwner` events, and none of them is a `Transfer`. The Transfer arm read through it visits
+every one of them and keeps none, and it cannot stop early, because an arm that finds nothing
+reads its whole key range before the `LIMIT 1` above it is decided.
+`normalized_events_v1_transfer_node_idx` admits `Transfer` events only, so the same arm reads
+the parent's own transfers and nothing else. The handoff read no longer uses
+`normalized_events_project_name_node_idx`.
+
+`history/registry_handoffs_tests.rs` checks that each arm reads its index, and that the
+Transfer arms under a parent with many children read none of the children's rows.
+
+A registry's role counts (`registry_role_count` and `label_role_counts` in
+`apps/api/src/v2/registries/role_counts.rs`) read one index on `normalized_events`. The
+registry detail route and its labels route run them with `include=counts`. The
+normalized-events baseline and `20261102140000_normalized_events_registry_roles_index.sql`
+install it:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_registry_roles_idx` | the `latest` step of `CURRENT_ROLES`: activated, readable `PermissionChanged` and `RootPermissionChanged` rows from `EACRolesChanged` in source families `ens_v2_root_l1` and `ens_v2_registry_l1` with a resource and a subject, by chain and lowercased emitting registry, then in the statement's `DISTINCT ON` order |
+
+Its predicate is the statement's constant terms on `normalized_events`, so it holds only the
+rows the statement reads. The lineage join, the block bound and `DISTINCT ON` still drop some
+of them. Its key order lets `DISTINCT ON` read it without a sort. Without it the statement reads
+`normalized_events_emitter_history_idx`, which holds every event the registry emitted, and
+drops every row that is not a role change.
+`apps/api/src/tests/v2_registry_role_counts_index.rs` checks that both statements read the
+index under custom and generic plans and return what the unindexed read returns.
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
@@ -3070,29 +3138,30 @@ silently narrowing the fingerprint.
 
 ### Walk index set
 
-An operator may drop the `normalized_events` indexes Interpret does not read for the length
-of a from-zero walk or a full-history Interpret redo, and rebuild them before Project runs,
-with [`ops/walk-index-set`](../ops/walk-index-set/README.md). The indexes Interpret keeps are
-the [walk index set](glossary.md#walk-index-set). Indexes are access paths, not hash inputs:
-dropping or rebuilding one changes no stored row and leaves the primary key, the
-`event_identity` unique key and every foreign key in place, so database constraints stay
-authoritative. The rule that splits the indexes:
+An operator may drop the `normalized_events` indexes Interpret does not read for the length of a
+from-zero walk or a full-history Interpret redo with
+[`ops/walk-index-set`](../ops/walk-index-set/README.md). The phase runner rebuilds any that is
+missing or invalid before Project's first batch, and `install.sql` rebuilds them by hand. The
+indexes Interpret keeps are the [walk index set](glossary.md#walk-index-set). Indexes are access
+paths, not hash inputs: dropping or rebuilding one changes no stored row and leaves the primary
+key, the `event_identity` unique key and every foreign key in place, so database constraints
+stay authoritative. The rule that splits the indexes:
 
 - An index is kept when a statement Interpret runs can read it: its loaders, its writer, the
   redo-range preparation, the flag recompute, or the manifest sync a runner start performs.
 - Every other index is a read path for Project, the API or an operator's
-  `phase-runner inspect` command. Project starts only after
-  Interpret completes, and the API refuses the routes that read them while an Interpret redo
-  is in progress (the public namespace snapshot and the composed name reads require each
-  served chain's Interpret not to be in a redo). The one exception is the event audit,
-  `GET /v1/diagnostics/events`, which stays available during a redo by design. Its record
-  attribution reads six of the dropped indexes (the ENSv1 and Basenames record node indexes,
-  the two record-ID indexes, `normalized_events_project_node_history_idx` and
-  `normalized_events_project_v1_pointer_addressed_node_idx`), so while they are dropped it
-  reads without them and, on a large database, may exceed the API's statement timeout
-  (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`, [production settings](production.md)) until
-  `install.sql` has run. The `phase-runner inspect` block and raw-event windows, which an
-  operator runs by hand, count and list normalized events by block hash through
+  `phase-runner inspect` command. Project starts only after Interpret completes, and the API
+  refuses the routes that read them while an Interpret redo is in progress (the public namespace
+  snapshot and the composed name reads require each served chain's Interpret not to be in a
+  redo). The one exception is the event audit, `GET /v1/diagnostics/events`, which stays
+  available during a redo by design. Its record attribution reads six of the dropped indexes
+  (the ENSv1 and Basenames record node indexes, the two record-ID indexes,
+  `normalized_events_project_node_history_idx` and
+  `normalized_events_project_v1_pointer_addressed_node_idx`), so while they are dropped it reads
+  without them and, on a large database, may exceed the API's statement timeout
+  (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`, [production settings](production.md)) until the runner
+  or `install.sql` rebuilds them. The `phase-runner inspect` block and raw-event windows, which
+  an operator runs by hand, count and list normalized events by block hash through
   `normalized_events_block_idx` and read more of the table while it is dropped.
 
 The 17 kept indexes and the statements that read them:
@@ -3109,7 +3178,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows. Project also reads `normalized_events_v2_key_probe_idx`, in the `slots` and `chains` steps of `project:families.resolution_paths.prepare` ([table ownership](#table-ownership)) |
 
-The other 33 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 35 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
@@ -3126,14 +3195,19 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_registry_departure_idx`,
 `normalized_events_pointer_after_resolver_history_idx`,
 `normalized_events_pointer_before_resolver_history_idx`, `normalized_events_project_name_node_idx`,
-`normalized_events_project_name_child_idx`, `normalized_events_address_registrant_match_idx`,
+`normalized_events_project_name_child_idx`, `normalized_events_v1_transfer_node_idx`,
+`normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
-`normalized_events_address_root_permission_idx`, `normalized_events_project_node_history_idx`
+`normalized_events_address_root_permission_idx`, `normalized_events_registry_roles_idx`,
+`normalized_events_project_node_history_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 A new index on `normalized_events` joins one list in the change that adds it: the drop list
-when Interpret does not read it, the kept set when Interpret does.
+when Interpret does not read it, the kept set when Interpret does. The phase runner carries
+both lists, with `install.sql`'s statements and reviewed definitions, in
+`crates/storage/src/walk_index_set/constants.rs`, and
+`crates/storage/src/walk_index_set/tests.rs` fails until they match the scripts.
 `crates/interpret/src/load/walk_index_set_tests.rs` fails until the two lists together are
 every index the baseline defines on the table, and proves that Interpret, over ENSv1,
 Basenames and ENSv2 histories through either loader, scans `normalized_events` sequentially
@@ -3141,6 +3215,18 @@ nowhere without the drop list and stores the same rows. That test shows each sta
 an index path, not that the path is keyed: a name-only read falls back to a range of
 `normalized_events_chain_block_number_idx`, which is why `normalized_events_name_history_idx`
 stays although a walk over ENSv1-only history never reads it.
+
+Before every Project entry the runner reads the drop list's state in the catalog
+(`crates/storage/src/walk_index_set.rs`). It builds each missing index with `install.sql`'s
+statement, concurrently and outside a transaction, and drops and rebuilds an index that is not
+valid and ready (`apps/phase-runner/src/walk_index_restore.rs`). It never drops a valid index,
+and a valid index whose definition differs from `install.sql`'s is kept and read as found,
+with a warning that prints both. A changed definition therefore takes a new name: a release
+that changes what one of these indexes holds adds an index under a new name and drops the old
+one, so a runner or API of the previous release still finds the names it expects. A name held
+by another relation stops Project instead. The
+[walk index set README](../ops/walk-index-set/README.md#the-phase-runners-rebuild) describes the
+rebuild, its log lines and its failures.
 
 ## Projection publication
 

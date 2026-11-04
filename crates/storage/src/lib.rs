@@ -5,10 +5,7 @@ use std::{str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use sqlx::{
-    PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::{PgPool, postgres::PgConnectOptions};
 
 mod address_names;
 mod api_preflight;
@@ -38,10 +35,12 @@ mod registry_token_ids;
 mod resolution_state;
 mod resolution_support;
 mod resolver;
+mod serving_pool;
 mod snapshot_selection;
 pub mod sql_row;
 mod time;
 mod unix_seconds;
+pub mod walk_index_set;
 pub use expiry::contract_expiry_reason;
 /// How a name surface that stores no raw bytes is named when it is read.
 pub use families::name::rendered as rendered_name;
@@ -105,6 +104,7 @@ pub use history::{HistoryRegistryHandoff, load_history_registry_handoffs};
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 #[cfg(any(test, feature = "test-support"))]
 pub use history::{
+    explain_contract_event_count_for_test, explain_event_history_count_for_test,
     explain_name_history_page_with_child_registrations_for_test,
     explain_registration_history_filter_for_test,
 };
@@ -198,6 +198,7 @@ pub use resolution_support::{
     supports_resolution_verified_lookup_record, try_classify_supported_resolution_topology,
 };
 pub use resolver::ResolverCurrentRow;
+pub use serving_pool::{IDLE_IN_TRANSACTION_MARGIN_MS, MAX_REQUEST_DEADLINE_MS};
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, SelectedSnapshot,
     SnapshotAt, SnapshotConsistency, SnapshotPositionRequirement, SnapshotProjectionRead,
@@ -236,10 +237,13 @@ pub const fn default_database_url() -> &'static str {
     "postgres://bigname:bigname@127.0.0.1:5432/bigname"
 }
 
+/// The API's request pool. `request_deadline` bounds how long a session may sit idle inside a
+/// transaction (`serving_pool::idle_in_transaction_setting`).
 pub async fn connect_phase_with_application_name_and_statement_timeout(
     config: &DatabaseConfig,
     application_name: &str,
     statement_timeout: Duration,
+    request_deadline: Duration,
 ) -> Result<PgPool> {
     ensure!(
         !statement_timeout.is_zero(),
@@ -249,6 +253,7 @@ pub async fn connect_phase_with_application_name_and_statement_timeout(
         config,
         application_name,
         statement_timeout,
+        request_deadline,
         config.max_connections,
     )
     .await
@@ -258,26 +263,28 @@ pub async fn connect_phase_reserved_readiness_pool(
     config: &DatabaseConfig,
     application_name: &str,
     check_timeout: Duration,
+    request_deadline: Duration,
 ) -> Result<PgPool> {
     ensure!(
         !check_timeout.is_zero(),
         "PostgreSQL readiness check timeout must be greater than zero"
     );
-    connect_phase_inner(config, application_name, check_timeout, 1).await
+    connect_phase_inner(config, application_name, check_timeout, request_deadline, 1).await
 }
 
 async fn connect_phase_inner(
     config: &DatabaseConfig,
     application_name: &str,
     statement_timeout: Duration,
+    request_deadline: Duration,
     max_connections: u32,
 ) -> Result<PgPool> {
-    PgPoolOptions::new()
-        .max_connections(max_connections)
+    serving_pool::serving_pool_options(max_connections)
         .connect_with(connect_options(
             config,
             application_name,
             statement_timeout,
+            request_deadline,
         )?)
         .await
         .context("failed to connect to the phase PostgreSQL schema")
@@ -287,6 +294,7 @@ fn connect_options(
     config: &DatabaseConfig,
     application_name: &str,
     statement_timeout: Duration,
+    request_deadline: Duration,
 ) -> Result<PgConnectOptions> {
     let database_url = config
         .database_url
@@ -303,5 +311,6 @@ fn connect_options(
                 "statement_timeout",
                 format!("{}ms", statement_timeout.as_millis()),
             ),
+            serving_pool::idle_in_transaction_setting(request_deadline),
         ]))
 }

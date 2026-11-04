@@ -176,12 +176,14 @@ pub(crate) async fn get_subnames(
         })
         .transpose()?;
 
+    let total_cap = super::child_count_cap();
     let storage_page = bigname_storage::load_children_current_page_filtered(
         snapshot.conn().await?,
         &parent.logical_name_id,
         &filter,
         storage_cursor.as_ref(),
         params.page_size,
+        Some(total_cap),
     )
     .await
     .map_err(super::name_rows_error(
@@ -285,7 +287,7 @@ pub(crate) async fn get_subnames(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: Some(storage_page.total_count),
+            total_count: Some(storage_page.total_count).filter(|total| *total <= total_cap),
             has_more,
         }),
         meta: snapshot.finish(&state).await?,
