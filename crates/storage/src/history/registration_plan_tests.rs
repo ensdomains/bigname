@@ -1424,8 +1424,10 @@ ANALYZE chain_lineage;
 /// into block 130, and the next lease from five microseconds into block 200. Resource-less rows of
 /// the name belong to whichever lease a binding active at the row's block timestamp, plus its log
 /// index in microseconds, witnesses. Registry rows on the lease belong to it only while its own
-/// binding is active. The fixture has no foreign key from events to lineage, so one row can sit
-/// on a block with no lineage row. Autovacuum is off so the statistics are only the ones the test
+/// binding is active. The fixture drops the foreign key from `normalized_events` to `chain_lineage`
+/// so the `missing` rows can sit on a block with no lineage row. That foreign key makes such a row
+/// unreachable in production. The rows exist to pin that a NULL probe drops the row exactly as the
+/// null-extended join did. Autovacuum is off so the statistics are only the ones the test
 /// collects.
 const FIXTURE_SQL: &str = r#"
 ALTER TABLE normalized_events SET (autovacuum_enabled = false);
