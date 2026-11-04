@@ -616,15 +616,27 @@ async fn the_worker_count_may_change_between_runs() -> Result<()> {
             .apply_with(TARGET, FamilyMode::Normal, &options)
             .await?;
         runs += 1;
-        let open: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+        #[allow(clippy::type_complexity)]
+        let backends: Vec<(
+            i32,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT pid, application_name, state, backend_start::text, xact_start::text,
+                    left(query, 200)
+             FROM pg_stat_activity WHERE datname = current_database()
              AND state LIKE 'idle in transaction%'",
         )
-        .fetch_one(&side)
+        .fetch_all(&side)
         .await?;
+        let open = backends.len();
         ensure!(
             open == 0,
-            "run {runs} returned with {open} open transactions"
+            "run {runs} returned with {open} open transactions \
+             (pid, application_name, state, backend_start, xact_start, query): {backends:?}"
         );
         let (at, chunks) = stream(&side).await?;
         if at == Some(0) {
