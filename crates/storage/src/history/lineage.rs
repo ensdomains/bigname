@@ -12,7 +12,6 @@ pub(super) fn push_history_lineage_probe(builder: &mut QueryBuilder<'_, Postgres
             FROM bigname_phase.chain_lineage rb
             WHERE rb.chain_id = ne.chain_id
               AND rb.block_hash = ne.block_hash
-            OFFSET 0
         ) rb ON TRUE
         "#,
     );
