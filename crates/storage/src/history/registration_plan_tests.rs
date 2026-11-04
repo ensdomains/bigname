@@ -22,7 +22,7 @@
 //! precheck. Three altered probes (no timestamp, a timestamp three microseconds late, the
 //! canonical block's timestamp at the event's height) must each change some answer, so the
 //! fixture holds cells that the probe's value decides. So must an inner lateral join, so the
-//! fixture holds rows with no block or no lineage row that the outer join keeps.
+//! fixture holds rows with no block that the outer join keeps.
 //!
 //! The text test checks that a registration read's source is `source.rs`'s, with only the
 //! lineage join swapped for the lateral probe.
@@ -910,7 +910,8 @@ async fn row_cells(connection: &mut PgConnection) -> Result<Vec<RowCell>> {
         ("story:attr:8", false),
         ("story:migration", true),
     ];
-    // R8: rows with no block or whose block has no lineage row. Outside the block window only.
+    // R8: rows with no block or whose block has no lineage row. story:attr:null has no block, so
+    // the /v1/events window drops it. These pins hold only without the window.
     let unwindowed_lease_pins = {
         let mut pins = lease_pins.clone();
         pins.extend([
