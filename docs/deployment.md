@@ -5764,13 +5764,13 @@ composition pass derives every parent's rows in a children stream after the name
   alone, such as a manifest-authority redo, sends the reading back to block 0. It catches up at
   about 1,000 observations per block of this chain, so a label only that redo revealed reaches
   this chain's stored names after about (the other chain's `PreimageObserved` rows / 1,000) blocks
-  of this chain. For Ethereum Mainnet at about 7.8 million observations read from Base at 2 s
-  blocks, that is about 7,800 blocks, or 4.3 hours. Labels already stored keep their names, and
-  served names heal at read meanwhile. The schema-migration creates the table empty. The redo's
-  composition pass starts each watermark at the other chain's highest observation or its finalized
-  block (safe when finalized is unset), whichever is lower, because the pass composes every row
-  from the preimages already stored. A chain with neither block, or with its Interpret redo open,
-  is not started and is read from block 0 at the first step.
+  of this chain. For a large source chain this is thousands of blocks of this chain, hours rather
+  than minutes, so treat a revision change as a maintenance window. Labels already stored keep
+  their names, and served names heal at read meanwhile. The schema-migration creates the table
+  empty. The redo's composition pass starts each watermark at the other chain's highest
+  observation or its finalized block (safe when finalized is unset), whichever is lower, because
+  the pass composes every row from the preimages already stored. A chain with neither block, or
+  with its Interpret redo open, is not started and is read from block 0 at the first step.
 - Apply it before starting the release. The family writer inserts into the new tables, so without
   them the first family block fails.
 - A block that moves a parent's own facts (its migration state, its ENSv2 subregistry pointer,
