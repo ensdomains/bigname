@@ -4,7 +4,6 @@ use sqlx::{Postgres, QueryBuilder};
 /// carries `OFFSET 0`, so PostgreSQL cannot flatten it into a plain join. Every plan it has for
 /// the subquery then takes `ne`'s row as a parameter, and such an inner side admits only a nested
 /// loop that runs the subquery per event row: no hash, merge or materialized scan of the lineage.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn push_history_lineage_probe(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
         r#"

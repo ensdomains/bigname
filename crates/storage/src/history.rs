@@ -42,6 +42,7 @@ mod redo;
 mod registration_identity;
 #[cfg(test)]
 mod registration_plan_tests;
+mod registration_source;
 mod registry_handoffs;
 mod resolver_source;
 pub use registry_handoffs::{HistoryRegistryHandoff, load_history_registry_handoffs};

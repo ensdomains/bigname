@@ -12,7 +12,9 @@ use super::{
         push_attributed_record_filter_where, push_attributing_resource_is_registration,
         push_publication_bound,
     },
-    lineage::{event_block_timestamp, same_fork_as, same_fork_predicate},
+    lineage::{
+        event_block_timestamp, push_history_lineage_probe, same_fork_as, same_fork_predicate,
+    },
 };
 
 /// The per-chain published block a product read is bound to. Every row that establishes
@@ -62,12 +64,10 @@ pub(super) fn push_is_public_registration_id_query(
     builder.push(
         "SELECT EXISTS (
             SELECT 1
-            FROM bigname_phase.normalized_events ne
-            LEFT JOIN bigname_phase.chain_lineage rb
-              ON rb.chain_id = ne.chain_id
-             AND rb.block_hash = ne.block_hash
-            WHERE ne.resource_id = ",
+            FROM bigname_phase.normalized_events ne",
     );
+    push_history_lineage_probe(builder);
+    builder.push(" WHERE ne.resource_id = ");
     builder.push_bind(registration_id);
     builder.push(" AND ne.consumer_visibility = 'activated'");
     push_publication_bound(builder, "ne", published);

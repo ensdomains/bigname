@@ -1,5 +1,6 @@
 //! The source of a resolver event read: the resolver's own rows, read through its own indexes,
-//! for the request shape that has them. Every other read keeps [`source`]'s source and the
+//! for the request shape that has them. A registration-anchored product read takes
+//! [`super::registration_source`]'s source. Every other read keeps [`source`]'s source and the
 //! resolver condition in `push_history_filters`. Only serving reads reach this file.
 
 use sqlx::{Postgres, QueryBuilder};
@@ -10,6 +11,7 @@ use super::{
     duplicates::push_product_history_duplicate_filter_for_alias,
     filters::push_string_filter,
     keyset::push_history_cursor_after_for_alias,
+    registration_source::push_registration_history_source,
     source::{self, push_history_lineage_join},
 };
 
@@ -79,8 +81,9 @@ fn resolver_arm_source(
     })
 }
 
-/// [`source::push_history_source_for_filter`], or the resolver's own rows for
-/// a request [`resolver_arm_source`] admits.
+/// [`source::push_history_source_for_filter`], the registration source for a
+/// read with a product registration selector, or the resolver's own rows for a
+/// request [`resolver_arm_source`] admits.
 pub(super) fn push_history_source_for_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
@@ -109,6 +112,18 @@ pub(super) fn push_history_source_for_page<'a>(
     resolver_page_bound: Option<ResolverPageBound>,
 ) -> ResolverSource {
     let Some(resolver) = resolver_arm_source(filter, canonical_only, include_candidates) else {
+        if let Some((logical_name_ids, resource_ids)) = filter.product_registration() {
+            push_registration_history_source(
+                builder,
+                filter,
+                logical_name_ids,
+                resource_ids,
+                canonical_only,
+                include_cursor_row,
+                include_candidates,
+            );
+            return ResolverSource::Condition;
+        }
         source::push_history_source_for_filter(
             builder,
             filter,
