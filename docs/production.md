@@ -117,6 +117,10 @@ recommended starting point before the public edge is undrained.
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_BURST` | `10` | `5` | Maximum tokens in each client bucket when rate limiting is enabled. |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_MAX_CLIENTS` | `65536` | `65536` | In-memory client-bucket ceiling per API process. |
 | `BIGNAME_API_TRUST_X_FORWARDED_FOR` | `false` | `true` | Whether the client-IP key may use the rightmost valid `X-Forwarded-For` address instead of the TCP peer. |
+| `BIGNAME_API_LABEL_STAGING_PER_SECOND` | `10` | `10` | Writes a second of the [label candidates](deployment.md#api-label-candidates) a name request proves, into `bigname_phase.ens_names`. `0` stages nothing, and responses still show proven labels. |
+| `BIGNAME_API_LABEL_STAGING_BURST` | `20` | `20` | Label-candidate writes allowed at once after a quiet period. |
+| `BIGNAME_API_LABEL_STAGING_MAX_LABELS` | `65536` | `65536` | Labelhashes one API process remembers as staged, so it writes each label once. |
+| `BIGNAME_API_LABEL_STAGING_MAX_IN_FLIGHT` | `2` | `2` | Concurrent label-candidate writes. A write past it is dropped and counted `throttled`. |
 
 The API process attaches its two RPC deadlines when it constructs its lookup
 provider configuration. Phase-runner hydration uses its own provider

@@ -613,6 +613,7 @@ include!("tests/v2_address_names_parent.rs");
 include!("tests/v2_bracketed_labelhash_names.rs");
 include!("tests/v2_textless_surface.rs");
 include!("tests/v2_textless_surface_lookup.rs");
+include!("tests/v2_label_heal.rs");
 include!("tests/v2_bound_names_paging.rs");
 include!("tests/v2_bound_names_as_of.rs");
 include!("tests/v2_textless_surface_expiry.rs");

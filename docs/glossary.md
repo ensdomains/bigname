@@ -2188,6 +2188,9 @@ normalization, or whose bytes do not decode as text, leaves the placeholder; a
 rendered name never takes the escape [non-name form](#non-name-form). `name`
 and `display_name` carry the same rendered name. No stored projection holds it,
 so an imported preimage changes it on the next read without a new publication.
+On name detail, subnames, and lookup, a label that the request itself spells as
+text also reads as that text, since the request proves it
+([name inputs](api-v1.md#name-inputs)).
 A surface that stores its raw bytes is served under its stored name instead.
 See [storage](storage.md#name-identity-and-raw-evidence) and
 [name inputs](api-v1.md#name-inputs).

@@ -104,6 +104,7 @@ fn serve_args(
         status_max_block_lag: v2::support::status_freshness::DEFAULT_MAX_BLOCK_LAG,
         status_max_lag_secs: v2::support::status_freshness::DEFAULT_MAX_LAG_SECS,
         publication_lag_tolerance_blocks: bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS,
+        label_staging: crate::label_staging::LabelStagingConfig::default(),
         database: database.database_config(6)?,
     })
 }

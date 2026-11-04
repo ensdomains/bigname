@@ -1008,7 +1008,9 @@ trace, or execution-cache readback. The engine refuses a name whose selected
 `verified_authority_arms` the selected `ens_execution` manifest declares
 (`manifests.md` § `verified_authority_arms`); the routes report that refusal as
 `exact_name_authority_not_verifiable`, distinct from the
-`verified_records_not_supported` a row without an admitted topology reports. API requests, including diagnostics and verified fallback, are read-only.
+`verified_records_not_supported` a row without an admitted topology reports. API requests, including diagnostics and verified fallback, write no served or
+diagnostic state. Their one write is the label candidate a
+[name input](#name-inputs) proves, into a table no serving path reads.
 They never create, refresh, or clear the diagnostic
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
 After provider calls, verification rechecks the captured publication, canonical
@@ -1392,10 +1394,11 @@ spelling when the node no longer has one. A node whose
 [name surface](glossary.md#surface-name-surface) stores no raw label bytes has
 a name row and is addressed the same way: any of its labels may be spelled as
 its bracketed labelhash or as its text, since both spell the same node. The
-response serves the row's [rendered name](glossary.md#rendered-name) whichever
-spelling the request used, so a label reads as text only when bigname holds a
-preimage for it that passed normalization, and in brackets otherwise, `eth`
-and `base` included. An admitted ENSv1 `NewOwner` establishes that surface
+response serves the row's [rendered name](glossary.md#rendered-name), so a
+label reads as text when bigname holds a preimage for it that passed
+normalization, and in brackets otherwise, `eth` and `base` included. On name
+detail, subnames, and lookup, a label the request spells as text also reads as
+text, as described below. An admitted ENSv1 `NewOwner` establishes that surface
 without label bytes when its full labelhash path is proven from the root or a
 fully proven ancestor. A registry child whose ancestry remains unproven, a
 known normalization shadow, or a Basenames child with no name surface still
@@ -1404,6 +1407,49 @@ placeholder without making ordinary name routes available. Uppercase hex digits,
 rejected: the name routes return `400 invalid_input`, and lookup returns an
 in-band `invalid_name`. The octal-escape non-name form is never accepted as a
 name input.
+
+A plain label of a name input is also proof of that label's text. The node a
+route reads is the namehash of the normalized labels, so each label's text is
+the preimage of the labelhash at its position. Three routes use that proof in
+their own response. Wherever a served name carries the placeholder of a
+labelhash that a plain label of the request hashes to, it shows the label's
+normalized text instead:
+
+- `GET /v1/names/{name}`: `name`, `display_name`, and `canonical_name` on an
+  alias path.
+- `GET /v1/names/{name}/subnames`: `name` and `display_name` of every row. A
+  child's own label is not part of the request, so it keeps its placeholder
+  unless the request spells that same label elsewhere. A child label served in
+  its escape form ([non-name form](glossary.md#non-name-form)) is raw bytes, so
+  brackets inside it are never replaced. The parent labels after it are, and
+  their text is escape-encoded like the rest of that string.
+- `POST /v1/lookup`: `name` and `display_name` of every record of the batch,
+  the records of its address inputs included. Every name input of the batch
+  proves its labels for all of them.
+
+A bracketed label proves nothing, except that a bracketed `eth` or `base` is
+read as that text and so proves itself. A label that fails normalization is
+refused before any read. Nothing else in the response changes: cursors, order,
+totals, counts, and `meta` are those the bracketed spelling of the same node
+gets. Every other route, history included, serves the rendered name as before.
+
+After such a response is complete, the API also stages each label it showed
+this way as a candidate for the
+[rainbow-table preimage import](storage.md#rainbow-table-preimage-import), in
+`bigname_phase.ens_names`:
+
+- The records route stages the labels the name row it read serves as
+  placeholders, though its response carries no name.
+- This is the API's only database write. It is best effort and never changes
+  or delays the response
+  ([deployment](deployment.md#api-label-candidates)).
+- No serving path reads that table, so a staged label changes no answer by
+  itself. Once the operator's import proof-checks and stores it, every route
+  shows the text with no request proof.
+- The import keeps a preimage bigname already stores. One stored as not
+  normalized under an older normalizer stays bracketed on other routes until
+  `phase-runner redo --phase recompute-flags` repairs it
+  ([chain intake, "Redo and rewind"](chain-intake.md#redo-and-rewind)).
 
 ### Manager
 
