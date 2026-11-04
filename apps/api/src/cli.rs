@@ -15,6 +15,25 @@ pub(crate) enum RpcChainCheck {
     ChainIdOnly,
 }
 
+/// What the API does at startup when an index `ops/walk-index-set/drop.sql` drops is not a valid,
+/// ready index on `normalized_events`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub(crate) enum WalkIndexSetCheck {
+    /// Refuse to start.
+    Refuse,
+    /// Start and serve without them, with a warning.
+    Warn,
+}
+
+impl WalkIndexSetCheck {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Refuse => "refuse",
+            Self::Warn => "warn",
+        }
+    }
+}
+
 const DEFAULT_RPC_CONNECT_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_RPC_TOTAL_TIMEOUT_MS: u64 = 8_000;
 
@@ -66,6 +85,15 @@ pub(crate) struct ServeArgs {
         default_value = "full"
     )]
     pub(crate) rpc_chain_check: RpcChainCheck,
+    /// `warn` starts the API without the indexes `ops/walk-index-set/drop.sql` drops, which on a
+    /// large database lets reads that need them exceed the statement timeout.
+    #[arg(
+        long,
+        env = "BIGNAME_API_WALK_INDEX_SET_CHECK",
+        value_enum,
+        default_value = "refuse"
+    )]
+    pub(crate) walk_index_set_check: WalkIndexSetCheck,
     /// Comma-separated IPv4 or IPv6 CIDR ranges a CCIP-Read gateway fetch may never connect to,
     /// on top of the built-in refused ranges. Empty by default. An entry that is not a range
     /// refuses startup.
@@ -221,6 +249,28 @@ mod tests {
         assert_eq!(off.per_second, 0);
         off.validate()
             .expect("staging off is a valid configuration");
+    }
+
+    #[test]
+    fn the_walk_index_set_check_refuses_by_default_and_takes_only_its_two_values() {
+        assert_eq!(
+            serve_args(&[]).walk_index_set_check,
+            super::WalkIndexSetCheck::Refuse
+        );
+        assert_eq!(
+            serve_args(&["--walk-index-set-check=warn"]).walk_index_set_check,
+            super::WalkIndexSetCheck::Warn
+        );
+        for value in ["off", "skip"] {
+            let flag = format!("--walk-index-set-check={value}");
+            let error = super::Cli::try_parse_from(["bigname-api", "serve", flag.as_str()])
+                .expect_err("only refuse and warn are accepted");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidValue,
+                "{value}"
+            );
+        }
     }
 
     #[test]

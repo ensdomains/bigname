@@ -10,6 +10,8 @@ mod openapi_responses;
 mod openapi_surface;
 #[path = "tests/seeder_equality.rs"]
 mod seeder_equality;
+#[path = "tests/walk_index_set_check.rs"]
+mod walk_index_set_check;
 
 #[tokio::test]
 async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<()> {
@@ -477,6 +479,7 @@ async fn v2_namespace_profile_and_history_are_full_where_names_serve() -> Result
 }
 
 include!("tests/removed_graphql_route.rs");
+include!("tests/cors_preflight.rs");
 include!("tests/v2_name_record.rs");
 include!("tests/v2_name_records_default_set.rs");
 include!("tests/v2_name_records_inventory_only.rs");
@@ -502,6 +505,7 @@ include!("tests/v2_history_keyset_walk.rs");
 include!("tests/v2_history_query_filters.rs");
 include!("tests/v2_contract_event_counts.rs");
 include!("tests/v2_events_emitter_count.rs");
+include!("tests/v2_events_default_count.rs");
 include!("tests/v2_tokenless_expiry_events.rs");
 include!("tests/v2_history_block_order.rs");
 include!("tests/v2_history_block_order_children.rs");

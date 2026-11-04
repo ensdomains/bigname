@@ -162,3 +162,38 @@ async fn registry_event_count_plan_stops_at_the_cap() -> Result<()> {
     ensure!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
 }
+
+/// Rows A1 and A2 at the production cap: with no test override, `counts.events` is exact up to 10,000 events and `null` above,
+/// and the contract feed's opt-in count agrees on both sides of the cap.
+#[tokio::test]
+async fn registry_event_count_is_null_above_ten_thousand() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let overview = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
+    let feed = format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1");
+    let created = |n: i64| {
+        registry_event(&format!("registry-alpha-bulk-{n}"), None, "RegistryCreated", 65 + n % 19,
+            ALPHA_REGISTRY, json!({ "source_event": "RegistryCreated", "registry": ALPHA_REGISTRY }))
+    };
+    let uncapped = registry_payload(&database, &overview).await?;
+    assert_eq!(uncapped["data"]["counts"]["events"], json!(6), "{uncapped}");
+
+    // The fixture's six events and 9,994 more reach the cap: exact on the overview and the feed.
+    let bulk = (0..9_994).map(created).collect::<Vec<_>>();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &bulk).await?;
+    let at_cap = registry_payload(&database, &overview).await?;
+    assert_eq!(at_cap["data"]["counts"]["events"], json!(10_000));
+    let total = registry_payload(&database, &feed).await?;
+    assert_eq!(total["page"]["total_count"], json!(10_000));
+
+    // One more event: both are null, and the other counts are unchanged.
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[created(9_994)]).await?;
+    let above = registry_payload(&database, &overview).await?;
+    assert!(above["data"]["counts"].get("events").is_some());
+    assert_eq!(above["data"]["counts"]["events"], Value::Null);
+    assert_eq!(above["data"]["counts"]["roles"], uncapped["data"]["counts"]["roles"]);
+    assert_eq!(above["data"]["counts"]["labels"], uncapped["data"]["counts"]["labels"]);
+    let total = registry_payload(&database, &feed).await?;
+    assert_eq!(total["page"]["total_count"], Value::Null);
+    database.cleanup().await
+}

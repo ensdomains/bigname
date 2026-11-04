@@ -1,5 +1,6 @@
 #[tokio::test]
 async fn api_serve_tolerates_an_absent_phase_schema() -> Result<()> {
+    let _gauge = walk_index_set_check::GAUGE.lock().await;
     let database = TestDatabase::new_migrated().await?;
     sqlx::query("DROP SCHEMA bigname_phase CASCADE")
         .execute(&database.lookup_pool)
@@ -13,6 +14,7 @@ async fn api_serve_tolerates_an_absent_phase_schema() -> Result<()> {
         rpc_connect_timeout_ms: 2_000,
         rpc_timeout_ms: 8_000,
         rpc_chain_check: crate::cli::RpcChainCheck::Full,
+        walk_index_set_check: crate::cli::WalkIndexSetCheck::Refuse,
         ccip_gateway_deny_cidrs: None,
         bounds: ApiBoundsConfig::default(),
         phase_heartbeat_max_age_secs: state::DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS,
@@ -54,6 +56,7 @@ async fn api_serve_refuses_a_schema_missing_normalized_events() -> Result<()> {
         rpc_connect_timeout_ms: 2_000,
         rpc_timeout_ms: 8_000,
         rpc_chain_check: crate::cli::RpcChainCheck::Full,
+        walk_index_set_check: crate::cli::WalkIndexSetCheck::Refuse,
         ccip_gateway_deny_cidrs: None,
         bounds: ApiBoundsConfig::default(),
         phase_heartbeat_max_age_secs: state::DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS,

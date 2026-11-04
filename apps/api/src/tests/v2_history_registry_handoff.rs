@@ -365,7 +365,7 @@ async fn wrapper_first_materialization_keeps_dormant_registry_resolver_out_of_le
         .count();
     let filtered = v2_history_payload_for_database(
         &database,
-        &format!("/v1/events?registration_id={lease}&page_size=100"),
+        &format!("/v1/events?registration_id={lease}&page_size=100&include=total_count"),
     )
     .await?;
     assert_eq!(
