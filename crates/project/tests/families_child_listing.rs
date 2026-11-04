@@ -192,8 +192,8 @@ async fn a_parent_spelled_by_an_observation_rekeys_and_journals_all_its_children
 // their own parents and the other children keep their rows; the stored rows equal today's
 // read-time rows before and after. The undo restores every other family and derives the two
 // rows again at block 11, where the kept preimage spells them, and the rebuilds equal them. A
-// child whose name is
-// longer than a btree entry allows stores its full name and its first 500 characters as the key.
+// child whose name is longer than a btree entry allows stores its full name and its first 500
+// characters as the key.
 #[tokio::test]
 async fn an_observed_label_rekeys_its_edge_children_under_every_parent() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_shared_label", 20).await?;

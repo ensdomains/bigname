@@ -149,11 +149,12 @@ pub(crate) async fn undo_block(
 /// Heal, at the restored block, the child listing rows the undone block's journal restored that
 /// still spell a label as `[labelhash]`. Interpret's redo never removes a label from
 /// `label_preimages` (`crates/interpret/src/write.rs`, `prepare_redo_range`), so a row the undone
-/// block healed would otherwise spell the label again while the relation at the restored block,
-/// and a rebuild there, spell it. The listing's own statement derives the rows
+/// block healed would otherwise show it as `[labelhash]` again, while the relation at the restored
+/// block, and a rebuild there, spell it. The listing's own statement derives the rows
 /// (`derived/children.rs`, `derive_heals`) and writes only those it spells further, journalling
-/// nothing: any other difference comes from Interpret rows the repair already replaced, and the
-/// replay derives those. No count moves. With no restored block the families are empty.
+/// nothing. Any other difference comes from Interpret rows the repair already replaced, which the
+/// replay derives, or from an input that changes in place with no block, which a rebuild covers.
+/// No count moves. With no restored block the families are empty.
 async fn heal_listing(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chain_id: &str,
