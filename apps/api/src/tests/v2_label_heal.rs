@@ -692,3 +692,288 @@ async fn v2_label_heal_a_failed_or_slow_write_is_soft_and_retried() -> Result<()
 
     database.cleanup().await
 }
+
+fn lh_staging_off() -> LabelStagingConfig {
+    LabelStagingConfig {
+        per_second: 0,
+        ..LabelStagingConfig::default()
+    }
+}
+
+/// A role that reads every relation and runs every function of the schema, with no `INSERT`
+/// anywhere, and a pool that runs as it.
+async fn lh_role_without_insert(database: &TestDatabase) -> Result<(String, PgPool)> {
+    let role = format!(
+        "label_heal_{}_{}",
+        std::process::id(),
+        NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    for statement in [
+        format!("CREATE ROLE {role} NOLOGIN"),
+        format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"),
+        format!("GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {role}"),
+        format!("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA bigname_phase TO {role}"),
+    ] {
+        sqlx::query(&statement).execute(&database.pool).await?;
+    }
+    let pool = lh_pool(database, format!("SET ROLE {role}")).await?;
+    Ok((role, pool))
+}
+
+async fn lh_drop_role(database: &TestDatabase, role: &str, pool: PgPool) -> Result<()> {
+    pool.close().await;
+    sqlx::query(&format!("DROP OWNED BY {role}")).execute(&database.pool).await?;
+    sqlx::query(&format!("DROP ROLE {role}")).execute(&database.pool).await?;
+    Ok(())
+}
+
+/// The status and body of each of `uris`, then of each lookup of `batches`, every write
+/// settled before the next request.
+async fn lh_serve(
+    state: &AppState,
+    uris: &[String],
+    batches: &[Value],
+) -> Result<Vec<(StatusCode, Value)>> {
+    let mut served = Vec::new();
+    for uri in uris {
+        served.push(lh_get(state, uri).await?);
+        state.label_staging.settled().await;
+    }
+    for batch in batches {
+        served.push((StatusCode::OK, lh_lookup(state, batch.clone()).await?));
+        state.label_staging.settled().await;
+    }
+    Ok(served)
+}
+
+/// Asserts `state` serves `expected` for `uris` and `batches`, status first, on two rounds, so a
+/// write refused in the first round could not change the second.
+async fn lh_assert_serves(
+    state: &AppState,
+    case: &str,
+    uris: &[String],
+    batches: &[Value],
+    expected: &[(StatusCode, Value)],
+) -> Result<()> {
+    let requests: Vec<String> = uris
+        .iter()
+        .cloned()
+        .chain(batches.iter().map(|batch| format!("lookup {batch}")))
+        .collect();
+    for round in 0..2 {
+        let served = lh_serve(state, uris, batches).await?;
+        assert_eq!(served.len(), expected.len(), "{case}, round {round}");
+        for ((request, (status, body)), (expected_status, expected_body)) in
+            requests.iter().zip(&served).zip(expected)
+        {
+            assert_eq!(status, expected_status, "{case}, round {round}: {request}: {body:#}");
+            assert_eq!(body, expected_body, "{case}, round {round}: {request}");
+        }
+    }
+    Ok(())
+}
+
+/// With the write off, or refused for want of `INSERT`, a label no request proves serves its
+/// placeholder on the routes below as it did before label healing, and every response, healed
+/// or not, is the one a writing process serves, before and after its write lands.
+#[tokio::test]
+async fn v2_label_heal_without_the_write_unproven_labels_stay_bracketed_and_responses_match()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let fixture = seed_textless_fixture(&database, true).await?;
+    let writing = database.app_state_with_public_namespaces(&["ens"]);
+    let off = database
+        .app_state_with_public_namespaces(&["ens"])
+        .with_label_staging(lh_staging_off());
+    let (role, pool) = lh_role_without_insert(&database).await?;
+    let denied = lh_state(pool.clone()).with_public_namespaces_for_test(["ens"]);
+    let bracketed = tl_path(&fixture.first_name);
+    let uris = [
+        format!("/v1/names/{bracketed}"),
+        format!("/v1/names/{}", tl_path(&fixture.nested_name)),
+        format!("/v1/names/{bracketed}/subnames?page_size=10"),
+        format!("/v1/names/{bracketed}/records"),
+        "/v1/names/first.alpha.eth/subnames?page_size=10".to_owned(),
+        "/v1/names/first.alpha.eth/history?page_size=50".to_owned(),
+        format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&page_size=50"),
+        "/v1/names/first.alpha.eth".to_owned(),
+    ];
+    let address = json!({"address": RC_OWNER, "page_size": 50});
+    let batches = [
+        json!({"inputs": [address]}),
+        json!({"inputs": [{"name": "first.alpha.eth"}, address]}),
+    ];
+
+    let expected = lh_serve(&writing, &uris, &batches).await?;
+    let names = |index: usize| tl_column(&[json!({"data": expected[index].1["data"]})], "name");
+    for (status, body) in &expected {
+        assert_eq!(*status, StatusCode::OK, "{body:#}");
+    }
+    // The renderings of the routes before label healing, where the request proves no label.
+    assert_eq!(expected[0].1["data"]["name"], json!(fixture.first_name));
+    assert_eq!(expected[0].1["data"]["display_name"], json!(fixture.first_name));
+    assert_eq!(expected[1].1["data"]["name"], json!(fixture.nested_name));
+    let bracketed_children = names(2);
+    assert!(bracketed_children.contains(&fixture.nested_name), "{bracketed_children:?}");
+    assert!(bracketed_children.contains(&fixture.known_name), "{bracketed_children:?}");
+    // A child's own label is not in the request, so it stays bracketed under a healed parent.
+    let plain_children = names(4);
+    let nested = format!("{}.first.alpha.eth", tl_bracket(&fixture.nested));
+    assert!(plain_children.contains(&nested), "{plain_children:?}");
+    for row in expected[5].1["data"].as_array().expect("history rows") {
+        assert_eq!(row["name"], json!(fixture.first_name), "{row:#}");
+    }
+    assert!(names(6).contains(&fixture.first_name), "{:?}", names(6));
+    let alone = tl_column(&[json!({"data": expected[8].1["data"][0]["records"]})], "name");
+    assert!(alone.contains(&fixture.first_name), "{alone:?}");
+    // The heal is not the write: a plain spelling shows its label wherever the write stands.
+    assert_eq!(expected[7].1["data"]["name"], json!("first.alpha.eth"));
+    assert_eq!(expected[9].1["data"][0]["record"]["name"], json!("first.alpha.eth"));
+    assert_eq!(lh_counts(&writing), BTreeMap::from([("staged", 1), ("duplicate", 2)]));
+    lh_assert_serves(&writing, "written", &uris, &batches, &expected).await?;
+    assert_eq!(lh_counts(&writing), BTreeMap::from([("staged", 1), ("duplicate", 8)]));
+
+    lh_assert_serves(&off, "staging off", &uris, &batches, &expected).await?;
+    assert_eq!(lh_counts(&off), BTreeMap::from([("disabled", 6)]));
+    lh_assert_serves(&denied, "no INSERT", &uris, &batches, &expected).await?;
+    assert_eq!(lh_counts(&denied), BTreeMap::from([("denied", 6)]));
+    assert_eq!(lh_staged(&database, &writing).await?, lh_rows(&["first"]));
+
+    lh_drop_role(&database, &role, pool).await?;
+    database.cleanup().await
+}
+
+/// A write the database refuses for want of `INSERT`, refuses as read-only, or fails serves,
+/// in that response and every later one, the status and body of a process with no write at
+/// all, and is counted by its outcome. Not-found and invalid requests included.
+#[tokio::test]
+async fn v2_label_heal_a_refused_or_failed_write_serves_what_no_write_serves() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let fixture = seed_textless_fixture(&database, true).await?;
+    let uris = [
+        "/v1/names/first.alpha.eth".to_owned(),
+        "/v1/names/first.alpha.eth/subnames?page_size=10".to_owned(),
+        "/v1/names/first.alpha.eth/records".to_owned(),
+        format!("/v1/names/{}", tl_path(&fixture.first_name)),
+        "/v1/names/zzz.first.alpha.eth".to_owned(),
+        "/v1/names/fi%20rst.alpha.eth".to_owned(),
+    ];
+    let off = database.app_state().with_label_staging(lh_staging_off());
+    let expected = lh_serve(&off, &uris, &[]).await?;
+    let statuses: Vec<StatusCode> = expected.iter().map(|(status, _)| *status).collect();
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::NOT_FOUND,
+            StatusCode::BAD_REQUEST
+        ]
+    );
+    assert_eq!(expected[0].1["data"]["name"], json!("first.alpha.eth"));
+    assert_eq!(lh_counts(&off), BTreeMap::from([("disabled", 3)]));
+
+    let (role, pool) = lh_role_without_insert(&database).await?;
+    let denied = lh_state(pool.clone());
+    lh_assert_serves(&denied, "no INSERT", &uris, &[], &expected).await?;
+    assert_eq!(lh_counts(&denied), BTreeMap::from([("denied", 6)]));
+
+    let read_only_pool =
+        lh_pool(&database, "SET default_transaction_read_only = on".to_owned()).await?;
+    let read_only = lh_state(read_only_pool.clone());
+    lh_assert_serves(&read_only, "read-only", &uris, &[], &expected).await?;
+    assert_eq!(lh_counts(&read_only), BTreeMap::from([("read_only", 6)]));
+    read_only_pool.close().await;
+
+    sqlx::raw_sql(
+        "CREATE FUNCTION bigname_phase.label_heal_fail() RETURNS trigger LANGUAGE plpgsql
+         AS $$ BEGIN RAISE EXCEPTION 'failed by the test'; END $$;
+         CREATE TRIGGER label_heal_fail BEFORE INSERT ON bigname_phase.ens_names
+         FOR EACH ROW EXECUTE FUNCTION bigname_phase.label_heal_fail();",
+    )
+    .execute(&database.pool)
+    .await?;
+    let failing = database.app_state();
+    lh_assert_serves(&failing, "failed", &uris, &[], &expected).await?;
+    assert_eq!(lh_counts(&failing), BTreeMap::from([("failed", 6)]));
+    assert!(lh_staged(&database, &failing).await?.is_empty());
+
+    lh_drop_role(&database, &role, pool).await?;
+    database.cleanup().await
+}
+
+/// The value class a runner skips. A label with a NUL byte is not a normalized label, so no
+/// request proves one: the name route refuses it with a 400 and lookup answers it in band,
+/// before any read or write. Handed to the writer anyway, the database refuses the value, the
+/// write counts `failed`, and the process serves and writes as before. A label longer than a
+/// btree key holds is staged, since ens_names keys on the fixed-width labelhash.
+#[tokio::test]
+async fn v2_label_heal_a_nul_or_overlong_label_never_fails_a_response() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    // Hex of keccak digests, which a btree's compression cannot shrink to fit a key.
+    let long: String = (0..47_u64)
+        .map(|seed| hex::encode(alloy_primitives::keccak256(seed.to_be_bytes())))
+        .collect();
+    let long_hash = child_labelhash(&long);
+    let (id, resource) = seed_textless_family_name(
+        &database,
+        &[long_hash.clone(), child_labelhash("x"), child_labelhash("eth")],
+        0x8f2_0000,
+        "ens_v1",
+        202,
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &textless_child_events(
+            &id,
+            resource,
+            &bigname_lookup::ens_namehash_hex("x.eth")?,
+            &long_hash,
+            RC_OWNER,
+            202,
+        ),
+    )
+    .await?;
+    publish_test_families(&database, 240).await?;
+    let off = database
+        .app_state_with_public_namespaces(&["ens"])
+        .with_label_staging(lh_staging_off());
+    let state = database.app_state_with_public_namespaces(&["ens"]);
+    let uri = format!("/v1/names/{long}.x.eth");
+    let expected = lh_ok(&off, &uri).await?;
+    assert_eq!(expected["data"]["name"], json!(format!("{long}.x.eth")));
+
+    let refused = app_router(state.clone())
+        .oneshot(Request::builder().uri("/v1/names/fi%00rst.x.eth").body(Body::empty())?)
+        .await?;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let looked_up = lh_lookup(&state, json!({"inputs": [{"name": "fi\u{0}rst.x.eth"}]})).await?;
+    assert_eq!(
+        looked_up["data"][0]["normalization"]["reason"],
+        json!("invalid_normalized_name"),
+        "{looked_up:#}"
+    );
+    state.label_staging.settled().await;
+    assert!(lh_counts(&state).is_empty(), "{:?}", lh_counts(&state));
+
+    let nul = "fi\u{0}rst";
+    state.label_staging.submit(
+        &state.pool,
+        BTreeMap::from([(bigname_storage::rendered_name::label_hash(nul), nul.to_owned())]),
+    );
+    assert!(lh_staged(&database, &state).await?.is_empty());
+    assert_eq!(lh_counts(&state), BTreeMap::from([("failed", 1)]));
+
+    assert_eq!(lh_get(&state, &uri).await?, (StatusCode::OK, expected));
+    let mut rows = lh_rows(&["x", "eth"]);
+    rows.push((long_hash, long));
+    rows.sort();
+    assert_eq!(lh_staged(&database, &state).await?, rows);
+    assert_eq!(lh_counts(&state), BTreeMap::from([("failed", 1), ("staged", 1)]));
+
+    database.cleanup().await
+}

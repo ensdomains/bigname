@@ -35,6 +35,7 @@ const WRITE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1s'";
 // Rows go in labelhash order, so two writes that share labels wait on each other instead of
 // deadlocking. The primary key is the table's only unique constraint, so the bare `ON CONFLICT`
 // arbitrates on it. Naming it as a conflict target would need `SELECT` on the column too.
+// A unique index added to ens_names later would silently widen DO NOTHING to its conflicts.
 const INSERT: &str = "/* api:label_staging.insert */
     INSERT INTO bigname_phase.ens_names (hash, name)
     SELECT hash, name FROM unnest($1::text[], $2::text[]) AS input(hash, name)
