@@ -190,6 +190,8 @@ struct Inner {
     in_flight: Arc<Semaphore>,
     warned_denied: AtomicBool,
     warned_read_only: AtomicBool,
+    // RED-PROOF MUTATION: a refused or failed write turns the heal off.
+    refused: AtomicBool,
     counts: [AtomicU64; OUTCOMES],
 }
 
@@ -215,6 +217,7 @@ impl LabelStaging {
                 in_flight: Arc::new(Semaphore::new(config.max_in_flight)),
                 warned_denied: AtomicBool::new(false),
                 warned_read_only: AtomicBool::new(false),
+                refused: AtomicBool::new(false),
                 counts: Default::default(),
                 config,
             }),
@@ -291,6 +294,12 @@ impl LabelStaging {
     }
 
     fn report(&self, outcome: Outcome, error: Option<sqlx::Error>) {
+        if matches!(
+            outcome,
+            Outcome::Denied | Outcome::ReadOnly | Outcome::Failed
+        ) {
+            self.inner.refused.store(true, Ordering::Relaxed);
+        }
         self.count(outcome);
         let warned = match outcome {
             Outcome::Denied => &self.inner.warned_denied,
@@ -323,6 +332,10 @@ impl LabelStaging {
     fn count(&self, outcome: Outcome) {
         self.inner.counts[outcome as usize].fetch_add(1, Ordering::Relaxed);
         crate::metrics::observe_label_candidate_write(outcome.as_str());
+    }
+
+    pub(crate) fn refused(&self) -> bool {
+        self.inner.refused.load(Ordering::Relaxed)
     }
 
     pub(crate) fn count_of(&self, outcome: Outcome) -> u64 {

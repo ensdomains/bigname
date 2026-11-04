@@ -8,6 +8,9 @@ pub(super) fn heal_results(
     inputs: &[ParsedNameLookup],
     results: &mut [LookupResult],
 ) {
+    if state.label_staging.refused() {
+        return;
+    }
     let mut heal = LabelHeal::from_names(
         inputs
             .iter()
