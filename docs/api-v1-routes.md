@@ -1874,9 +1874,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   That is the served name except for a label the proof-checked rainbow import
   alone spells, until its row is derived again for another reason, or one that
   only an Interpret redo of another chain revealed, for about (that chain's
-  `PreimageObserved` rows / 1,000) blocks of this chain. A label first learned
-  on another chain otherwise reaches the stored name at this chain's next
-  block. Such a child matches by its placeholder.
+  `PreimageObserved` rows / 1,000) blocks of this chain. Such a child matches
+  by its placeholder. A label first learned on another chain reaches the stored
+  name at this chain's next block.
   So a [non-name form](glossary.md#non-name-form) row matches
   only a prefix, or with `match=contains` a substring, of its placeholder or
   escaped text.

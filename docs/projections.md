@@ -2589,13 +2589,13 @@ and the label registry, and is composed by the children relation
 (`crates/storage/src/families/topology/listing.rs`) at the block Project publishes. The stored
 name spells a label from chain-observed preimages only. A label first learned on another chain
 reaches the stored name at this chain's next block. An imported label reaches it only when its
-row is derived again for another reason (TYR-373/374), since the rainbow-table import has no
-block. Served names heal at read time (`crates/storage/src/families/topology/listing_page.rs`),
-and until then the row keeps its placeholder. The family step reads each other chain's new
-observations past a journalled watermark (`project_child_preimage_watermark`) and derives again
-the rows that hold one of their labels. After an Interpret redo of that chain alone, a label
-only the redo revealed waits about (that chain's `PreimageObserved` rows / 1,000) blocks of
-this chain.
+row is derived again for another reason (TYR-373/374). Served names heal at read time. The
+rainbow-table import has no block, so the row keeps its placeholder and the reader spells the
+label at read (`crates/storage/src/families/topology/listing_page.rs`). The family step reads
+each other chain's new observations past a journalled watermark
+(`project_child_preimage_watermark`) and derives again the rows that hold one of their labels.
+After an Interpret redo of that chain alone, a label only the redo revealed waits about (that
+chain's `PreimageObserved` rows / 1,000) blocks of this chain.
 
 `display_key` is the stored name in C collation, or its first 500 characters when it is longer
 than 2,000 bytes. `expires_key` and `registered_key` are the child's name summary timestamps in
@@ -2616,7 +2616,7 @@ subregistry pointer, its surface, its spelling or an address window of its subre
 step compares the fresh rows with the stored ones, journals every changed row and count with
 its before-image, and moves each count by the same diff. A parent derived whole is set to the
 size of its fresh rows. Above 100,000 rows in one parent the runner logs a `WARN`. Undo restores
-both tables from the journal.
+the listing, its counts and the watermarks from the journal.
 
 The composition pass derives every parent whole in a children stream after the names stream.
 Inputs that change in place with no block, such as a lineage readability flip, are covered by

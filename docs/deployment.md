@@ -5800,7 +5800,7 @@ composition pass derives every parent's rows in a children stream after the name
     identity ascending. Both now run descending.
   - `q` matches the stored name. It differs from the served name for a label that the
     rainbow-table import alone spells, until its row is derived again for another reason
-    (TYR-373, TYR-374), and for one that only an Interpret redo of another chain revealed,
+    (TYR-373/374), and for one that only an Interpret redo of another chain revealed,
     for about (that chain's `PreimageObserved` rows / 1,000) blocks of this chain. Such a
     child serves healed but sorts and matches by its placeholder.
   - A name longer than 2,000 bytes sorts by its first 500 characters, then child identity.
