@@ -19,8 +19,8 @@ pub mod workers;
 pub use expiry_policy::expected_registration_expiry;
 
 pub const CHAIN: &str = "ethereum-sepolia";
-/// The application name of the fixture's sessions: the pool the family runs use, and the
-/// session the fixture checks the expiry selector on.
+/// The application name of the fixture's sessions: the pool the family runs use, and every pool
+/// opened from its options, the one the fixture checks the expiry selector on among them.
 pub const FIXTURE_APPLICATION: &str = "families_fixture";
 /// The projection content hash of this build: the composed name reader serves only a marker
 /// written by it, as the publication fence does.
@@ -165,9 +165,10 @@ impl Fixture {
                 .options([("search_path", "bigname_phase,public")])
                 .application_name(FIXTURE_APPLICATION),
         );
-        // Connections opened before the ALTER DATABASE committed keep the old search path, and a
-        // pool of several can hold more than one. Holding `connections` at once takes every
-        // connection the pool has, so each is set before any is returned.
+        // Connections opened before the ALTER DATABASE committed keep the old search path and
+        // have no application name, and a pool of several can hold more than one. Holding
+        // `connections` at once takes every connection the pool has, so each is set before any
+        // is returned.
         let mut held = Vec::new();
         for _ in 0..connections {
             let mut connection = pool.acquire().await?;
@@ -269,8 +270,8 @@ impl Fixture {
     /// published for this build.
     pub async fn assert_expiry_selector(&self) -> Result<Vec<(String, String, Option<String>)>> {
         // A session of its own: tests that measure a statement's plan depend on what the
-        // fixture's one pooled session has already run. It is closed before this returns, so no
-        // session of it outlives the check.
+        // fixture's one pooled session has already run. It is closed before this returns, so
+        // none of its sessions is checked out or in a transaction once the check is done.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_with(self.pool.connect_options().as_ref().clone())
@@ -301,7 +302,8 @@ impl Fixture {
         .await?;
         // The composed read drops its snapshot open when a chain is not published, which leaves
         // the session in a transaction until sqlx flushes the queued rollback. The publications
-        // are read first, outside a transaction, so that read runs only when it can close.
+        // are read first, outside a transaction, so that read runs only when it can close. These
+        // chains are a superset of the ones the read checks.
         let chains: BTreeSet<&str> = surfaces.iter().map(|(.., chain)| chain.as_str()).collect();
         for chain in chains {
             if load_family_publication(pool, chain).await?.is_none() {

@@ -492,11 +492,13 @@ async fn the_build_waits_for_the_last_worker() -> Result<()> {
     Ok(())
 }
 
-// A run cancelled mid-pass, as a runner shutting down drops it: the first looked-up name's chunk
-// is held at its commit, and the run is dropped once the hold forms, which aborts the workers.
-// Each open chunk's rollback is queued for its connection's return to the pool, and the held
-// chunk's statement runs until the hold is let go, so its transaction stays open until then and
-// every transaction of the pass closes within the bound after. The next run composes every id
+// A run cancelled mid-pass, as a runner shutting down drops it. Two workers, with the first and
+// the last looked-up names' chunks held at their commits, so once both holds form and the
+// coordinator has counted every other chunk, those two COMMITs are all the pass has in flight.
+// Dropping the run then aborts both workers. Each COMMIT was already sent, so its transaction
+// stays open until its hold is let go and then commits, and its connection goes back to the pool
+// with no transaction. A worker aborted at any other point is not this case: sqlx queues no
+// rollback for a transaction dropped while its BEGIN is in flight. The next run composes every id
 // exactly once and equals block by block.
 #[tokio::test]
 async fn a_cancelled_run_leaves_no_transaction_open() -> Result<()> {
@@ -505,21 +507,34 @@ async fn a_cancelled_run_leaves_no_transaction_open() -> Result<()> {
     log_transitions(&fixture).await?;
     install_probe(&fixture).await?;
     let side = side(&fixture).await?;
-    let held_chunk = hold(&fixture, &side, 78, FIRST_LOOKED_UP, false).await?;
-    let three = options(3);
+    let first = hold(&fixture, &side, 78, FIRST_LOOKED_UP, false).await?;
+    let last = hold(&fixture, &side, 79, LAST_LOOKED_UP, false).await?;
+    let two = options(2);
     let formed = tokio::select! {
-        outcome = fixture.apply_with(TARGET, FamilyMode::Rebuild, &three) => {
-            anyhow::bail!("the run returned before its chunk was held: {outcome:?}")
+        outcome = fixture.apply_with(TARGET, FamilyMode::Rebuild, &two) => {
+            anyhow::bail!("the run returned before its chunks were held: {outcome:?}")
         }
-        formed = until(BOUND, || held(&side)) => formed?,
+        formed = until(BOUND, || async {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+                 AND wait_event_type = 'Lock' AND wait_event = 'advisory'",
+            )
+            .fetch_one(&side)
+            .await?;
+            Ok(waiting == 2 && stream(&side).await?.1 == composed(&side).await?)
+        }) => formed?,
     };
     let at_cancel = open_transactions(&side).await;
-    held_chunk.release().await?;
-    ensure!(formed, "the hold formed");
+    first.release().await?;
+    last.release().await?;
+    ensure!(
+        formed,
+        "both chunks were held with every other chunk counted"
+    );
     let at_cancel = at_cancel?;
     ensure!(
-        !at_cancel.is_empty(),
-        "the held chunk's transaction is open until the hold is let go"
+        at_cancel.len() >= 2,
+        "the held chunks' transactions are open until their holds are let go: {at_cancel:?}"
     );
     let closed = until(BOUND, || async {
         Ok(open_transactions(&side).await?.is_empty())
@@ -532,7 +547,7 @@ async fn a_cancelled_run_leaves_no_transaction_open() -> Result<()> {
     );
     let listed = probe_list(&fixture).await?;
     fixture
-        .apply_with(TARGET, FamilyMode::Normal, &three)
+        .apply_with(TARGET, FamilyMode::Normal, &options(3))
         .await?;
     require_composed_once(&fixture, listed).await?;
     require_equal(&fixture, &expected, "after a cancelled run").await?;
