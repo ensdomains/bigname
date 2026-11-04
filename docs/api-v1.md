@@ -1417,7 +1417,10 @@ normalized text instead:
   alias path.
 - `GET /v1/names/{name}/subnames`: `name` and `display_name` of every row. A
   child's own label is not part of the request, so it keeps its placeholder
-  unless the request spells that same label elsewhere.
+  unless the request spells that same label elsewhere. A child label served in
+  its escape form ([non-name form](glossary.md#non-name-form)) is raw bytes, so
+  brackets inside it are never replaced. The parent labels after it are, and
+  their text is escape-encoded like the rest of that string.
 - `POST /v1/lookup`: `name` and `display_name` of every record of the batch,
   the records of its address inputs included. Every name input of the batch
   proves its labels for all of them.

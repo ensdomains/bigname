@@ -5,12 +5,17 @@
 //! `keccak256(text)`, wherever that labelhash appears. A served name brackets a label bigname
 //! holds no usable preimage for (docs/glossary.md, "Rendered name"), and the placeholder is
 //! reserved syntax that no normalized label takes, so replacing a placeholder whose labelhash
-//! the request proves is exact. A bracketed label of the request proves nothing, except a
+//! the request proves is exact. A child's served name can start with the escape form of raw
+//! label bytes instead, which is not reserved, so only its parent's labels and its own
+//! placeholder are replaced there. A bracketed label of the request proves nothing, except a
 //! bracketed `eth` or `base`, which the route reads as text.
 //!
 //! Only the name strings of the response change. Cursors are built from the stored rows, and
 //! order, totals and `meta` read nothing this touches.
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use bigname_storage::rendered_name::{bracketed_label, label_hash};
 
@@ -46,7 +51,9 @@ impl LabelHeal {
         Self::from_names([input.normalized_name.as_str()])
     }
 
-    /// Replace every placeholder of `name` whose labelhash the request proves with its text.
+    /// Replace every placeholder of the served name `name` whose labelhash the request proves
+    /// with its text. Each label of a served name row is normalized text or a placeholder,
+    /// neither holding a dot (docs/glossary.md, "Rendered name").
     pub(crate) fn heal(&mut self, name: &mut String) {
         if let Some(healed) = self.substitute(name) {
             *name = healed;
@@ -58,23 +65,86 @@ impl LabelHeal {
         self.substitute(name);
     }
 
+    /// [`Self::heal`] for a child's served name: its own label, then its parent's served name
+    /// of `parent_labels` labels. The own label can be the escape form of raw bytes
+    /// (docs/glossary.md, "Non-name form"), which may hold dots and brackets, so it heals only
+    /// when it is the placeholder of the child's `labelhash`. In the escape form a healed
+    /// parent label is escape-encoded like the rest of the string.
+    pub(crate) fn heal_child(
+        &mut self,
+        name: &mut String,
+        labelhash: Option<&str>,
+        parent_labels: usize,
+    ) {
+        if let Some(healed) = self.substitute_child(name, labelhash, parent_labels) {
+            *name = healed;
+        }
+    }
+
     fn substitute(&mut self, name: &str) -> Option<String> {
         if self.proven.is_empty() || !name.contains('[') {
             return None;
         }
+        self.substitute_labels(name.split('.').map(|label| (true, label)), false)
+    }
+
+    fn substitute_child(
+        &mut self,
+        name: &str,
+        labelhash: Option<&str>,
+        parent_labels: usize,
+    ) -> Option<String> {
+        if self.proven.is_empty() || !name.contains('[') {
+            return None;
+        }
+        let mut labels: Vec<&str> = name.rsplitn(parent_labels + 1, '.').collect();
+        if labels.len() != parent_labels + 1 {
+            return None;
+        }
+        labels.reverse();
+        let own = labels[0];
+        let own_placeholder = bracketed_label(own)
+            .zip(labelhash)
+            .is_some_and(|(digits, hash)| {
+                hash.strip_prefix("0x")
+                    .unwrap_or(hash)
+                    .eq_ignore_ascii_case(digits)
+            });
+        // Only the escape form puts a backslash in a served label.
+        let escaped = own.contains('\\');
+        let labels = labels
+            .iter()
+            .enumerate()
+            .map(|(position, label)| (position > 0 || own_placeholder, *label));
+        self.substitute_labels(labels, escaped)
+    }
+
+    /// `labels` joined by dots, each placeholder marked as a placeholder position whose
+    /// labelhash the request proves replaced by its text, or `None` when none is.
+    fn substitute_labels<'a>(
+        &mut self,
+        labels: impl Iterator<Item = (bool, &'a str)>,
+        escaped: bool,
+    ) -> Option<String> {
         let mut healed = false;
-        let labels: Vec<&str> = name
-            .split('.')
-            .map(|label| {
-                let text = bracketed_label(label)
-                    .and_then(|_| self.proven.get_key_value(&label_hash(label)));
+        let labels: Vec<Cow<'_, str>> = labels
+            .map(|(position, label)| {
+                let text = if position && bracketed_label(label).is_some() {
+                    self.proven.get_key_value(&label_hash(label))
+                } else {
+                    None
+                };
                 match text {
                     Some((labelhash, text)) => {
                         self.served.insert(*labelhash);
                         healed = true;
-                        text.as_str()
+                        if escaped {
+                            Cow::Owned(escape_encoded(text))
+                        } else {
+                            Cow::Borrowed(text.as_str())
+                        }
                     }
-                    None => label,
+                    None => Cow::Borrowed(label),
                 }
             })
             .collect();
@@ -118,9 +188,11 @@ pub(crate) fn heal_subnames(
     mut subnames: Vec<Subname>,
 ) -> Vec<Subname> {
     let mut heal = LabelHeal::of_route(input);
+    let parent_labels = input.normalized_name.split('.').count();
     for subname in &mut subnames {
-        heal.heal(&mut subname.name);
-        heal.heal(&mut subname.display_name);
+        let labelhash = subname.labelhash.as_deref();
+        heal.heal_child(&mut subname.name, labelhash, parent_labels);
+        heal.heal_child(&mut subname.display_name, labelhash, parent_labels);
     }
     heal.stage(state);
     subnames
@@ -141,6 +213,20 @@ pub(crate) fn heal_name_records(
         heal.heal(name);
     }
     heal.stage(state);
+}
+
+/// PostgreSQL's `escape` encoding of `text`: a NUL or a byte with the high bit set as a
+/// three-digit octal escape, a backslash doubled.
+fn escape_encoded(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'\\' => encoded.push_str("\\\\"),
+            0 | 0x80..=u8::MAX => encoded.push_str(&format!("\\{byte:03o}")),
+            _ => encoded.push(char::from(byte)),
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]

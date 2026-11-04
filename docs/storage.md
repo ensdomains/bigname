@@ -1996,10 +1996,13 @@ fills a table the importer never reads, and the run reports zero scanned rows
 rather than failing — the phase table exists, it is just empty. Load the dump's
 rows into `bigname_phase.ens_names` without letting the rest of the dump run
 against that table: `\copy` the data section, or extract the dump's `COPY`
-statement and retarget only that. Once API hosts stage label candidates, a
-`COPY` into the table fails on the first hash it already holds. Copy into a
-temporary table and insert from it with `ON CONFLICT DO NOTHING`, or set
-`BIGNAME_API_LABEL_STAGING_PER_SECOND=0` on every API host for the load. Do not rewrite the dump's schema
+statement and retarget only that. A `COPY` into the table fails on the first
+hash it already holds, and API hosts may already have staged label candidates
+there. Setting `BIGNAME_API_LABEL_STAGING_PER_SECOND=0` stops new candidates
+but keeps those already staged. So whenever the table may hold candidates, copy
+into a temporary table and insert from it with `ON CONFLICT DO NOTHING`. Copy
+directly only when staging is `0` on every API host and the table is still empty
+after that. Do not rewrite the dump's schema
 qualification globally, because the same rewrite also redirects the dump's
 `DROP TABLE`
 (upstream: .refs/ens_rainbow/src/main.rs:L33 @ ens_rainbow@bc44492)

@@ -993,3 +993,41 @@ async fn v2_label_heal_a_nul_or_overlong_label_never_fails_a_response() -> Resul
 
     database.cleanup().await
 }
+
+/// A child whose label bytes are not valid UTF-8 or hold a NUL is served in its escape form
+/// (docs/glossary.md, "Non-name form"), which leaves dots and brackets as they are. Its label
+/// here is a NUL, a dot and the placeholder of `parent`, which the request proves. Those bytes
+/// are one label, not a placeholder position, so the row is served as without the proof and
+/// nothing is staged.
+#[tokio::test]
+async fn v2_label_heal_an_escaped_child_label_keeps_its_bytes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    let placeholder = tl_bracket(&child_labelhash("parent"));
+    let raw = format!("\0.{placeholder}");
+    seed_subname_edge(
+        &database,
+        "parent.eth",
+        raw.as_bytes(),
+        "0x00000000000000000000000000000000000000cc",
+        90,
+    )
+    .await?;
+    publish_subname_inputs(&database).await?;
+    let state = database.app_state();
+
+    let page = lh_ok(&state, "/v1/names/parent.eth/subnames?page_size=20").await?;
+    let row = page["data"]
+        .as_array()
+        .expect("subnames data")
+        .iter()
+        .find(|row| row["labelhash"] == json!(child_labelhash(&raw)))
+        .unwrap_or_else(|| panic!("the escaped child must be served: {page:#}"));
+    let escaped = format!("\\000.{placeholder}.parent.eth");
+    assert_eq!(row["name"], json!(escaped), "{row:#}");
+    assert_eq!(row["display_name"], json!(escaped), "{row:#}");
+    assert!(lh_staged(&database, &state).await?.is_empty());
+    assert!(lh_counts(&state).is_empty(), "{:?}", lh_counts(&state));
+
+    database.cleanup().await
+}

@@ -130,3 +130,57 @@ fn a_label_that_only_looks_like_a_placeholder_is_not_replaced() {
     assert_eq!(healed(&mut heal, &served), served);
     assert!(heal.candidates().is_empty());
 }
+
+/// `name` healed as the served name of a child whose own label is the bytes `own`.
+fn healed_child(heal: &mut LabelHeal, name: &str, own: &[u8], parent_labels: usize) -> String {
+    let mut name = name.to_owned();
+    let labelhash = format!("{:#x}", alloy_primitives::keccak256(own));
+    heal.heal_child(&mut name, Some(&labelhash), parent_labels);
+    name
+}
+
+#[test]
+fn an_escaped_child_label_is_raw_bytes_not_labels() {
+    // The escape form of the label NUL, `.`, `[labelhash of parent]`.
+    let mut heal = LabelHeal::from_names(["parent.eth"]);
+    let own = format!("\0.{}", bracket("parent"));
+    let served = format!("\\000.{}.parent.eth", bracket("parent"));
+    assert_eq!(healed_child(&mut heal, &served, own.as_bytes(), 2), served);
+    assert!(heal.candidates().is_empty());
+}
+
+#[test]
+fn an_escaped_child_heals_its_parent_labels_escape_encoded() {
+    let mut heal = LabelHeal::from_names(["first.alpha.eth"]);
+    let served = format!("\\377.{}.alpha.eth", bracket("first"));
+    assert_eq!(
+        healed_child(&mut heal, &served, b"\xff", 3),
+        "\\377.first.alpha.eth"
+    );
+    let mut heal = LabelHeal::from_names(["caf\u{e9}.eth"]);
+    let served = format!("\\377.{}.eth", bracket("caf\u{e9}"));
+    assert_eq!(
+        healed_child(&mut heal, &served, b"\xff", 2),
+        "\\377.caf\\303\\251.eth"
+    );
+    assert_eq!(
+        heal.candidates(),
+        BTreeMap::from([(hash("caf\u{e9}"), "caf\u{e9}".to_owned())])
+    );
+}
+
+#[test]
+fn a_child_heals_its_own_placeholder_only_as_its_own_labelhash() {
+    let mut heal = LabelHeal::from_names(["x.x.eth"]);
+    let served = format!("{}.{}.eth", bracket("x"), bracket("x"));
+    assert_eq!(healed_child(&mut heal, &served, b"x", 2), "x.x.eth");
+    let served = format!("{}.x.eth", bracket("x"));
+    assert_eq!(healed_child(&mut heal, &served, b"y", 2), served);
+    // A rendered child under a placeholder parent heals as a rendered name does.
+    let mut heal = LabelHeal::from_names(["first.alpha.eth"]);
+    let served = format!("{}.{}.alpha.eth", bracket("x"), bracket("first"));
+    assert_eq!(
+        healed_child(&mut heal, &served, b"x", 3),
+        format!("{}.first.alpha.eth", bracket("x"))
+    );
+}
