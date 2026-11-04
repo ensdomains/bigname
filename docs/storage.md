@@ -807,7 +807,9 @@ baseline and `20261104120000_name_surfaces_project_parent_key_index.sql` and cha
 | `name_surfaces_project_parent_key_idx` | `storage:families.name.expiring_names` and `storage:families.name.expiring_union`: the surfaces one label below a parent, by namespace and the hash of their labelhashes after the first |
 
 It is a btree on `(namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0))` over
-the surfaces the listing reads, active and not the empty root name. The statement also compares
+every surface. It is not partial, because PostgreSQL estimates an expression from an index's
+statistics only when the index has no predicate. The statement keeps its visibility and
+root-name terms as filters. The statement also compares
 the labelhashes after the first with the parent's path, so a hash collision never lists a name.
 A parent with few names below it is read from this index. A parent above most names, such as
 `eth`, is read from `project_name_summary_expiry_idx`, with the key compared on each row. With a

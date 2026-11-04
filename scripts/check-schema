@@ -4168,8 +4168,7 @@ BEGIN
 END $$;
 DROP TABLE expected_path_indexes, expected_entry_key_hashes;
 CREATE INDEX name_surfaces_project_parent_key_idx
-    ON name_surfaces (namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0))
-    WHERE visibility_state = 'active' AND raw_name IS DISTINCT FROM '';
+    ON name_surfaces (namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0));
 DO $$
 BEGIN
     IF pg_get_indexdef('name_surfaces_project_parent_key_idx'::regclass)

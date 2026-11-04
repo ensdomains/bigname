@@ -1,10 +1,13 @@
 -- API read-only access path for GET /v1/names with `parent` (select_expiring_names and the
 -- union of windows in crates/storage/src/families/name/list/expiring.rs). The statement
--- selects the names one label below the parent by labelhash path. This partial index keys
--- each surface the statement reads, an active surface that is not the empty root name, by
--- namespace and the hash of its labelhashes after the first, each hashed by
+-- selects the names one label below the parent by labelhash path. This index keys every
+-- surface by namespace and the hash of its labelhashes after the first, each hashed by
 -- bigname_phase.entry_key_hashes. A parent with few names below it is then read from here, and
--- not from every name in the expiry window. The statement also compares the labelhashes
+-- not from every name in the expiry window. The index is not partial, because PostgreSQL
+-- estimates an expression from an index's statistics only when the index has no predicate.
+-- With those statistics the planner reads a parent with many names below it, such as eth,
+-- from the expiry index instead. The statement keeps its visibility and root-name terms as
+-- filters. The statement also compares the labelhashes
 -- themselves, so a hash collision never lists a name. Interpret writes name_surfaces and this
 -- index changes none of its rows, no phase marker, catalogue version or content-hash input, and
 -- no redo is required. 20261012120000_name_surfaces_project_path_indexes.sql installs
@@ -30,7 +33,7 @@
 DO $migration$
 DECLARE
     checked_index text := 'name_surfaces_project_parent_key_idx';
-    expected_definition text := $def$CREATE INDEX name_surfaces_project_parent_key_idx ON bigname_phase.name_surfaces USING btree (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), (0)::bigint)) WHERE ((visibility_state = 'active'::text) AND (raw_name IS DISTINCT FROM ''::text))$def$;
+    expected_definition text := $def$CREATE INDEX name_surfaces_project_parent_key_idx ON bigname_phase.name_surfaces USING btree (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), (0)::bigint))$def$;
     found_definition text;
     found_kind text;
     previous_search_path text;
@@ -51,8 +54,7 @@ BEGIN
         END IF;
         CREATE INDEX IF NOT EXISTS name_surfaces_project_parent_key_idx
             ON bigname_phase.name_surfaces
-                (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), 0))
-            WHERE visibility_state = 'active' AND raw_name IS DISTINCT FROM '';
+                (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), 0));
     END IF;
 
     -- Every name below is schema-qualified or lives in pg_catalog.

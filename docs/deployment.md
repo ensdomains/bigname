@@ -5521,13 +5521,15 @@ empty `name_surfaces` builds it directly. A populated table without it is refuse
 initialized database prebuild it concurrently first, outside a transaction. The phase runner
 and API can keep running while it builds. The previous image does not read the index, and
 Interpret keeps it current like the table's other indexes. It holds one hash and the namespace
-for each active surface, about the size of `name_surfaces_project_path_hash_idx`.
+for each surface, about the size of `name_surfaces_project_path_hash_idx`. It is not partial:
+PostgreSQL estimates an expression from an index's statistics only when the index has no
+predicate, and the planner needs those statistics to tell a parent with few names below it
+from `eth`. The statement keeps its visibility and root-name terms as filters.
 
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_parent_key_idx
     ON bigname_phase.name_surfaces
-        (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), 0))
-    WHERE visibility_state = 'active' AND raw_name IS DISTINCT FROM '';
+        (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), 0));
 ANALYZE bigname_phase.name_surfaces;
 ```
 
@@ -5553,7 +5555,7 @@ It must return one row with `relkind` `i`, `indrelid` `bigname_phase.name_surfac
 the schema-migration compares:
 
 ```text
-CREATE INDEX name_surfaces_project_parent_key_idx ON bigname_phase.name_surfaces USING btree (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), (0)::bigint)) WHERE ((visibility_state = 'active'::text) AND (raw_name IS DISTINCT FROM ''::text))
+CREATE INDEX name_surfaces_project_parent_key_idx ON bigname_phase.name_surfaces USING btree (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), (0)::bigint))
 ```
 
 The schema-migration refuses a name that is not an index, an index on another table or one

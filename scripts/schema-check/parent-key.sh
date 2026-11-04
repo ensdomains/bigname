@@ -142,13 +142,13 @@ parent_key_printed_definition() {
     } | run_psql
 }
 parent_key_definition="$(parent_key_printed_definition '')"
-# The reviewed key over every surface, the whole path's key under the reviewed condition, and
-# the reviewed key without the root-name condition. Each is a valid, ready index under the
-# name.
+# The reviewed key carrying a WHERE, which hides the key's statistics from the planner, the
+# whole path's key, and the reviewed key without the namespace. Each is a valid, ready index
+# under the name.
 for parent_key_wrong in \
-    "(namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0))" \
-    "(namespace, hash_array_extended(entry_key_hashes(labelhashes), 0)) WHERE visibility_state = 'active' AND raw_name IS DISTINCT FROM ''" \
-    "(namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0)) WHERE visibility_state = 'active'"; do
+    "(namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0)) WHERE visibility_state = 'active' AND raw_name IS DISTINCT FROM ''" \
+    "(namespace, hash_array_extended(entry_key_hashes(labelhashes), 0))" \
+    "(hash_array_extended(entry_key_hashes(labelhashes[2:]), 0))"; do
     parent_key_found="$(parent_key_printed_definition "$parent_key_wrong")"
     assert_migration_refusal "parent-key-wrong-definition-$parent_key_wrong" "$parent_key_migration" \
         "$parent_key_index exists but does not have the reviewed definition; found \"$parent_key_found\", expected \"$parent_key_definition\"; $parent_key_recovery" <<SQL
