@@ -5741,11 +5741,10 @@ keeps each parent's count and each (parent, label registry) count from the same 
 composition pass derives every parent's rows in a children stream after the names stream.
 
 - It needs `20261103120000_project_child_listing.sql`. The schema-migration creates the three
-  tables and their indexes, plus `project_parent_subregistry_address_idx`, which the family
-  step's work list reads. It takes the family marker
-  table in `EXCLUSIVE` mode first and builds that index on a populated table in its own
-  transaction, so apply it in the redo's maintenance window. It resets nothing: the new tables
-  start empty and the redo fills them.
+  tables and their indexes, plus `project_parent_subregistry_address_idx`, which the family step's
+  work list reads. It takes the family marker table in `EXCLUSIVE` mode first and builds that
+  index on a populated table in its own transaction, so apply it in the redo's maintenance window.
+  It resets nothing: the new tables start empty and the redo fills them.
 - Each listing row keeps the label hashes its stored name still spells as `[labelhash]`
   (`unhealed_labelhashes`), with a GIN index. A preimage observation derives again only the rows
   that hold one of the observed name's labels, by that index. On mainnet most blocks carry a
@@ -5755,23 +5754,23 @@ composition pass derives every parent's rows in a children stream after the name
 - A label first learned on another chain reaches the stored name at this chain's next block.
   An imported label reaches it only when its row is derived again for another reason
   (TYR-373, TYR-374). Served names heal at read time.
-- Each chain keeps, per other chain, the highest block whose preimage observations its family
-  step has read (`project_child_preimage_watermark`), journalled with its block. The watermark
-  never passes the other chain's finalized block (its safe block when finalized is unset), so a
-  reorg of that chain is read again. At that block, each step reads the whole unfinalized tail
-  above it. After the other chain's finalized block moves, a step first catches up to it at
-  about 1,000 observations a step, so a label in a tail denser than that can wait those steps.
-  The row keeps the other chain's Interpret revision it was read under, so an
-  Interpret redo of that chain alone, such as a manifest-authority redo, sends the reading back
-  to block 0. It catches up at about 1,000 observations per block of this chain, so a label only
-  that redo revealed reaches this chain's stored names after about (the other chain's
-  `PreimageObserved` rows / 1,000) blocks of this chain. For Ethereum Mainnet at about 7.8
-  million observations read from Base at 2 s blocks, that is about 7,800 blocks, or 4.3 hours.
-  Labels already stored keep their names, and served names heal at read meanwhile. The
-  schema-migration creates the table empty. The redo's composition pass starts each watermark at the other chain's highest observation or its finalized block
-  (safe when finalized is unset), whichever is lower, because the pass composes every row from
-  the preimages already stored. A chain with neither block, or with its Interpret redo open, is
-  not started and is read from block 0 at the first step.
+- Each chain keeps, per other chain, the highest block whose preimage observations its family step
+  has read (`project_child_preimage_watermark`), journalled with its block. The watermark never
+  passes the other chain's finalized block (its safe block when finalized is unset), so a reorg of
+  that chain is read again. At that block, each step reads the whole unfinalized tail above it.
+  After the other chain's finalized block moves, a step first catches up to it at about 1,000
+  observations a step, so a label in a tail denser than that can wait those steps. The row keeps
+  the other chain's Interpret revision it was read under, so an Interpret redo of that chain
+  alone, such as a manifest-authority redo, sends the reading back to block 0. It catches up at
+  about 1,000 observations per block of this chain, so a label only that redo revealed reaches
+  this chain's stored names after about (the other chain's `PreimageObserved` rows / 1,000) blocks
+  of this chain. For Ethereum Mainnet at about 7.8 million observations read from Base at 2 s
+  blocks, that is about 7,800 blocks, or 4.3 hours. Labels already stored keep their names, and
+  served names heal at read meanwhile. The schema-migration creates the table empty. The redo's
+  composition pass starts each watermark at the other chain's highest observation or its finalized
+  block (safe when finalized is unset), whichever is lower, because the pass composes every row
+  from the preimages already stored. A chain with neither block, or with its Interpret redo open,
+  is not started and is read from block 0 at the first step.
 - Apply it before starting the release. The family writer inserts into the new tables, so without
   them the first family block fails.
 - A block that moves a parent's own facts (its migration state, its ENSv2 subregistry pointer,

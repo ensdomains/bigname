@@ -303,11 +303,10 @@ async fn undoing_the_block_restores_the_watermark_and_the_rerun_heals_again() ->
 }
 
 // Row 4: a rebuild's composition pass, which composes every row from the preimages already
-// stored, starts this chain's watermark at the other
-// chain's highest observation or its finality floor, whichever is lower, and none for a chain
-// with neither marker; the steps after it read on from there. A rebuild that left the watermark
-// to its first step would read from block 0 and stop at the first read's worth of
-// observations.
+// stored, starts this chain's watermark at the other chain's highest observation or its finality
+// floor, whichever is lower, and none for a chain with neither marker; the steps after it read on
+// from there. A rebuild that left the watermark to its first step would read from block 0 and
+// stop at the first read's worth of observations.
 #[tokio::test]
 async fn the_rebuild_pass_starts_the_watermarks_and_the_steps_read_on() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_start", 20).await?;
@@ -836,9 +835,9 @@ async fn two_interpret_redos_between_steps_are_read_again_from_block_zero() -> R
     fixture.cleanup().await
 }
 
-// Row 4b: the composition pass starts the watermark at the other chain's finalized block when
-// its last observation lies above it, so a reorg there is read again, and starts none for an
-// other chain whose Interpret redo is open, which its first step reads from block 0 instead.
+// Row 4b: the composition pass starts the watermark at the other chain's finalized block when its
+// last observation lies above it, and starts none for an other chain whose Interpret redo is
+// open.
 #[tokio::test]
 async fn the_rebuild_pass_starts_at_the_floor_and_skips_an_open_redo() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_start_floor", 20).await?;
