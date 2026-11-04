@@ -457,6 +457,7 @@ pub(super) async fn refresh_block(
         stats,
     )
     .await?;
+    super::event_counts::refresh(transaction, chain_id, block, after, stats).await?;
     let (rows, undo_rows) =
         super::resolution_paths::refresh(transaction, chain_id, block, composition).await?;
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
