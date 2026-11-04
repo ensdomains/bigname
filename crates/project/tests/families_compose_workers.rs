@@ -497,9 +497,9 @@ async fn the_build_waits_for_the_last_worker() -> Result<()> {
 // coordinator has counted every other chunk, those two COMMITs are all the pass has in flight.
 // Dropping the run then aborts both workers. Each COMMIT was already sent, so its transaction
 // stays open until its hold is let go and then commits, and its connection goes back to the pool
-// with no transaction. A worker aborted at any other point is not this case: sqlx queues no
-// rollback for a transaction dropped while its BEGIN is in flight. The next run composes every id
-// exactly once and equals block by block.
+// with no transaction. The case cancels at this point because sqlx queues no rollback for a
+// transaction dropped while its BEGIN is in flight. The next run composes every id exactly once
+// and equals block by block.
 #[tokio::test]
 async fn a_cancelled_run_leaves_no_transaction_open() -> Result<()> {
     let fixture = seeded_with("families_workers_cancel", 4).await?;

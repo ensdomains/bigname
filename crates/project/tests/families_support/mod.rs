@@ -20,7 +20,8 @@ pub use expiry_policy::expected_registration_expiry;
 
 pub const CHAIN: &str = "ethereum-sepolia";
 /// The application name of the fixture's sessions: the pool the family runs use, and every pool
-/// opened from its options, the one the fixture checks the expiry selector on among them.
+/// opened from its options that keeps its name, the one the fixture checks the expiry selector on
+/// among them.
 pub const FIXTURE_APPLICATION: &str = "families_fixture";
 /// The projection content hash of this build: the composed name reader serves only a marker
 /// written by it, as the publication fence does.
