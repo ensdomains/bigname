@@ -685,16 +685,10 @@ Family indexes serve these concrete readers:
   condition and no sort. The planner chooses it on cost. Its predicate leaves out names longer
   than 2000 bytes, because a btree entry larger than about 2.7 KB fails the insert, and the
   walk carries the same bound, so those names are never listed there. A `LIKE` prefix becomes an index range only on a database whose collation PostgreSQL
-  recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan. The
-  reverse lookup candidates (`storage:families.records.reverse_candidates`) keep long names and
-  start from `project_address_name_index`. They order and continue by name, namespace and
-  namehash under `COLLATE "C"`, on any database: the reverse page then drops the names at or
-  before its cursor by comparing the same keys as bytes, and the route builds its cursor the
-  same way, so a database collation that orders names differently from their bytes would
-  otherwise skip names between pages. Search orders, filters and continues in SQL alone, under
-  the database collation throughout.
-- Each of those two walks runs its statement for the surfaces with raw bytes as the first arm
-  of a `UNION ALL`. For search that statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
+  recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan.
+  Search orders, filters and continues in SQL alone, under the database collation throughout.
+- The search walk runs its statement for the surfaces with raw bytes as the first arm of a
+  `UNION ALL`. That statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
   computes each one's [rendered name](glossary.md#rendered-name) before its `LIMIT`, applies
   the same filters and keyset cursor to that name, and has no length bound. The two arms are
   merged in served-name order. The second arm is guarded by a test that any surface without
@@ -774,7 +768,7 @@ row:
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
 
-The same reader, `storage:families.records.reverse_candidates` and Project's raw-name sweep
+The same reader and Project's raw-name sweep
 (`project:families.derived.summary_raw_name_sweep`) also read
 `name_surfaces_project_suffix_hash_idx`, which the identity baseline and
 `20260923140000_project_name_surfaces_label_indexes.sql` install on
