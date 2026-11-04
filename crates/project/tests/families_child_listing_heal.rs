@@ -421,3 +421,29 @@ async fn a_label_only_observation_replayed_after_an_undo_heals_again() -> Result
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
+
+// Measurement only, not for the pull request: the block that observed a name carrying `c` is
+// undone, and its replacement does not observe it again. `label_preimages` keeps `c`, so the
+// relation spells the child, while the undo restored the unhealed row and nothing derives it
+// again.
+#[tokio::test]
+async fn measure_a_dropped_named_observation_after_an_undo() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_measure_dropped", 20).await?;
+    let c = held_by_one_child(&fixture).await?;
+    let o = labelhash("o");
+    unspelled(&fixture, 7, &[&c, &o]).await?;
+    observe(&fixture, 12, 7).await?;
+    preimage(&fixture, &c, "c").await?;
+    preimage(&fixture, &o, "o").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    heals_the_one_child(&fixture).await?;
+    let undone = families::undo_to(&fixture.pool, CHAIN, 11).await?;
+    ensure!(undone == 1, "undid {undone} blocks");
+    sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1 AND block_number >= 12")
+        .bind(CHAIN)
+        .execute(&fixture.pool)
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
