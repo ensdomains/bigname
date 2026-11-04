@@ -4,9 +4,9 @@
 //! transaction. Whatever the worker count, the families equal one worker's and a rebuild block
 //! by block. The cases stop one chunk at its commit (`families_support/workers.rs`, `hold`) to
 //! fix how chunks interleave: two chunks overlap, a failed chunk beside a live one is composed
-//! once more, the build waits for the last worker, two names on one resource compose its
-//! inventory once, and a live worker holds the marker's generation. The history is
-//! `families_support/compose.rs`.
+//! once more, the build waits for the last worker, a cancelled run leaves no transaction open,
+//! two names on one resource compose its inventory once, and a live worker holds the marker's
+//! generation. The history is `families_support/compose.rs`.
 mod families_support;
 
 use std::time::Duration;
@@ -18,8 +18,8 @@ use families_support::{
     compose::{install_probe, probe_chunks, probe_list, seeded, seeded_with},
     workers::{
         FIRST_LOOKED_UP, LAST_LOOKED_UP, composed, held, hold, lock_waits,
-        log_names_end_inventories, log_transitions, names_end_inventories, require_composed_once,
-        side, stream, transitions, uncomposed, until,
+        log_names_end_inventories, log_transitions, names_end_inventories, open_transactions,
+        require_composed_once, side, stream, transitions, uncomposed, until,
     },
 };
 use sqlx::raw_sql;
@@ -240,9 +240,15 @@ async fn one_worker_is_the_serial_pass() -> Result<()> {
     let expected = block_by_block(&fixture).await?;
     log_transitions(&fixture).await?;
     install_probe(&fixture).await?;
+    let side = side(&fixture).await?;
     fixture
         .apply_with(TARGET, FamilyMode::Rebuild, &options(1))
         .await?;
+    let open = open_transactions(&side).await?;
+    ensure!(
+        open.is_empty(),
+        "one worker returned with open transactions: {open:?}"
+    );
     require_equal(&fixture, &expected, "one worker").await?;
     let serials: Vec<i64> = transitions(&fixture)
         .await?
@@ -387,6 +393,17 @@ async fn a_failed_chunk_beside_a_live_worker_is_composed_once_more() -> Result<(
         error.to_string().contains("injected held chunk failure"),
         "{error}"
     );
+    // An error return can leave a dropped transaction's rollback queued until its connection is
+    // returned, so this waits for the pool rather than sampling once.
+    let closed = until(BOUND, || async {
+        Ok(open_transactions(&side).await?.is_empty())
+    })
+    .await?;
+    ensure!(
+        closed,
+        "the failed run leaves open transactions: {:?}",
+        open_transactions(&side).await?
+    );
     let left: Vec<String> = sqlx::query_scalar(
         "SELECT logical_name_id FROM project_compose_name_work WHERE NOT composed",
     )
@@ -473,6 +490,53 @@ async fn the_build_waits_for_the_last_worker() -> Result<()> {
         fixture.cleanup().await?;
     }
     Ok(())
+}
+
+// A run cancelled mid-pass, as a runner shutting down drops it: the first looked-up name's chunk
+// is held at its commit, and the run is dropped once the hold forms, which aborts the workers.
+// Each open chunk's rollback is queued for its connection's return to the pool, and the held
+// chunk's statement runs until the hold is let go, so its transaction stays open until then and
+// every transaction of the pass closes within the bound after. The next run composes every id
+// exactly once and equals block by block.
+#[tokio::test]
+async fn a_cancelled_run_leaves_no_transaction_open() -> Result<()> {
+    let fixture = seeded_with("families_workers_cancel", 4).await?;
+    let expected = block_by_block(&fixture).await?;
+    log_transitions(&fixture).await?;
+    install_probe(&fixture).await?;
+    let side = side(&fixture).await?;
+    let held_chunk = hold(&fixture, &side, 78, FIRST_LOOKED_UP, false).await?;
+    let three = options(3);
+    let formed = tokio::select! {
+        outcome = fixture.apply_with(TARGET, FamilyMode::Rebuild, &three) => {
+            anyhow::bail!("the run returned before its chunk was held: {outcome:?}")
+        }
+        formed = until(BOUND, || held(&side)) => formed?,
+    };
+    let at_cancel = open_transactions(&side).await;
+    held_chunk.release().await?;
+    ensure!(formed, "the hold formed");
+    let at_cancel = at_cancel?;
+    ensure!(
+        !at_cancel.is_empty(),
+        "the held chunk's transaction is open until the hold is let go"
+    );
+    let closed = until(BOUND, || async {
+        Ok(open_transactions(&side).await?.is_empty())
+    })
+    .await?;
+    ensure!(
+        closed,
+        "the cancelled run leaves open transactions: {:?}",
+        open_transactions(&side).await?
+    );
+    let listed = probe_list(&fixture).await?;
+    fixture
+        .apply_with(TARGET, FamilyMode::Normal, &three)
+        .await?;
+    require_composed_once(&fixture, listed).await?;
+    require_equal(&fixture, &expected, "after a cancelled run").await?;
+    fixture.cleanup().await
 }
 
 // T10. Two names serve one resource (`x.left.eth` and `x.right.eth`, `families_support/compose.rs`,
@@ -616,15 +680,10 @@ async fn the_worker_count_may_change_between_runs() -> Result<()> {
             .apply_with(TARGET, FamilyMode::Normal, &options)
             .await?;
         runs += 1;
-        let open: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
-             AND state LIKE 'idle in transaction%'",
-        )
-        .fetch_one(&side)
-        .await?;
+        let open = open_transactions(&side).await?;
         ensure!(
-            open == 0,
-            "run {runs} returned with {open} open transactions"
+            open.is_empty(),
+            "run {runs} returned with open transactions: {open:?}"
         );
         let (at, chunks) = stream(&side).await?;
         if at == Some(0) {

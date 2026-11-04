@@ -19,6 +19,9 @@ pub mod workers;
 pub use expiry_policy::expected_registration_expiry;
 
 pub const CHAIN: &str = "ethereum-sepolia";
+/// The application name of the fixture's sessions: the pool the family runs use, and the
+/// session the fixture checks the expiry selector on.
+pub const FIXTURE_APPLICATION: &str = "families_fixture";
 /// The projection content hash of this build: the composed name reader serves only a marker
 /// written by it, as the publication fence does.
 pub const CONTENT_HASH: &str = bigname_test_support::PROJECTION_CONTENT_HASH;
@@ -159,7 +162,8 @@ impl Fixture {
             pool.connect_options()
                 .as_ref()
                 .clone()
-                .options([("search_path", "bigname_phase,public")]),
+                .options([("search_path", "bigname_phase,public")])
+                .application_name(FIXTURE_APPLICATION),
         );
         // Connections opened before the ALTER DATABASE committed keep the old search path, and a
         // pool of several can hold more than one. Holding `connections` at once takes every
@@ -168,6 +172,10 @@ impl Fixture {
         for _ in 0..connections {
             let mut connection = pool.acquire().await?;
             sqlx::query("SET search_path TO bigname_phase, public")
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query("SELECT set_config('application_name', $1, false)")
+                .bind(FIXTURE_APPLICATION)
                 .execute(&mut *connection)
                 .await?;
             held.push(connection);
