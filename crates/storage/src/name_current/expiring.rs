@@ -147,7 +147,11 @@ pub(crate) fn parent_labelhash_path(parent: &str) -> Vec<String> {
 /// labelhash path is `path`: its labelhashes after the first are `path`, compared without
 /// regard to hex case, whatever text its labels are served under. The first conjunct is the
 /// key of `name_surfaces_project_parent_key_idx`, a hash of each stored labelhash with its
-/// low 32 bits cleared. The second decides, so a hash collision never lists a name.
+/// low 32 bits cleared. The second decides, so a hash collision never lists a name. It is
+/// wrapped in `COALESCE` so the planner does not count it again. An equality on an expression
+/// with no statistics is estimated to keep one row in two hundred, which would make a parent
+/// above most names, such as `eth`, look sparse. A boolean expression is estimated to keep
+/// half, and the key's own statistics then decide the plan.
 pub(crate) fn push_parent_key_predicate(
     builder: &mut QueryBuilder<'_, Postgres>,
     surface: &str,
@@ -159,10 +163,10 @@ pub(crate) fn push_parent_key_predicate(
     ));
     builder.push_bind(path.to_vec());
     builder.push(format!(
-        "::text[]), 0) AND lower(({surface}.labelhashes[2:])::text) = ("
+        "::text[]), 0) AND COALESCE(lower(({surface}.labelhashes[2:])::text) = ("
     ));
     builder.push_bind(path.to_vec());
-    builder.push("::text[])::text");
+    builder.push("::text[])::text, FALSE)");
 }
 
 /// The expiring page over the served rows, or with `composed` over those rows instead (see
