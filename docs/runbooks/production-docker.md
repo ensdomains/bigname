@@ -406,6 +406,11 @@ before the first start. Then:
   error. The runner exits non-zero once every chain has stopped.
 - Under the container's restart policy a failed build shows as a restart loop in the restart
   count, and each start drops the invalid leftover and builds it again.
+- An API that starts while the indexes are dropped or being rebuilt refuses to start with
+  `API walk index set check refused to start`, naming them. An API already serving keeps
+  serving. To start one in that window on purpose, set `BIGNAME_API_WALK_INDEX_SET_CHECK=warn`
+  for that start and unset it after the runner's line above
+  ([the API's startup check](../../ops/walk-index-set/README.md#the-apis-startup-check)).
 
 The [walk index set README](../../ops/walk-index-set/README.md#the-phase-runners-rebuild)
 gives the recovery.
