@@ -90,99 +90,117 @@ const BUSY_LEASE: u128 = 0xa50;
 async fn registration_reads_keep_subqueries_off_the_lineage_join() -> Result<()> {
     with_fixture("registration_plan", true, async |connection| {
         let cells = plan_cells(connection).await?;
-        let probe = event_block_timestamp("ne");
-        let joins = LineageJoins::new();
-        let mut failures = Vec::new();
-        for lineage in [Lineage::AsBuilt, Lineage::Inflated] {
-            if lineage == Lineage::Inflated {
-                raw_sql(INFLATE_LINEAGE_SQL)
-                    .execute(&mut *connection)
-                    .await
-                    .context("inflate the lineage")?;
-            }
-            raw_sql("DEALLOCATE ALL").execute(&mut *connection).await?;
-            // sqlx's statement cache still names the statements DEALLOCATE dropped.
-            connection.clear_cached_statements().await?;
-            for (cell_index, cell) in cells.iter().enumerate() {
-                for (statement_index, statement) in cell.statements.iter().enumerate() {
-                    let label = format!("{lineage:?}, {}, {}", cell.label, statement.label());
-                    let bound = bind_statement(connection, &cell.filter, true, statement).await?;
-                    if !bound.sql.contains(&probe) {
+        check_plans(connection, &cells).await
+    })
+    .await
+}
+
+/// P12 has a fixture of its own, since its 5,000 rows would move every other cell's estimates.
+#[tokio::test]
+async fn a_busy_name_keeps_its_lineage_probed() -> Result<()> {
+    with_fixture("registration_busy_plan", true, async |connection| {
+        raw_sql(BUSY_NAME_SQL)
+            .execute(&mut *connection)
+            .await
+            .context("install the busy name")?;
+        raw_sql(ANALYZE_FIXTURE_SQL)
+            .execute(&mut *connection)
+            .await?;
+        check_plans(connection, &[busy_name_cell()]).await
+    })
+    .await
+}
+
+async fn check_plans(connection: &mut PgConnection, cells: &[PlanCell]) -> Result<()> {
+    let probe = event_block_timestamp("ne");
+    let joins = LineageJoins::new();
+    let mut failures = Vec::new();
+    for lineage in [Lineage::AsBuilt, Lineage::Inflated] {
+        if lineage == Lineage::Inflated {
+            raw_sql(INFLATE_LINEAGE_SQL)
+                .execute(&mut *connection)
+                .await
+                .context("inflate the lineage")?;
+        }
+        raw_sql("DEALLOCATE ALL").execute(&mut *connection).await?;
+        // sqlx's statement cache still names the statements DEALLOCATE dropped.
+        connection.clear_cached_statements().await?;
+        for (cell_index, cell) in cells.iter().enumerate() {
+            for (statement_index, statement) in cell.statements.iter().enumerate() {
+                let label = format!("{lineage:?}, {}, {}", cell.label, statement.label());
+                let bound = bind_statement(connection, &cell.filter, true, statement).await?;
+                if !bound.sql.contains(&probe) {
+                    failures.push(format!(
+                        "{label}: the statement does not read the event block through its probe"
+                    ));
+                }
+                let name = format!("plan_{cell_index}_{statement_index}");
+                let before_name = format!("{name}_before");
+                prepare(connection, &name, &bound.sql).await?;
+                prepare(
+                    connection,
+                    &before_name,
+                    &previous_text(&bound.sql, &probe, &joins),
+                )
+                .await?;
+                for mode in PLAN_MODES {
+                    let cell_label = format!("{label}, {mode}");
+                    let analyze = cell.bound_lineage_reads && lineage == Lineage::Inflated;
+                    let after = explain(connection, mode, &name, &bound.literals, analyze).await?;
+                    let before =
+                        explain(connection, mode, &before_name, &bound.literals, false).await?;
+                    println!(
+                        "{cell_label}\n  probe text: {}\n  previous text: {}",
+                        outline(&after),
+                        outline(&before)
+                    );
+                    if cell.folds_in_custom_mode && mode == "force_custom_plan" {
+                        for (text, plan) in [("probe", &after), ("previous", &before)] {
+                            if !lineage_scans(plan).is_empty() {
+                                failures.push(format!(
+                                    "{cell_label}: the {text} text reads lineage although \
+                                     its registration filter is constant FALSE\n{}",
+                                    outline(plan)
+                                ));
+                            }
+                        }
+                        continue;
+                    }
+                    failures.extend(prefixed(&cell_label, subquery_join_failures(&after)));
+                    failures.extend(prefixed(&cell_label, gather_failures(&after)));
+                    if !subquery_on_lineage_join(&before) {
                         failures.push(format!(
-                            "{label}: the statement does not read the event block through its probe"
+                            "{cell_label}: the previous text no longer puts a subquery on \
+                             the lineage join, so this cell proves nothing about it\n{}",
+                            outline(&before)
                         ));
                     }
-                    let name = format!("plan_{cell_index}_{statement_index}");
-                    let before_name = format!("{name}_before");
-                    prepare(connection, &name, &bound.sql).await?;
-                    prepare(
-                        connection,
-                        &before_name,
-                        &previous_text(&bound.sql, &probe, &joins),
-                    )
-                    .await?;
-                    for mode in PLAN_MODES {
-                        let cell_label = format!("{label}, {mode}");
-                        let analyze = cell.bound_lineage_reads && lineage == Lineage::Inflated;
-                        let after =
-                            explain(connection, mode, &name, &bound.literals, analyze).await?;
-                        let before =
-                            explain(connection, mode, &before_name, &bound.literals, false).await?;
-                        println!(
-                            "{cell_label}\n  probe text: {}\n  previous text: {}",
-                            outline(&after),
-                            outline(&before)
-                        );
-                        if cell.folds_in_custom_mode && mode == "force_custom_plan" {
-                            for (text, plan) in [("probe", &after), ("previous", &before)] {
-                                if !lineage_scans(plan).is_empty() {
-                                    failures.push(format!(
-                                        "{cell_label}: the {text} text reads lineage although \
-                                         its registration filter is constant FALSE\n{}",
-                                        outline(plan)
-                                    ));
-                                }
-                            }
-                            continue;
-                        }
-                        failures.extend(prefixed(&cell_label, subquery_join_failures(&after)));
-                        failures.extend(prefixed(&cell_label, gather_failures(&after)));
-                        if !subquery_on_lineage_join(&before) {
+                    if let Some(order) = cell.order {
+                        failures.extend(prefixed(&cell_label, order_failures(&after, order)));
+                    }
+                    if lineage == Lineage::Inflated {
+                        failures.extend(prefixed(&cell_label, keyed_failures(&after)));
+                        if cell.previous_hashes && !lineage_scanned(&before) {
                             failures.push(format!(
-                                "{cell_label}: the previous text no longer puts a subquery on \
-                                 the lineage join, so this cell proves nothing about it\n{}",
+                                "{cell_label}: the previous text probes the inflated lineage, \
+                                 so this cell proves nothing about the hash\n{}",
                                 outline(&before)
                             ));
                         }
-                        if let Some(order) = cell.order {
-                            failures.extend(prefixed(&cell_label, order_failures(&after, order)));
-                        }
-                        if lineage == Lineage::Inflated {
-                            failures.extend(prefixed(&cell_label, keyed_failures(&after)));
-                            if cell.previous_hashes && !lineage_scanned(&before) {
-                                failures.push(format!(
-                                    "{cell_label}: the previous text probes the inflated lineage, \
-                                     so this cell proves nothing about the hash\n{}",
-                                    outline(&before)
-                                ));
-                            }
-                            if analyze {
-                                failures
-                                    .extend(prefixed(&cell_label, lineage_read_failures(&after)));
-                            }
+                        if analyze {
+                            failures.extend(prefixed(&cell_label, lineage_read_failures(&after)));
                         }
                     }
                 }
             }
         }
-        ensure!(
-            failures.is_empty(),
-            "registration read plans:\n{}",
-            failures.join("\n\n")
-        );
-        Ok(())
-    })
-    .await
+    }
+    ensure!(
+        failures.is_empty(),
+        "registration read plans:\n{}",
+        failures.join("\n\n")
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -329,6 +347,7 @@ async fn registration_source_is_the_plain_source_with_the_lineage_probe() -> Res
         let mut filters = plan_cells(connection)
             .await?
             .into_iter()
+            .chain([busy_name_cell()])
             .map(|cell| (cell.label, cell.filter))
             .collect::<Vec<_>>();
         filters.extend(
@@ -848,11 +867,6 @@ async fn plan_cells(connection: &mut PgConnection) -> Result<Vec<PlanCell>> {
             page(200),
         ),
         cell(
-            "P12 a name with a row on each of 5,000 blocks",
-            windowed(read_filter(&busy_lease(), &none)),
-            count_and_page(20),
-        ),
-        cell(
             "P11 the registration precheck",
             lease,
             vec![
@@ -862,6 +876,24 @@ async fn plan_cells(connection: &mut PgConnection) -> Result<Vec<PlanCell>> {
             ],
         ),
     ])
+}
+
+fn busy_name_cell() -> PlanCell {
+    PlanCell {
+        label: "P12 a name with a row on each of 5,000 blocks",
+        filter: windowed(read_filter(&busy_lease(), &AttributedRecords::default())),
+        statements: vec![
+            Statement::Count,
+            Statement::Page {
+                page_size: 20,
+                cursor: None,
+            },
+        ],
+        order: None,
+        previous_hashes: false,
+        folds_in_custom_mode: false,
+        bound_lineage_reads: false,
+    }
 }
 
 async fn row_cells(connection: &mut PgConnection) -> Result<Vec<RowCell>> {
@@ -1526,16 +1558,10 @@ async fn with_fixture(
                 .execute(&mut *connection)
                 .await
                 .context("install the unrelated rows")?;
-            raw_sql(BUSY_NAME_SQL)
-                .execute(&mut *connection)
-                .await
-                .context("install the busy name")?;
         }
-        raw_sql(
-            "ANALYZE normalized_events, chain_lineage, surface_bindings, resources, name_surfaces",
-        )
-        .execute(&mut *connection)
-        .await?;
+        raw_sql(ANALYZE_FIXTURE_SQL)
+            .execute(&mut *connection)
+            .await?;
         check(&mut connection).await
     }
     .await;
@@ -1768,6 +1794,9 @@ SELECT 'noise:' || n, 'ens', pg_temp.name(1048576 + n % 400), pg_temp.rid(167772
     jsonb_build_object('namehash', pg_temp.node(1048576 + n % 400))
 FROM generate_series(0, 19999) n;
 "#;
+
+const ANALYZE_FIXTURE_SQL: &str =
+    "ANALYZE normalized_events, chain_lineage, surface_bindings, resources, name_surfaces";
 
 /// P12: a lease (0xa50) whose name (0xa5) has a resource-less row on each of blocks 1..=5000, so
 /// the name arm holds more rows than the page and its lineage has no repeated keys. The chain's
