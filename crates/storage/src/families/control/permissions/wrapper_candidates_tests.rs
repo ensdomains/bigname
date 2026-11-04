@@ -250,6 +250,70 @@ fn unkeyed_owner_scans(plan: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// For each wrapper table, the index conditions that bound a scan of it to keyed rows. A scan
+/// that compares only the chain, or the chain and a constant kind or scope, reads the chain's
+/// whole index.
+const TABLE_KEYS: [(&str, &[&str]); 4] = [
+    ("project_grant", &["(resource_id = ", "(subject = "]),
+    (
+        "project_ens_v2_entry_owner",
+        &["(entry_key = ", "(owner = ", "(resource_id = "],
+    ),
+    (
+        "project_ens_v2_registry_parent",
+        &["(registry = ", "(parent = "],
+    ),
+    ("project_account_approval", &["(owner = ", "(subject = "]),
+];
+
+/// The steps of `plan`, outside its subplans, that are not bounded by a key: a merge or hash
+/// join, which reads both sides whole, a sequential scan of a wrapper table, and an index scan
+/// of one whose condition compares none of its keys. An entry primary-key probe by the
+/// registry alone is one. The subplans are the namespace check of the statement around a
+/// source, which no wrapper table is read in.
+fn unbounded_steps(plan: &[String]) -> Vec<String> {
+    let mut steps = Vec::new();
+    let mut subplan: Option<usize> = None;
+    for (index, line) in plan.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let depth = line.len() - trimmed.len();
+        if subplan.is_some_and(|start| depth > start) {
+            continue;
+        }
+        subplan = None;
+        if trimmed.starts_with("SubPlan") || trimmed.starts_with("hashed SubPlan") {
+            subplan = Some(depth);
+            continue;
+        }
+        if trimmed.contains("Merge Join") || trimmed.contains("Hash Join") {
+            steps.push(trimmed.to_owned());
+            continue;
+        }
+        let scanned = if trimmed.contains("Index") && trimmed.contains(" using ") {
+            trimmed.split_once(" using ").map(|(_, rest)| rest)
+        } else {
+            trimmed
+                .split_once("Bitmap Index Scan on ")
+                .map(|(_, rest)| rest)
+        }
+        .and_then(|rest| rest.split(' ').next());
+        for (table, keys) in TABLE_KEYS {
+            if trimmed.contains(&format!("Seq Scan on {table} ")) {
+                steps.push(trimmed.to_owned());
+            }
+            if scanned.is_some_and(|name| name.starts_with(&format!("{table}_")))
+                && !plan.get(index + 1).is_some_and(|condition| {
+                    condition.contains("Index Cond:")
+                        && keys.iter().any(|key| condition.contains(key))
+                })
+            {
+                steps.push(trimmed.to_owned());
+            }
+        }
+    }
+    steps
+}
+
 /// What a source keyed from its resources must not do: miss a step, read one of its tables
 /// whole, or use the entry owner index at all.
 fn unkeyed(cell: &str, plan: &[String], steps: &[Step]) -> Vec<String> {
@@ -270,6 +334,10 @@ fn unkeyed(cell: &str, plan: &[String], steps: &[Step]) -> Vec<String> {
         .any(|line| line.contains("project_ens_v2_entry_owner_owner_idx"))
     {
         failures.push(format!("{cell}: walks the entry owner index"));
+    }
+    let unbounded = unbounded_steps(plan);
+    if !unbounded.is_empty() {
+        failures.push(format!("{cell}: steps not bounded by a key: {unbounded:?}"));
     }
     if failures.is_empty() {
         return failures;
@@ -461,6 +529,15 @@ async fn wrapper_sources_reach_each_row_by_key_from_the_resources() -> Result<()
                     )
                     .await?;
                     failures.extend(made_before(&cell, &plan, before_misses));
+                    // At the root with 300 holders both sources before read rows no key
+                    // bounds, in both plan modes: the owner source every root grant or every
+                    // entry of the chain, the operator source every ENSv2 registry approval.
+                    if read.resource == root(1) && unbounded_steps(&plan).is_empty() {
+                        failures.push(format!(
+                            "{cell}: the source before reads only keyed rows\n{}",
+                            shown(&plan)
+                        ));
+                    }
                 }
                 // No source of the statement as sent walks the entry owner index unkeyed.
                 let plan =
