@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use axum::{Router, routing::get};
 use clap::Parser;
 use sqlx::PgPool;
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -72,6 +73,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
     )
     .await?;
     startup_preflight::ensure_verified_lookup_ddl_available(&pool).await?;
+    let walk_index_set_unusable =
+        startup_preflight::ensure_walk_index_set(&pool, args.walk_index_set_check).await?;
     let health_pool = bigname_storage::connect_phase_reserved_readiness_pool(
         &args.database,
         "bigname-api-health",
@@ -141,6 +144,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         verified_rate_limit_burst = args.bounds.verified_rate_limit_burst,
         verified_rate_limit_max_clients = args.bounds.verified_rate_limit_max_clients,
         trust_x_forwarded_for = args.bounds.trust_x_forwarded_for,
+        walk_index_set_check = args.walk_index_set_check.as_str(),
+        walk_index_set_unusable,
         "API booted"
     );
 
@@ -198,6 +203,11 @@ pub(crate) fn app_router(state: AppState) -> Router {
     ))
 }
 
+/// Chromium caps a cached preflight at 7,200 s and Firefox at 86,400 s, so one day serves both.
+fn cors_layer() -> CorsLayer {
+    CorsLayer::permissive().max_age(Duration::from_secs(86_400))
+}
+
 fn app_router_with_bounds(
     state: AppState,
     health_pool: PgPool,
@@ -206,10 +216,10 @@ fn app_router_with_bounds(
     let bounded_router = v2::router()
         .with_state(state.clone())
         .route("/openapi.json", get(openapi::get_openapi))
-        .route_layer(CorsLayer::permissive());
+        .route_layer(cors_layer());
     let health_router = Router::new()
         .route("/healthz", get(health))
-        .route_layer(CorsLayer::permissive())
+        .route_layer(cors_layer())
         .layer(axum::Extension(HealthDatabasePool(health_pool)))
         .with_state(state);
     // The API is read-only public data served cross-origin to browser clients (the ENS Manager

@@ -15,6 +15,10 @@ exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until
 are rebuilt. The operator's `phase-runner inspect` block and raw-event windows count
 and list normalized events by block hash, which `normalized_events_block_idx` serves.
 
+An API that is already serving keeps serving while they are dropped. An API that starts while
+they are dropped refuses to start, unless `BIGNAME_API_WALK_INDEX_SET_CHECK=warn` (see
+[The API's startup check](#the-apis-startup-check)).
+
 The [walk index set](../../docs/glossary.md#walk-index-set) is the 17 indexes Interpret keeps.
 `drop.sql` drops the other 34 before a from-zero walk or a full-history Interpret redo. Before
 Project runs, the phase runner rebuilds any of them that is missing, with the statements
@@ -190,6 +194,33 @@ build or wait can also raise the heartbeat-stale alert.
 `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS` set `maintenance_work_mem` and
 `max_parallel_maintenance_workers` on the rebuild's connection only. Unset, the server's values
 apply. The build line logs the values in force.
+
+## The API's startup check
+
+At startup, after its schema check, the API reads the state of every name `drop.sql` drops in
+the catalog of the database it connects to, with the same read as the phase runner. It reads
+`pg_class` and `pg_index` only, so its login needs no grant beyond its `USAGE` on the schema,
+and on a physical standby it sees the primary's catalog as replayed there.
+
+- With every name a valid, ready index on `normalized_events` it logs
+  `every normalized_events index the walk index set scripts drop is in place` and starts.
+- Otherwise it logs `API walk index set check refused to start` at ERROR and exits non-zero.
+  The error names each index as `missing`, `not valid and ready`, or held by the relation that
+  holds its name, and says how to rebuild them.
+- A valid index with another definition counts as in place, with a warning naming both
+  definitions, as the runner logs.
+- `BIGNAME_API_WALK_INDEX_SET_CHECK=warn` starts it anyway, with a warning that lists the
+  indexes in `unusable`. Set it only for a start that must serve while the indexes are dropped
+  or being rebuilt, such as the event audit during a redo, and unset it once the runner logs
+  that every index is in place. With every index in place, `warn` still logs a warning that it
+  is set.
+- The gauge `walk_index_set_unusable` on the API's metrics listener counts the indexes the
+  check found not in place, and the `API booted` line carries `walk_index_set_check` and
+  `walk_index_set_unusable`.
+
+The check runs only at startup. Under a restart policy, an API that restarts while the indexes
+are dropped shows as a restart loop with the same error until they are rebuilt.
+`apps/api/src/tests/walk_index_set_check.rs` proves the check's outcomes.
 
 ## Checks and recovery
 
