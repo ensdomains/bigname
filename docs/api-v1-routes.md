@@ -1871,12 +1871,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `GET /v1/addresses/{address}/names`, so `q=o&match=contains` matches
   `carol.parent.eth` and `two.parent.eth`. The comparison is byte-wise against
   the child's stored name, the spelling its row had when it was last derived.
-  A label first learned on another chain reaches the stored name at this
-  chain's next block. So the stored name is the served name except for a label
-  the proof-checked rainbow import alone spells, until its row is derived again
-  for another reason, or one that only an Interpret redo of another chain
-  revealed, for about (that chain's `PreimageObserved` rows / 1,000) blocks of
-  this chain. Such a child matches by its placeholder.
+  A label first learned on another chain reaches the stored name at this chain's
+  next block. The stored name is the served name except for a label the
+  proof-checked rainbow import alone spells, until its row is derived again for
+  another reason, or one that only an Interpret redo of another chain revealed,
+  for about (that chain's `PreimageObserved` rows / 1,000) blocks of this chain.
+  Such a child matches by its placeholder.
   So a [non-name form](glossary.md#non-name-form) row matches
   only a prefix, or with `match=contains` a substring, of its placeholder or
   escaped text.
