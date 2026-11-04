@@ -10,9 +10,9 @@
 //! The plan test checks every statement of the read in both plan modes. It runs on the fixture
 //! as built and again with the chain's lineage inflated. No lineage join may filter on a
 //! subquery, and no plan may be parallel. On the inflated lineage, the lineage must be joined by
-//! primary-key probes. The previous text is the probe spelled `rb.block_timestamp` again. The
-//! test checks that it still puts subqueries on the join and still scans the inflated lineage,
-//! so the fixture keeps proving something.
+//! probes keyed on `(chain_id, block_hash)`. The previous text is the probe spelled
+//! `rb.block_timestamp` again. The test checks that it still puts subqueries on the join and
+//! still scans the inflated lineage, so the fixture keeps proving something.
 //!
 //! The row test runs both texts on every input class, in both plan modes, and compares the
 //! counts, the page rows, the next cursors, the cursor's anchor block and the registration
@@ -49,6 +49,11 @@ use super::{
 use crate::projection_helpers::split_keyset_page;
 
 const PLAN_MODES: [&str; 2] = ["force_custom_plan", "force_generic_plan"];
+/// The `chain_lineage` indexes that lead with `(chain_id, block_hash)`.
+const KEYED_LINEAGE_INDEXES: [&str; 2] = [
+    "chain_lineage_pkey",
+    "chain_lineage_chain_id_block_hash_block_number_key",
+];
 const CHAIN: &str = "ethereum-mainnet";
 const PUBLISHED_BLOCK: i64 = 5_000;
 const PERMISSION_KINDS: [&str; 6] = [
@@ -1198,8 +1203,9 @@ fn lineage_scanned(plan: &Value) -> bool {
     })
 }
 
-/// K: the statement's lineage is read by primary-key probes from the inner side of a nested
-/// loop, never scanned or hashed.
+/// K: the statement's lineage is read by probes keyed on `(chain_id, block_hash)` from the inner
+/// side of a nested loop, never scanned or hashed. Both the primary key and the unique key that
+/// adds `block_number` lead with those columns, and the planner picks either.
 fn keyed_failures(plan: &Value) -> Vec<String> {
     let mut failures = Vec::new();
     let probed = lineage_joins(plan).iter().any(|(join, scan, side)| {
@@ -1207,13 +1213,15 @@ fn keyed_failures(plan: &Value) -> Vec<String> {
             && join["Node Type"] == "Nested Loop"
             && *side == "Inner"
             && scan["Node Type"] == "Index Scan"
-            && scan["Index Name"] == "chain_lineage_pkey"
+            && scan["Index Name"]
+                .as_str()
+                .is_some_and(|index| KEYED_LINEAGE_INDEXES.contains(&index))
             && scan["Index Cond"]
                 .as_str()
                 .is_some_and(|condition| condition.contains("block_hash"))
     });
     if !probed {
-        failures.push("rb is not probed by chain_lineage_pkey from a nested loop".to_owned());
+        failures.push("rb is not probed by its key from a nested loop".to_owned());
     }
     for node in all_nodes(plan) {
         if node["Relation Name"] == "chain_lineage"
