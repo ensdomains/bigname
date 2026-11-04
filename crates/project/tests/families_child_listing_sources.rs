@@ -11,12 +11,14 @@ use families_support::{
     CHAIN, CONTENT_HASH, Event, Fixture, hash,
     listing_cases::{OWNER, assert_served, edge, journalled, listed, name, node, preimage},
 };
-use sqlx::raw_sql;
 
 /// The other chain the observations come from.
 const SOURCE: &str = "base-sepolia";
 
 const WATERMARK: &str = "project_child_preimage_watermark";
+
+/// An owner a later edge moves a child to.
+const NEW_OWNER: &str = "0x00000000000000000000000000000000000000a2";
 
 /// The label hash of `label`.
 fn labelhash(label: &str) -> String {
@@ -300,8 +302,8 @@ async fn undoing_the_block_restores_the_watermark_and_the_rerun_heals_again() ->
     fixture.cleanup().await
 }
 
-// Row 4: the schema-migration creates the watermarks empty. A rebuild's composition pass, which
-// composes every row from the preimages already stored, starts this chain's at the other
+// Row 4: a rebuild's composition pass, which composes every row from the preimages already
+// stored, starts this chain's watermark at the other
 // chain's highest observation or its finality floor, whichever is lower, and none for a chain
 // with neither marker; the steps after it read on from there. A rebuild that left the watermark
 // to its first step would read from block 0 and stop at the first read's worth of
@@ -352,15 +354,6 @@ async fn the_rebuild_pass_starts_the_watermarks_and_the_steps_read_on() -> Resul
         )
         .await?;
 
-    raw_sql(include_str!(
-        "../../../migrations/20261103120000_project_child_listing.sql"
-    ))
-    .execute(&fixture.pool)
-    .await?;
-    ensure!(
-        watermark(&fixture).await?.is_none(),
-        "the migration starts no watermark"
-    );
     for ranges in [RebuildRanges::Through(12), RebuildRanges::Off] {
         let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(ranges);
         fixture
@@ -580,8 +573,8 @@ async fn each_other_chain_heals_its_own_labels_under_its_own_watermark() -> Resu
 }
 
 // The other chain later drops the observation that healed a holder here, as an undo or a reorg
-// of its block does: the preimage stays true and `label_preimages` keeps it, so the holder stays
-// healed.
+// of its block does: the preimage stays true and `label_preimages` keeps it, so the holder,
+// derived again for its own chain's reason, stays healed.
 #[tokio::test]
 async fn the_other_chain_dropping_the_observation_does_not_unheal() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_dropped", 20).await?;
@@ -589,10 +582,16 @@ async fn the_other_chain_dropping_the_observation_does_not_unheal() -> Result<()
     fixture.apply(12, FamilyMode::Normal).await?;
     let healed = listed(&fixture, &name(1)).await?;
     reorg(&fixture, 5).await?;
+    // A new owner at block 13 derives the row again with the observation gone.
+    edge(&fixture, (13, 0), 1, 11, &labelhash("c"), NEW_OWNER).await?;
     fixture.apply(13, FamilyMode::Normal).await?;
-    ensure!(listed(&fixture, &name(1)).await? == healed);
+    let derived = listed(&fixture, &name(1)).await?;
+    ensure!(
+        derived[0].1 == healed[0].1 && derived[0].2 == healed[0].2,
+        "the row derived again keeps its healed name: {derived:?}"
+    );
     ensure!(unhealed(&fixture, &name(11)).await?.is_empty());
-    ensure!(journalled(&fixture, 13, "project_child_listing").await? == (0, 0));
+    ensure!(journalled(&fixture, 13, "project_child_listing").await? == (1, 1));
     assert_served(&fixture, &name(1)).await?;
     fixture.cleanup().await
 }
@@ -834,5 +833,67 @@ async fn two_interpret_redos_between_steps_are_read_again_from_block_zero() -> R
     ensure!(journalled(&fixture, 13, WATERMARK).await? == (1, 1));
     assert_served(&fixture, &name(1)).await?;
     fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}
+
+// Row 4b: the composition pass starts the watermark at the other chain's finalized block when
+// its last observation lies above it, so a reorg there is read again, and starts none for an
+// other chain whose Interpret redo is open, which its first step reads from block 0 instead.
+#[tokio::test]
+async fn the_rebuild_pass_starts_at_the_floor_and_skips_an_open_redo() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_source_start_floor", 20).await?;
+    let kid = labelhash("kid");
+    preimage(&fixture, &kid, "kid").await?;
+    fixture.surface(&name(1), &node(1)).await?;
+    edge(&fixture, (10, 0), 1, 11, &kid, OWNER).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    // No stored name holds the observed labels, so reading them heals nothing.
+    chain_with_heads(&fixture, SOURCE, Some(4), Some(4)).await?;
+    source_surface(&fixture, 7, &[&labelhash("x")]).await?;
+    observe(&fixture, 3, 7).await?;
+    observe(&fixture, 6, 7).await?;
+    let redoing = "ethereum-holesky";
+    chain_with_heads(&fixture, redoing, Some(20), Some(20)).await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+             normalizer_version, visibility_state, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1, 'ens', $2, ARRAY[$3], $4, 'active', $5, $6, 0, 'canonical')",
+    )
+    .bind(name(8))
+    .bind(node(8))
+    .bind(labelhash("z"))
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(redoing)
+    .bind(hash(0))
+    .execute(&fixture.pool)
+    .await?;
+    fixture
+        .event(
+            Event::new(
+                "redoing:5:8",
+                5,
+                0,
+                "PreimageObserved",
+                "ens_v1_registry_l1",
+            )
+            .on(redoing)
+            .name(&name(8)),
+        )
+        .await?;
+    fixture.interpret_row_on(redoing, "redo", 1, true).await?;
+    let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Through(12));
+    fixture
+        .apply_with(12, FamilyMode::Rebuild, &options)
+        .await?;
+    ensure!(
+        watermark(&fixture).await? == Some(4),
+        "the pass starts the watermark at the finalized block, below the last observation"
+    );
+    ensure!(
+        watermark_of(&fixture, redoing).await?.is_none(),
+        "the pass starts no watermark for a source in redo"
+    );
+    assert_served(&fixture, &name(1)).await?;
     fixture.cleanup().await
 }

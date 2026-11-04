@@ -31,7 +31,9 @@
 //!   blocks: the cutoff is the highest block among them and every observation up to it is read,
 //!   so a block that alone holds more is read whole. A read from below catches up over its
 //!   blocks. At the floor, the read takes the whole tail above it, which A's finality
-//!   lag bounds, so a dense tail heals at the next block too.
+//!   lag bounds, so a dense tail heals at the next block too. A step that finds the floor moved
+//!   since the last one first catches up to it in capped reads, so a label in a tail denser than
+//!   a read can wait those steps.
 //! - Undoing an A block later does not un-heal B's names: a preimage is true whichever block
 //!   revealed it, and `label_preimages` keeps it.
 //! - Undoing B's block restores the watermark from the journal. Reading an A block again derives
