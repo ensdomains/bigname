@@ -9,7 +9,9 @@ use anyhow::{Result, ensure};
 use bigname_project::families::{self, FamilyMode, FamilyOptions, RebuildRanges};
 use families_support::{
     CHAIN, CONTENT_HASH, Event, Fixture, hash,
-    listing_cases::{OWNER, assert_served, edge, journalled, listed, name, node, preimage},
+    listing_cases::{
+        OWNER, assert_served, edge, journalled, label_state, listed, name, node, preimage,
+    },
 };
 
 /// The other chain the observations come from.
@@ -138,6 +140,26 @@ async fn observe(fixture: &Fixture, block: i64, id: u64) -> Result<()> {
             )
             .on(SOURCE)
             .name(&name(id)),
+        )
+        .await?;
+    Ok(())
+}
+
+/// A label-only preimage observation of `label` on `SOURCE` at `block`, log `log`: no name, the
+/// label hash in its after state, as an ENSv2 registry's `LabelRegistered` writes one.
+async fn observe_label(fixture: &Fixture, block: i64, log: i64, label: &str) -> Result<()> {
+    let identity = format!("source-label:{block}:{log}");
+    fixture
+        .event(
+            Event::new(
+                &identity,
+                block,
+                log,
+                "PreimageObserved",
+                "ens_v2_registry_l1",
+            )
+            .on(SOURCE)
+            .after(label_state(label)),
         )
         .await?;
     Ok(())
@@ -689,7 +711,18 @@ fn fork(block: i64) -> String {
 // writes later at the same height, heals the holder at the next block.
 #[tokio::test]
 async fn a_stale_fork_observation_is_not_read_past_its_replacement() -> Result<()> {
-    let fixture = Fixture::new("families_child_listing_source_stale_fork", 20).await?;
+    stale_fork("families_child_listing_source_stale_fork", false).await
+}
+
+// Label-only row 11: the same with label-only observations on both forks.
+#[tokio::test]
+async fn a_stale_fork_label_only_observation_is_not_read_past_its_replacement() -> Result<()> {
+    stale_fork("families_child_listing_source_stale_fork_label", true).await
+}
+
+/// Row 12's steps, with named observations or with label-only ones (`label_only`).
+async fn stale_fork(prefix: &str, label_only: bool) -> Result<()> {
+    let fixture = Fixture::new(prefix, 20).await?;
     let (c, o) = (labelhash("c"), labelhash("o"));
     fixture.surface(&name(1), &node(1)).await?;
     edge(&fixture, (10, 0), 1, 11, &c, OWNER).await?;
@@ -741,7 +774,11 @@ async fn a_stale_fork_observation_is_not_read_past_its_replacement() -> Result<(
     source_surface(&fixture, 7, &[&c, &o]).await?;
     source_surface(&fixture, 9, &[&labelhash("x")]).await?;
     // The old block 5's observation, which Interpret has not replaced yet.
-    observe(&fixture, 5, 9).await?;
+    if label_only {
+        observe_label(&fixture, 5, 0, "x").await?;
+    } else {
+        observe(&fixture, 5, 9).await?;
+    }
     fixture.apply(12, FamilyMode::Normal).await?;
     ensure!(
         watermark(&fixture).await?.is_none(),
@@ -760,17 +797,23 @@ async fn a_stale_fork_observation_is_not_read_past_its_replacement() -> Result<(
         .bind(SOURCE)
         .execute(&fixture.pool)
         .await?;
+    let (observed, after) = if label_only {
+        (None, label_state("c"))
+    } else {
+        (Some(name(7)), serde_json::json!({}))
+    };
     sqlx::query(
         "INSERT INTO normalized_events (event_identity, namespace, logical_name_id,
              event_kind, source_family, manifest_version, chain_id, block_number, block_hash,
              transaction_hash, transaction_index, log_index, derivation_kind,
-             canonicality_state)
+             canonicality_state, after_state)
          VALUES ('fork:5:7', 'ens', $1, 'PreimageObserved', 'ens_v1_registry_l1', 1, $2, 5,
-                 $3, '0xfork', 0, 0, 'ens_v2_registry_resource_surface', 'canonical')",
+                 $3, '0xfork', 0, 0, 'ens_v2_registry_resource_surface', 'canonical', $4)",
     )
-    .bind(name(7))
+    .bind(observed)
     .bind(SOURCE)
     .bind(fork(5))
+    .bind(after)
     .execute(&fixture.pool)
     .await?;
     preimage(&fixture, &c, "c").await?;
@@ -894,5 +937,121 @@ async fn the_rebuild_pass_starts_at_the_floor_and_skips_an_open_redo() -> Result
         "the pass starts no watermark for a source in redo"
     );
     assert_served(&fixture, &name(1)).await?;
+    fixture.cleanup().await
+}
+
+/// A child `c` of the spelled parent 1, published at block 11 with `c` unknown. Returns the label
+/// hash of `c`.
+async fn held_by_one_child(fixture: &Fixture) -> Result<String> {
+    let c = labelhash("c");
+    fixture.surface(&name(1), &node(1)).await?;
+    edge(fixture, (10, 0), 1, 11, &c, OWNER).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    ensure!(unhealed(fixture, &name(11)).await? == std::slice::from_ref(&c));
+    assert_served(fixture, &name(1)).await?;
+    Ok(c)
+}
+
+/// Block `block` heals the one child of `held_by_one_child` and journals its row alone.
+async fn heals_the_one_child(fixture: &Fixture, block: i64) -> Result<()> {
+    let healed = listed(fixture, &name(1)).await?;
+    ensure!(
+        healed[0].1.starts_with("c.") && healed[0].2 == healed[0].1,
+        "the child heals at block {block}, its key with it: {healed:?}"
+    );
+    ensure!(unhealed(fixture, &name(11)).await?.is_empty());
+    ensure!(
+        journalled(fixture, block, "project_child_listing").await? == (1, 1),
+        "block {block} journals the healed row"
+    );
+    assert_served(fixture, &name(1)).await
+}
+
+// Label-only row 8: a label the other chain observes with no name, as an ENSv2 registry's
+// `LabelRegistered` writes one, heals a holder here at this chain's next block. The other
+// chain's block also observes an unrelated name, so the read reaches the block whatever it
+// counts, and only the label set decides. A read that took labels only from the surfaces of
+// observed names would leave the row spelling `[labelhash]`.
+#[tokio::test]
+async fn a_label_observed_alone_on_another_chain_heals_a_holder() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_source_label_only", 20).await?;
+    let c = held_by_one_child(&fixture).await?;
+    source(&fixture, 9, &[&labelhash("x")]).await?;
+    observe(&fixture, 5, 9).await?;
+    observe_label(&fixture, 5, 1, "c").await?;
+    preimage(&fixture, &c, "c").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    heals_the_one_child(&fixture, 12).await?;
+    ensure!(watermark(&fixture).await? == Some(5));
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+// Label-only row 9: the other chain's only observations are label-only, its last at block 6
+// healing a holder here. The read's cutoff counts them, so block 12 reads through block 6, heals
+// the holder and moves the watermark there; a rebuild's pass starts the watermark at block 6 too,
+// the last observation. A cutoff or a start that counted only named observations would stop
+// below block 6, or find none.
+#[tokio::test]
+async fn a_top_block_of_label_only_observations_is_read_and_starts_the_rebuild() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_source_label_only_top", 20).await?;
+    let c = held_by_one_child(&fixture).await?;
+    chain_with_heads(&fixture, SOURCE, Some(20), Some(20)).await?;
+    observe_label(&fixture, 3, 0, "x").await?;
+    observe_label(&fixture, 6, 0, "c").await?;
+    preimage(&fixture, &labelhash("x"), "x").await?;
+    preimage(&fixture, &c, "c").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    heals_the_one_child(&fixture, 12).await?;
+    ensure!(watermark(&fixture).await? == Some(6));
+    fixture.assert_rebuild_equal(12).await?;
+    ensure!(
+        watermark(&fixture).await? == Some(6),
+        "the rebuild's pass starts the watermark at the last label-only observation"
+    );
+    fixture.cleanup().await
+}
+
+// Label-only row 10: a label-only observation the other chain has not activated yet is not read:
+// its label has no preimage, the holder keeps its row, and no watermark moves past it. Once it is
+// activated and its preimage written, the next step reads it and heals the holder.
+#[tokio::test]
+async fn a_label_only_observation_is_read_once_activated() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_source_label_only_candidate", 20).await?;
+    let c = held_by_one_child(&fixture).await?;
+    chain_with_heads(&fixture, SOURCE, Some(20), Some(20)).await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, derivation_kind, canonicality_state, after_state,
+             consumer_visibility, migration_correlation_ids)
+         VALUES ('candidate:5', 'ens', 'PreimageObserved', 'ens_v2_migration_l1', 1, $1, 5,
+                 $2, '0xcandidate', 0, 0, 'ens_v2_migration', 'canonical', $3, 'candidate',
+                 ARRAY['correlation:5'])",
+    )
+    .bind(SOURCE)
+    .bind(hash(5))
+    .bind(label_state("c"))
+    .execute(&fixture.pool)
+    .await?;
+    let before = listed(&fixture, &name(1)).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    ensure!(listed(&fixture, &name(1)).await? == before);
+    ensure!(journalled(&fixture, 12, "project_child_listing").await? == (0, 0));
+    ensure!(watermark(&fixture).await?.is_none());
+    assert_served(&fixture, &name(1)).await?;
+    fixture.assert_rebuild_equal(12).await?;
+
+    sqlx::query(
+        "UPDATE normalized_events SET consumer_visibility = 'activated'
+         WHERE event_identity = 'candidate:5'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    preimage(&fixture, &c, "c").await?;
+    fixture.apply(13, FamilyMode::Normal).await?;
+    heals_the_one_child(&fixture, 13).await?;
+    ensure!(watermark(&fixture).await? == Some(5));
+    fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }

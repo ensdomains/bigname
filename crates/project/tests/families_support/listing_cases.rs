@@ -45,6 +45,16 @@ pub async fn edge(
     Ok(())
 }
 
+/// The after state of a label-only preimage observation of `label`: no name, the label hash
+/// carried directly, as the adapter writes one for a label no name of its log represents
+/// (`crates/adapters/src/schema_v2/identity.rs`, `materialize_from`).
+pub fn label_state(label: &str) -> serde_json::Value {
+    json!({"source_event": "LabelRegistered",
+           "raw_label_hex": alloy_primitives::hex::encode(label),
+           "decoded_label": label,
+           "labelhash": format!("{:#x}", alloy_primitives::keccak256(label.as_bytes()))})
+}
+
 /// A chain-observed label preimage.
 pub async fn preimage(fixture: &Fixture, labelhash: &str, label: &str) -> Result<()> {
     sqlx::query(
