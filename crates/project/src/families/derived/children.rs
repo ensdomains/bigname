@@ -17,9 +17,11 @@
 //! in place, and an address window of its subregistry. Such a parent is derived whole, by one
 //! statement, and every row of it is journalled. An observation derives no parent whole.
 //!
-//! The limits: a preimage written outside a block, such as the rainbow import (TYR-373), emits no
-//! observation, and an observation heals only its own chain's rows, while `label_preimages` is
-//! shared by every chain. A stored name such a preimage would spell heals only when its row is
+//! `label_preimages` is shared by every chain, so an observation on another chain also spells
+//! this chain's stored names: each family step reads the other chains' observations above this
+//! chain's watermark for each (`sources.rs`) and derives the rows that hold one of their labels,
+//! as children. The limit: a preimage written outside a block, such as the rainbow import
+//! (TYR-373), emits no observation, so a stored name it would spell heals only when its row is
 //! derived again for another reason. The served name applies the preimage at read meanwhile.
 //!
 //! Inputs that change in place with no block, such as a lineage readability flip or a migration
@@ -29,6 +31,8 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result, families::input};
 
+mod sources;
+pub(crate) use sources::seed as seed_sources;
 mod work;
 
 /// Children derived per statement, to bound the working set.
@@ -38,12 +42,14 @@ const CHUNK: usize = 1000;
 /// block's transaction.
 const LARGE_PARENT_ROWS: u64 = 100_000;
 
-/// What a listing refresh wrote: the listing and count rows written or removed, and the undo
-/// rows journalled for them.
+/// What a listing refresh wrote: the listing and count rows written or removed, the preimage
+/// watermark rows written, and the undo rows journalled for them.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Refreshed {
     pub(crate) rows: u64,
     pub(crate) undo_rows: u64,
+    /// The preimage watermark rows written (`sources.rs`).
+    pub(crate) watermark_rows: u64,
 }
 
 /// Every parent that can list one of the children `$2` of chain `$1`: the parent of each of its
@@ -241,8 +247,18 @@ pub(crate) async fn refresh(
     after: i64,
     touched: (&[String], &[String]),
 ) -> Result<Refreshed> {
-    let (children, parents) = work::list(transaction, chain_id, block, after, touched).await?;
-    derive(transaction, chain_id, block, &parents, &children).await
+    let observed = sources::read(transaction, chain_id).await?;
+    let (mut children, parents) = work::list(transaction, chain_id, block, after, touched).await?;
+    if !observed.holders.is_empty() {
+        children.extend(observed.holders.iter().cloned());
+        children.sort();
+        children.dedup();
+    }
+    let mut refreshed = derive(transaction, chain_id, block, &parents, &children).await?;
+    let (rows, undo_rows) = sources::advance(transaction, chain_id, block, &observed).await?;
+    refreshed.watermark_rows += rows;
+    refreshed.undo_rows += undo_rows;
+    Ok(refreshed)
 }
 
 /// Derive the listing rows of `parents`, each whole, and of `children` under every parent that

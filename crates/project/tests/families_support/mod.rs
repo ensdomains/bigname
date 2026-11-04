@@ -103,6 +103,7 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_name_summary",
     "project_child_listing",
     "project_child_listing_count",
+    "project_child_preimage_watermark",
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
@@ -728,10 +729,21 @@ impl Fixture {
     /// The Interpret row of `chain_phase_state` with its content hash and redo attempt, inside an
     /// open redo of blocks 0 to 1 when `in_redo`.
     pub async fn interpret_row(&self, hash: &str, attempt: i64, in_redo: bool) -> Result<()> {
+        self.interpret_row_on(CHAIN, hash, attempt, in_redo).await
+    }
+
+    /// The Interpret row of `chain`, as `interpret_row` writes `CHAIN`'s.
+    pub async fn interpret_row_on(
+        &self,
+        chain: &str,
+        hash: &str,
+        attempt: i64,
+        in_redo: bool,
+    ) -> Result<()> {
         sqlx::query(
             "DELETE FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'interpret'",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .execute(&self.pool)
         .await?;
         sqlx::query(
@@ -744,7 +756,7 @@ impl Fixture {
                      CASE WHEN $4 THEN 0 END, CASE WHEN $4 THEN 1 END,
                      CASE WHEN $4 THEN now() END)",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .bind(hash)
         .bind(attempt)
         .bind(in_redo)
