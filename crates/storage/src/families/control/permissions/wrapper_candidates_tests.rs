@@ -259,16 +259,13 @@ const TABLE_KEYS: [(&str, &[&str]); 4] = [
         "project_ens_v2_entry_owner",
         &["(entry_key = ", "(owner = ", "(resource_id = "],
     ),
-    (
-        "project_ens_v2_registry_parent",
-        &["(registry = ", "(parent = "],
-    ),
+    ("project_ens_v2_registry_parent", &["(registry = "]),
     ("project_account_approval", &["(owner = ", "(subject = "]),
 ];
 
 /// The steps of `plan`, outside its subplans, that are not bounded by a key: a merge or hash
-/// join, which reads both sides whole, a sequential scan of a wrapper table, and an index scan
-/// of one whose condition compares none of its keys. An entry primary-key probe by the
+/// join, which the keyed shape never needs, a sequential scan of a wrapper table, and an index
+/// scan of one whose condition compares none of its keys. An entry primary-key probe by the
 /// registry alone is one. The subplans are the namespace check of the statement around a
 /// source, which no wrapper table is read in.
 fn unbounded_steps(plan: &[String]) -> Vec<String> {
@@ -285,7 +282,8 @@ fn unbounded_steps(plan: &[String]) -> Vec<String> {
             subplan = Some(depth);
             continue;
         }
-        if trimmed.contains("Merge Join") || trimmed.contains("Hash Join") {
+        let node = trimmed.trim_start_matches("->  ");
+        if (node.starts_with("Hash ") || node.starts_with("Merge ")) && node.contains(" Join") {
             steps.push(trimmed.to_owned());
             continue;
         }
