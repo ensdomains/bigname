@@ -356,7 +356,7 @@ pub(crate) async fn seed(
         rows += sqlx::query(ADVANCE)
             .bind(chain_id)
             .bind(&source)
-            .bind(top.min(floor))
+            .bind(top.max(floor))
             .bind(hash)
             .bind(attempt)
             .execute(&mut **transaction)
