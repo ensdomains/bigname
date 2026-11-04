@@ -2587,10 +2587,15 @@ subnames page, the registry labels page and the child counts read rows through i
 compose no child at read. A row holds the child's served fields, its stored name, the sort keys
 and the label registry, and is composed by the children relation
 (`crates/storage/src/families/topology/listing.rs`) at the block Project publishes. The stored
-name spells a label from chain-observed preimages only. A preimage from the rainbow-table
-import has no block, and an observation on another chain derives no row of this one, so the
-reader spells such a label at read (`crates/storage/src/families/topology/listing_page.rs`)
-and the row keeps its placeholder, for the other chain's label until it is derived again.
+name spells a label from chain-observed preimages only. A label first learned on another chain
+reaches the stored name at this chain's next block. An imported label reaches it only when its
+row is derived again for another reason (TYR-373/374), since the rainbow-table import has no
+block. Served names heal at read time (`crates/storage/src/families/topology/listing_page.rs`),
+and until then the row keeps its placeholder. The family step reads each other chain's new
+observations past a journalled watermark (`project_child_preimage_watermark`) and derives again
+the rows that hold one of their labels. After an Interpret redo of that chain alone, a label
+only the redo revealed waits about (that chain's `PreimageObserved` rows / 1,000) blocks of
+this chain.
 
 `display_key` is the stored name in C collation, or its first 500 characters when it is longer
 than 2,000 bytes. `expires_key` and `registered_key` are the child's name summary timestamps in

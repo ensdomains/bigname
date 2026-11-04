@@ -1872,8 +1872,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `carol.parent.eth` and `two.parent.eth`. The comparison is byte-wise against
   the child's stored name, the spelling its row had when it was last derived.
   That is the served name except for a label the proof-checked rainbow import
-  alone spells, or one first observed on another chain until the row is
-  derived again: such a child matches by its placeholder.
+  alone spells, until its row is derived again for another reason, or one that
+  only an Interpret redo of another chain revealed, for about (that chain's
+  `PreimageObserved` rows / 1,000) blocks of this chain. A label first learned
+  on another chain otherwise reaches the stored name at this chain's next
+  block. Such a child matches by its placeholder.
   So a [non-name form](glossary.md#non-name-form) row matches
   only a prefix, or with `match=contains` a substring, of its placeholder or
   escaped text.
