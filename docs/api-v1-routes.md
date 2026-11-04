@@ -2294,21 +2294,25 @@ A recognized namespace with no available publication returns retryable `409 stal
   next; each opt-in request counts again at its current published position. An
   exact empty result is zero. Exact counting may scan the entire matching
   history and cost substantially more than a page.
-- `page.total_count` is populated by default for other anchored history reads:
-  name history, and `/v1/events` when `name`, `registration_id`,
-  `address`, or `resolver` bounds the read. The count runs inside the same repeatable-read
+- Name history populates `page.total_count` by default. The count runs inside the same repeatable-read
   transaction as the page over exactly the page's filters (scope, type set,
   block and timestamp windows, product visibility, and duplicate suppression),
   so it agrees with what paging would enumerate. With
   `include=child_registrations`, the count covers the combined collection of
   name rows and direct child registration rows, each event counted once. It is capped: counting stops
   after 10,000 product-visible rows and a larger result reports
-  `total_count=null`. With `include=total_count`, anchored history reads instead
-  run an exact, uncapped count in the same read transaction and return that total.
+  `total_count=null`. With `include=total_count`, name history instead
+  runs an exact, uncapped count in the same read transaction and returns that total.
   Clients needing a name event counter can request its history with
   `page_size=1&include=total_count`; no event rows need to be enumerated. This
-  option may cost more on names with a long history. Unanchored `/v1/events` reads (namespace, type, and block
-  or timestamp windows only) never count and always report `total_count=null`.
+  option may cost more on names with a long history.
+- `/v1/events` returns `page.total_count=null` unless the request sends
+  `include=total_count`, whatever anchors the read. With the flag, a read that
+  `name`, `registration_id`, `address`, or `resolver` bounds runs the exact,
+  uncapped count described above, over the page's filters and in its read
+  transaction, except for the emitter-only reads in the next item. Unanchored
+  `/v1/events` reads (namespace, type, and block or timestamp windows only)
+  never count and always report `total_count=null`.
   A `/v1/events` read bounded only by `contract_address` also defaults to
   `total_count=null`, but `include=total_count` requests the exact filtered
   total in the same page transaction and published snapshot. This is a row
@@ -2319,10 +2323,10 @@ A recognized namespace with no available publication returns retryable `409 stal
   total is returned, and an exact empty result is zero.
 - A `/v1/events` read that only an emitting contract anchors (`resolver`,
   `contract_address`, or both, with no `name`, `registration_id`, or
-  `address`) caps the opt-in count at 100,000 rows. One contract can emit more
+  `address`) caps the opt-in count at 10,000 rows. One contract can emit more
   rows than an exact count reads within the request deadline. Up to the cap
   `include=total_count` returns the exact total as above. Above it the count
-  stops after 100,001 rows and the page reports `total_count=null`. The rows,
+  stops after 10,001 rows and the page reports `total_count=null`. The rows,
   `next_cursor`, and `has_more` are the same as without the flag.
 
 ### History event payloads (`include=data`, `include=raw`)
@@ -4699,7 +4703,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total. When only resolver or contract_address anchors the read, it is exact up to 100,000 rows and null above. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total, and page.total_count is null without it. When only resolver or contract_address anchors the read, it is exact up to 10,000 rows and null above. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4825,13 +4829,11 @@ For a registrar lease first identified by a later readable observation, registra
   and block filter (including `resolver`), the direction, the `type` set, and
   the timestamp window. A nonterminal page contains `page_size` rows; only the
   terminal page may be shorter. `page.total_count` follows the shared history
-  rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
-  `registration_id`, `address`, or `resolver` anchors the read; opting into
-  `include=total_count` removes that cap and also enables exact filtered totals
-  for contract-address reads, whose default remains null. When only
-  `resolver` or `contract_address` anchors the read, the opt-in count is
-  exact up to 100,000 rows and `null` beyond. Other unanchored
-  reads always return null.
+  rule: `null` unless the request sends `include=total_count`. With the flag
+  the count is exact when `name`, `registration_id`, or `address` anchors the
+  read. When only `resolver` or `contract_address` anchors the read, the count
+  is exact up to 10,000 rows and `null` beyond. Other unanchored reads always
+  return null.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can
@@ -5276,7 +5278,7 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- | --- |
 | `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 100,000 events and null above. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 10,000 events and null above. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -5344,11 +5346,11 @@ For a registrar lease first identified by a later readable observation, registra
   `GET /v1/events?contract_address=` at the same chain and block: that feed
   defaults to the `ens` namespace, which is served on one chain. The
   overview's count and the feed's `include=total_count` count are both exact
-  up to 100,000 events and `null` above that, so they also agree above the
+  up to 10,000 events and `null` above that, so they also agree above the
   cap. For an address
   an operator also admits into another namespace on this chain, the overview
   counts those events too and the default feed does not. The count reads the
-  contract's events rather than a projected total, and stops after 100,001. It includes the
+  contract's events rather than a projected total, and stops after 10,001. It includes the
   registry's root role changes (`RootPermissionChanged` `permission` rows),
   which the feed has listed since they became product history.
   `counts.roles`, also present with `include=counts`, is the exact number of

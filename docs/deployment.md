@@ -5483,7 +5483,61 @@ A release that adds an index to the drop list is deployed in this order:
    finished. A schema-migration that installs such an index adopts the valid index the runner
    or the operator built, without a build. Run while the build is still going, it finds an
    invalid index under the name and fails its check.
-3. The API.
+3. The API, once every index on the list is in place. An API of a release that has the
+   [startup check](#the-api-refuses-to-start-without-the-indexes-dropsql-drops) refuses to
+   start before then. The API and the runner share an image, so keep the API on the previous
+   image until the runner has logged that line or the operator's build has finished, or start
+   it with `BIGNAME_API_WALK_INDEX_SET_CHECK=warn` and unset that after.
+
+## The API refuses to start without the indexes drop.sql drops
+
+The build that has the API check the `normalized_events` indexes
+[`ops/walk-index-set/drop.sql`](../ops/walk-index-set/README.md) drops at startup (TYR-457,
+see [walk index set](storage.md#walk-index-set)) changes the API only.
+
+- Before, an API started while one of those indexes was missing or invalid served without
+  it. On a large database a read that needs it could exceed
+  `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`, and nothing at startup said why.
+- Now, after its schema check, the API reads the catalog of the database it connects to. When
+  every index on the list is a valid, ready index on `normalized_events` it logs
+  `every normalized_events index the walk index set scripts drop is in place` and starts.
+  Otherwise it logs `API walk index set check refused to start` at ERROR and exits non-zero.
+  The error names each index with `missing`, `not valid and ready`, or the relation that
+  holds its name.
+- It reads `pg_class` and `pg_index` only, so the API's login needs no grant beyond the
+  schema `USAGE` in [Surviving services](#surviving-services). On a physical standby it
+  checks the primary's catalog as replayed there. A build still running on the primary shows
+  as `not valid and ready` until the build finishes there.
+- A valid index whose definition differs from `install.sql`'s counts as in place. The API logs
+  a warning with both definitions, as the phase runner does.
+- Without the phase schema there is nothing to check, and the API starts as before.
+- The gauge `walk_index_set_unusable` on the API's metrics listener is the number of indexes
+  the check found not in place, and the `API booted` line carries `walk_index_set_check` and
+  `walk_index_set_unusable`.
+- Neither content hash rotates: no hashed file changes. It adds no schema-migration, no
+  manifest change and no redo. It ships as an image swap.
+
+`BIGNAME_API_WALK_INDEX_SET_CHECK` is `refuse` by default. Set to `warn`, the API starts
+without the missing indexes and logs
+`the API serves without normalized_events indexes the walk index set scripts drop (BIGNAME_API_WALK_INDEX_SET_CHECK=warn)`
+at WARN, with the list in `unusable`, and the gauge reads their number. Reads that need them
+may then exceed the statement timeout. With every index in place, `warn` still logs a warning
+that it is set. Any other value refuses to parse.
+
+The check runs only at startup, so an API already serving keeps serving when an index is
+dropped. While the indexes are dropped for a from-zero walk or a full-history Interpret redo,
+or while the phase runner rebuilds them, an API that starts refuses. That includes a restart
+under the container's restart policy, which then shows as a restart loop with the same error.
+To start one in that window on purpose, set `BIGNAME_API_WALK_INDEX_SET_CHECK=warn` for that
+start and unset it once the runner logs that every index is in place.
+
+A swap onto a database without one of them leaves no API serving: the old container has
+stopped and the new one refuses. Before the swap, confirm on the database the API reads that
+every index is in place. The phase runner logs
+`every normalized_events index the walk index set scripts drop is in place` after a build,
+and `install.sql` builds only what is missing and fails unless every index is valid, ready
+and of the reviewed definition. When one is missing, let the phase runner build it or run
+`install.sql` first.
 
 ## A parent key index for the names listing
 
