@@ -323,7 +323,10 @@ fn expiry_walk(
 /// surfaces below it than a page must read the parent key and examine at most those surfaces
 /// and a page, `eth` must walk the deadline index and examine at most the rows
 /// [`expiry_walk`] counts, and any other parent must stay within the bound of whichever path
-/// it takes.
+/// it takes. A plan that reads both indexes reads at most every listable row of the window
+/// once. Its bound is those rows on the summary, and the parent's surfaces and a page on the
+/// surfaces. A nested loop over the parent's materialized surfaces also compares each walked
+/// row with each of those surfaces in memory. This check does not count those comparisons.
 async fn check_parent_plans(
     connection: &mut PgConnection,
     deadline: crate::NameCurrentDeadline,
@@ -406,8 +409,19 @@ async fn check_parent_plans(
                         (by_key || !reads_index(plan, deadline_index) || summary_rows > walk_bound)
                             .then(|| format!("must walk {deadline_index} within {walk_bound} rows"))
                     } else if hot {
-                        let bound = if by_key { key_bound } else { walk_bound };
-                        (summary_rows > bound).then(|| format!("must stay within {bound} rows"))
+                        let (bound, surface_bound) =
+                            match (by_key, reads_index(plan, deadline_index)) {
+                                (true, true) => (deadlines.len() as f64, Some(key_bound)),
+                                (true, false) => (key_bound, Some(key_bound)),
+                                (false, _) => (walk_bound, None),
+                            };
+                        let surfaces_over = surface_bound.is_some_and(|limit| surface_rows > limit);
+                        (summary_rows > bound || surfaces_over).then(|| match surface_bound {
+                            Some(limit) => {
+                                format!("must stay within {bound} summary and {limit} surface rows")
+                            }
+                            None => format!("must stay within {bound} summary rows"),
+                        })
                     } else {
                         (!by_key || summary_rows > key_bound || surface_rows > key_bound).then(
                             || format!("must read {PARENT_KEY_INDEX} within {key_bound} rows"),
