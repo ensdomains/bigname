@@ -467,9 +467,10 @@ async fn replayed_without_change(fixture: &Fixture) -> Result<()> {
 #[tokio::test]
 async fn undoing_a_named_observation_keeps_its_holder_healed() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_undo_named", 20).await?;
-    let c = held_by_one_child(&fixture).await?;
-    let o = labelhash("o");
+    let (c, o) = (labelhash("c"), labelhash("o"));
+    // The observed name's surface stands before block 11, as Interpret writes it with its block.
     unspelled(&fixture, 7, &[&c, &o]).await?;
+    held_by_one_child(&fixture).await?;
     let kept = fixture.exact().await?;
     observe(&fixture, 12, 7).await?;
     preimage(&fixture, &c, "c").await?;
