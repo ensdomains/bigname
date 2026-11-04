@@ -59,7 +59,6 @@ pub(super) fn push_registration_history_source<'a>(
     );
     builder.push(")");
     push_bounded_candidate_canonicality(builder, canonical_only);
-    push_not_in_name_arm(builder, logical_name_ids);
     builder.push(") ne ");
     if include_cursor_row {
         builder.push(" CROSS JOIN history_cursor_row cursor_row ");
