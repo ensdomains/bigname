@@ -40,6 +40,9 @@ pub use query_plan::{explain_contract_event_count_for_test, explain_event_histor
 mod read_filter;
 mod redo;
 mod registration_identity;
+#[cfg(test)]
+mod registration_plan_tests;
+mod registration_source;
 mod registry_handoffs;
 mod resolver_source;
 pub use registry_handoffs::{HistoryRegistryHandoff, load_history_registry_handoffs};

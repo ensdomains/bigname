@@ -1,3 +1,38 @@
+use sqlx::{Postgres, QueryBuilder};
+
+/// Join the event's own block as `rb`, by the lineage primary key. The subquery reads `ne` and
+/// carries `OFFSET 0`, so PostgreSQL cannot flatten it into a plain join. Every plan it has for
+/// the subquery then takes `ne`'s row as a parameter, and such an inner side admits only a nested
+/// loop that runs the subquery per event row: no hash, merge or materialized scan of the lineage.
+pub(super) fn push_history_lineage_probe(builder: &mut QueryBuilder<'_, Postgres>) {
+    builder.push(
+        r#"
+        LEFT JOIN LATERAL (
+            SELECT rb.block_timestamp, rb.canonicality_state
+            FROM bigname_phase.chain_lineage rb
+            WHERE rb.chain_id = ne.chain_id
+              AND rb.block_hash = ne.block_hash
+            OFFSET 0
+        ) rb ON TRUE
+        "#,
+    );
+}
+
+/// The block timestamp of `event`'s own block, read by the lineage primary key. Like the
+/// statement's `LEFT JOIN chain_lineage rb`, it is NULL when the event has no block or its block
+/// has no lineage row. A predicate that holds a subquery reads the block through this probe,
+/// never through `rb`. PostgreSQL evaluates a predicate on the nullable side of an outer join at
+/// the join and costs its subqueries once per joined row there. It then prefers hashing every
+/// lineage row of the chain to probing the key once per candidate row.
+pub(super) fn event_block_timestamp(event: &str) -> String {
+    format!(
+        "(SELECT event_block.block_timestamp
+          FROM bigname_phase.chain_lineage event_block
+          WHERE event_block.chain_id = {event}.chain_id
+            AND event_block.block_hash = {event}.block_hash)"
+    )
+}
+
 // Canonical reads keep their existing predicates and partial-index plans. A
 // noncanonical read must prove that retained evidence and the event lie on one
 // parent-hash path; sharing a timestamp or a canonicality value is insufficient.
