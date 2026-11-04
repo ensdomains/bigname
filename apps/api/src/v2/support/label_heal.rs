@@ -101,6 +101,9 @@ pub(crate) fn heal_name_record(
     input: &NormalizedRouteNameInput,
     record: &mut NameRecord,
 ) {
+    if state.label_staging.refused() {
+        return;
+    }
     let mut heal = LabelHeal::of_route(input);
     heal.heal(&mut record.name);
     heal.heal(&mut record.display_name);
@@ -117,6 +120,9 @@ pub(crate) fn heal_subnames(
     input: &NormalizedRouteNameInput,
     mut subnames: Vec<Subname>,
 ) -> Vec<Subname> {
+    if state.label_staging.refused() {
+        return subnames;
+    }
     let mut heal = LabelHeal::of_route(input);
     for subname in &mut subnames {
         heal.heal(&mut subname.name);
@@ -134,6 +140,9 @@ pub(crate) fn heal_name_records(
     row: &bigname_storage::NameCurrentRow,
     records: &mut NameRecords,
 ) {
+    if state.label_staging.refused() {
+        return;
+    }
     let mut heal = LabelHeal::of_route(input);
     heal.observe(&row.normalized_name);
     heal.observe(&row.canonical_display_name);
