@@ -38,6 +38,8 @@ mod payment_values;
 mod primary_values;
 #[cfg(any(test, feature = "test-support"))]
 mod query_plan;
+#[cfg(any(test, feature = "test-support"))]
+pub use query_plan::{explain_contract_event_count_for_test, explain_event_history_count_for_test};
 mod read_filter;
 mod redo;
 mod registration_identity;

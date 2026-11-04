@@ -103,13 +103,14 @@ recommended starting point before the public edge is undrained.
 
 | Environment variable | Default | Undrain starting value | Mechanism |
 | --- | ---: | ---: | --- |
-| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every v2 REST, status, and health route; returns `408 request_timeout`. |
+| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every v2 REST, status, and health route; returns `408 request_timeout`. Plus 5 s, it is each API connection's `idle_in_transaction_session_timeout`. |
 | `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to both API request pools. The readiness pool has a fixed two-second check limit. |
 | `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. `/healthz` bypasses it. |
 | `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` | Independent in-flight ceiling reserved for `/healthz`; excess health work is load-shed as `503 overloaded`. |
 | `BIGNAME_API_VERIFIED_EXECUTION_MAX_IN_FLIGHT` | `128` | `16` | Separate ceiling for requests that can initiate verified resolution or primary-name fallback; it must be lower than the global ceiling. |
 | `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` | `2000` | `2000` | Connect deadline for API-triggered execution JSON-RPC calls; it must be less than `BIGNAME_API_RPC_TIMEOUT_MS`. |
 | `BIGNAME_API_RPC_TIMEOUT_MS` | `8000` | `8000` | Total deadline for each API-triggered execution JSON-RPC call. |
+| `BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS` | empty | deployment policy | Operator deny list: comma-separated IPv4 or IPv6 CIDR ranges, such as `198.51.100.0/24`, that a CCIP-Read gateway may never be fetched from, on top of the built-in loopback, private, link-local, shared-address, unique-local, unspecified, multicast, reserved and IPv6 transition ranges. A fetch it refuses fails that record in band as `gateway_destination_refused`. Startup refuses an entry that is not a range. See [CCIP-Read gateway transport](execution.md#ccip-read-gateway-transport). |
 | `BIGNAME_API_RPC_CHAIN_CHECK` | `full` | `full` | Startup check of every `BIGNAME_API_CHAIN_RPC_URLS` endpoint: `eth_chainId` must match the chain and, in `full`, block 0 must be its genesis block. A mismatch refuses to start without logging the URL; an unreachable endpoint only warns, and is not checked again once it answers. `chain-id-only` is for local nodes on their own genesis; there is no off value. See the [RPC chain check](deployment.md#rpc-chain-check). |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_PER_SECOND` | `0` (off) | `1` | Per-client token refill rate for verified-execution-triggering routes, keyed by an IPv4 address or IPv6 `/64`; excess requests return `429 rate_limited`. |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_BURST` | `10` | `5` | Maximum tokens in each client bucket when rate limiting is enabled. |

@@ -181,7 +181,6 @@ impl LookupEngine {
             node: snapshot.node,
             entrypoint_address: &snapshot.entrypoint_address,
             block: &snapshot.execution_block,
-            follow_ccip: snapshot.follow_ccip,
             result_abi: snapshot.result_abi,
             resolver_not_found_is_not_found: snapshot.route
                 == crate::store::LookupRoute::EnsUniversalResolverDiscovery,

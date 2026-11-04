@@ -119,7 +119,7 @@ async fn address_pairs_keep_repeated_writes_and_page_count_contract_parity() -> 
         }
         let contract = contract_count_filter(GENERATIONS[0].0,GENERATIONS[0].3,&["RecordChanged".into()],Some(100));
         let contract_rows = walk(&mut conn,&contract).await?;
-        assert_eq!(count_contract_events(&mut *conn,GENERATIONS[0].0,GENERATIONS[0].3,&["RecordChanged".into()],Some(100)).await?,contract_rows.len() as u64);
+        assert_eq!(count_contract_events(&mut *conn,GENERATIONS[0].0,GENERATIONS[0].3,&["RecordChanged".into()],Some(100),None).await?,contract_rows.len() as u64);
         assert_eq!(contract_rows.len(),expected.len()-2);
         let key_filter = EventHistoryReadFilter {record_key:Some("text:description".into()),..Default::default()};
         assert_eq!(walk(&mut conn,&key_filter).await?.len(),2,"same-value text writes stay separate");

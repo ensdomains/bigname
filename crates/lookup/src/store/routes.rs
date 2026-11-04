@@ -35,7 +35,6 @@ pub(super) struct EntrypointAuthority {
     pub source_family: SourceFamily,
     pub chain_id: ChainId,
     pub role: &'static str,
-    pub follow_ccip: bool,
     pub result_abi: ResolutionResultAbi,
     pub allow_shadow: bool,
     pub required_manifest_version: Option<i64>,
@@ -83,7 +82,6 @@ pub(super) fn entrypoint_authority(
                 source_family: SourceFamily::EnsExecution,
                 chain_id: resolver_chain_id,
                 role: ENS_UNIVERSAL_RESOLVER_ROLE,
-                follow_ccip: false,
                 result_abi: ResolutionResultAbi::EnsUniversalResolver,
                 allow_shadow: true,
                 required_manifest_version: None,
@@ -93,7 +91,6 @@ pub(super) fn entrypoint_authority(
             source_family: SourceFamily::BasenamesExecution,
             chain_id: ChainId::EthereumMainnet,
             role: BASENAMES_L1_RESOLVER_ROLE,
-            follow_ccip: true,
             result_abi: ResolutionResultAbi::BasenamesL1Resolver,
             allow_shadow: false,
             required_manifest_version: Some(2),
@@ -469,7 +466,6 @@ mod tests {
             assert_eq!(authority.source_family, SourceFamily::EnsExecution);
             assert_eq!(authority.role, ENS_UNIVERSAL_RESOLVER_ROLE);
             assert!(authority.allow_shadow);
-            assert!(!authority.follow_ccip);
             assert_eq!(authority.required_manifest_version, None);
         }
         assert!(entrypoint_authority(Namespace::Ens, ChainId::BaseMainnet).is_err());

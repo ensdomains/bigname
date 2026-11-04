@@ -451,15 +451,15 @@ async fn expiry_filtered_children_use_the_publication_clock_or_explicit_evaluati
         include_expired: false,
         ..ChildrenCurrentPageFilter::default()
     };
-    let page =
-        load_children_current_page_filtered(&fixture.pool, &parent, &filter, None, 10).await?;
+    let page = load_children_current_page_filtered(&fixture.pool, &parent, &filter, None, 10, None)
+        .await?;
     assert_eq!(
         page.total_count, 1,
         "the child is live at the publication's historical clock, even though wall time is past its expiry"
     );
     filter.evaluated_at = Some(parse_rfc3339_utc_timestamp("2000-01-01T00:01:00Z")?);
-    let page =
-        load_children_current_page_filtered(&fixture.pool, &parent, &filter, None, 10).await?;
+    let page = load_children_current_page_filtered(&fixture.pool, &parent, &filter, None, 10, None)
+        .await?;
     assert_eq!(
         page.total_count, 0,
         "the explicit snapshot clock applies the same expiry predicate"

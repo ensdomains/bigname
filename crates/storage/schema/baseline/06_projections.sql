@@ -1557,6 +1557,14 @@ COMMENT ON COLUMN project_resolver_link.record_id IS
 COMMENT ON COLUMN project_resolver_link.storage_model IS
     'This value is the after-state storage_model.';
 
+-- The resolver links page (load_resolver_links_shadow in
+-- crates/storage/src/families/topology/collections.rs) reads a resolver's links with a
+-- non-zero record in this order from its cursor and stops at the page size, so it needs no
+-- sort. Keep it identical to migrations/20261103130000_project_resolver_link_order_index.sql.
+CREATE INDEX IF NOT EXISTS project_resolver_link_order_idx
+    ON project_resolver_link (chain_id, resolver_address, lpad(record_id, 78, '0'), node)
+    WHERE record_id <> '0';
+
 CREATE TABLE IF NOT EXISTS project_grant (
     chain_id text NOT NULL,
     resource_id uuid NOT NULL,

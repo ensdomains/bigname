@@ -55,6 +55,7 @@ impl Served {
                     &ChildrenCurrentPageFilter::default(),
                     cursor.as_ref(),
                     children_page,
+                    None,
                 )
                 .await?;
                 admitted.get_or_insert(page.total_count);

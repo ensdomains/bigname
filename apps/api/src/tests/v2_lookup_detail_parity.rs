@@ -147,6 +147,8 @@ async fn lookup_detail_status_matches_name_detail_with_a_historical_arm_and_no_b
 
 #[tokio::test]
 async fn lookup_detail_status_matches_name_detail_for_wrapped_and_ownerless_names() -> Result<()> {
+    // The ownerless registration holds no lease, so both routes serve the lease its registrar
+    // grant proves.
     for state in [AliceInputState::Wrapped, AliceInputState::Ownerless] {
         let database = TestDatabase::new_migrated().await?;
         seed_alice_state_inputs(&database, state).await?;

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Usage: scripts/ci-free-disk
+#
+# Frees space on a GitHub-hosted Ubuntu runner before a large Rust build. The
+# runner image preinstalls toolchains no bigname job uses: the Android SDK,
+# .NET, GHC, Swift and CodeQL. On 2026-11-02 three phase-runner test shards
+# filled the root disk while linking their test binaries. Their runner could
+# not write its own log, so the jobs ended with no test failure.
+#
+# Only these directories and unused Docker images are removed. The Rust
+# toolchain, the Cargo home, the workspace and running service containers are
+# kept. The removals run in parallel. The script prints free space before and
+# after, and never fails the job. Other steps may write to the disk while it
+# runs, so the difference it prints is a net change.
+set -u
+
+avail() { df --output=avail -B1M / | tail -n 1 | tr -d ' '; }
+
+before=$(avail)
+start=$SECONDS
+for path in \
+  /usr/local/lib/android \
+  /usr/share/dotnet \
+  /opt/ghc \
+  /usr/local/.ghcup \
+  /usr/share/swift \
+  /opt/hostedtoolcache/CodeQL; do
+  [ -e "$path" ] && sudo rm -rf -- "$path" &
+done
+if command -v docker >/dev/null 2>&1; then
+  timeout 120 docker image prune --all --force >/dev/null 2>&1 &
+fi
+wait
+after=$(avail)
+
+echo "ci-free-disk: / had ${before} MiB free, now ${after} MiB, freed $((after - before)) MiB in $((SECONDS - start)) s"
+exit 0
