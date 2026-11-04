@@ -2,7 +2,7 @@
 //! [`super::source`]'s, unchanged. Only the lineage join differs: the registration filter puts
 //! subqueries on the candidate rows, and with a plain join the planner then scanned or hashed the
 //! whole lineage of the chain instead of probing it per candidate row. So the join here is
-//! [`push_history_lineage_probe`].
+//! `push_history_lineage_probe`.
 
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::{
     EventHistoryReadFilter,
     filters::{push_attributed_record_filter, push_string_filter},
-    lineage::push_history_lineage_probe,
+    source::push_history_lineage_join,
 };
 
 /// Push `FROM … WHERE <visibility>` for a read with a product registration selector.
@@ -23,7 +23,10 @@ pub(super) fn push_registration_history_source<'a>(
     include_cursor_row: bool,
     include_candidates: bool,
 ) {
-    builder.push(" FROM (");
+    builder.push(
+        " FROM (SELECT ne.*, rb.block_timestamp AS rb_block_timestamp, \
+         rb.canonicality_state AS rb_canonicality_state FROM (",
+    );
     if !logical_name_ids.is_empty() {
         builder.push(
             "SELECT candidate.*\n\
@@ -61,10 +64,15 @@ pub(super) fn push_registration_history_source<'a>(
     push_bounded_candidate_canonicality(builder, canonical_only);
     push_not_in_name_arm(builder, logical_name_ids);
     builder.push(") ne ");
+    push_history_lineage_join(builder);
+    builder.push(" OFFSET 0) ne ");
     if include_cursor_row {
         builder.push(" CROSS JOIN history_cursor_row cursor_row ");
     }
-    push_history_lineage_probe(builder);
+    builder.push(
+        " CROSS JOIN LATERAL (SELECT ne.rb_block_timestamp AS block_timestamp, \
+         ne.rb_canonicality_state AS canonicality_state) rb ",
+    );
     if include_candidates {
         builder.push(" WHERE TRUE ");
     } else {
