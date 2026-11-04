@@ -357,3 +357,7 @@ async fn resource_page(
 #[cfg(test)]
 #[path = "candidates_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "wrapper_candidates_tests.rs"]
+mod wrapper_tests;
