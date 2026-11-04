@@ -803,6 +803,25 @@ row:
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
 
+The expiring listing of `GET /v1/names` with `parent` adds one more, installed by the identity
+baseline and `20261104120000_name_surfaces_project_parent_key_index.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_surfaces_project_parent_key_idx` | `storage:families.name.expiring_names` and `storage:families.name.expiring_union`: the surfaces one label below a parent, by namespace and the hash of their labelhashes after the first |
+
+It is a btree on `(namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0))` over
+every surface. It is not partial, because PostgreSQL estimates an expression from an index's
+statistics only when the index has no predicate. The statement keeps its visibility and
+root-name terms as filters. The statement also compares
+the labelhashes after the first with the parent's path, so a hash collision never lists a name.
+A parent with few names below it is read from this index. A parent above most names, such as
+`eth`, is read from `project_name_summary_expiry_idx`, with the key compared on each row. With a
+parent, both statements run unprepared, so each is planned with its own parent and the index statistics
+choose between the two. `crates/storage/src/families/name/list/expiring/parent_tests.rs` checks
+the rows of every parent class and the rows each plan examines. Interpret pays one btree entry
+when it inserts a surface.
+
 Interpret and the verified label-preimage importer write `name_search_documents`. The
 API's prefix search adds three read-only indexes on it, installed by the identity baseline
 and `20261029120000_search_prefix_bucket_indexes.sql` and changing no row:
