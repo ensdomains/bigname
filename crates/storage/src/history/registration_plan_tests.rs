@@ -5,20 +5,27 @@
 //! on the join, subqueries included. PostgreSQL then costed the subqueries once per joined row
 //! and hashed every lineage row of the chain instead of probing the key per candidate row. The
 //! filter now reads the event's block through its own keyed probe
-//! (`lineage::event_block_timestamp`).
+//! (`lineage::event_block_timestamp`). The statement joins the lineage through a lateral
+//! subquery keyed on the event's block (`lineage::push_history_lineage_probe`), which leaves the
+//! planner no way to scan or hash it.
 //!
 //! The plan test checks every statement of the read in both plan modes. It runs on the fixture
 //! as built and again with the chain's lineage inflated. No lineage join may filter on a
 //! subquery, and no plan may be parallel. On the inflated lineage, the lineage must be joined by
 //! probes keyed on `(chain_id, block_hash)`. The previous text is the probe spelled
-//! `rb.block_timestamp` again. The test checks that it still puts subqueries on the join and
-//! still scans the inflated lineage, so the fixture keeps proving something.
+//! `rb.block_timestamp` again, with the lineage joined plainly. The test checks that it still
+//! puts subqueries on the join and still scans the inflated lineage, so the fixture keeps proving
+//! something.
 //!
 //! The row test runs both texts on every input class, in both plan modes, and compares the
 //! counts, the page rows, the next cursors, the cursor's anchor block and the registration
 //! precheck. Three altered probes (no timestamp, a timestamp three microseconds late, the
 //! canonical block's timestamp at the event's height) must each change some answer, so the
-//! fixture holds cells that the probe's value decides.
+//! fixture holds cells that the probe's value decides. So must an inner lateral join, so the
+//! fixture holds rows with no block or no lineage row that the outer join keeps.
+//!
+//! The text test checks that a registration read's source is `source.rs`'s, with only the
+//! lineage join swapped for the lateral probe.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,10 +47,12 @@ use super::{
         history_cursor_from_row, history_keyset_filter, load_history_keyset,
         push_history_keyset_query,
     },
-    lineage::event_block_timestamp,
+    lineage::{event_block_timestamp, push_history_lineage_probe},
     paging::push_history_page_query,
     registration_identity::push_is_public_registration_id_query,
+    resolver_source::{self, ResolverSource},
     selectors::HistorySelector,
+    source::{self, push_history_lineage_join},
     summary::push_history_count_query,
 };
 use crate::projection_helpers::split_keyset_page;
@@ -74,12 +83,15 @@ const MIGRATION: u128 = 0xa13;
 const NAMELESS_LEASE: u128 = 0xa20;
 const NOT_A_REGISTRATION: u128 = 0xa30;
 const HOT_LEASE: u128 = 0xa40;
+const BUSY_NAME: u128 = 0xa5;
+const BUSY_LEASE: u128 = 0xa50;
 
 #[tokio::test]
 async fn registration_reads_keep_subqueries_off_the_lineage_join() -> Result<()> {
     with_fixture("registration_plan", true, async |connection| {
         let cells = plan_cells(connection).await?;
         let probe = event_block_timestamp("ne");
+        let joins = LineageJoins::new();
         let mut failures = Vec::new();
         for lineage in [Lineage::AsBuilt, Lineage::Inflated] {
             if lineage == Lineage::Inflated {
@@ -106,7 +118,7 @@ async fn registration_reads_keep_subqueries_off_the_lineage_join() -> Result<()>
                     prepare(
                         connection,
                         &before_name,
-                        &bound.sql.replace(&probe, "rb.block_timestamp"),
+                        &previous_text(&bound.sql, &probe, &joins),
                     )
                     .await?;
                     for mode in PLAN_MODES {
@@ -178,20 +190,37 @@ async fn registration_rows_match_the_previous_text() -> Result<()> {
     with_fixture("registration_rows", false, async |connection| {
         let cells = row_cells(connection).await?;
         let probe = event_block_timestamp("ne");
+        let joins = LineageJoins::new();
+        // Each mutant swaps one text for another and must change some answer.
         let mutants = [
-            ("no timestamp", "NULL::timestamptz".to_owned(), false),
             (
-                "three microseconds late",
+                "a probe that reads no timestamp",
+                &probe,
+                "NULL::timestamptz".to_owned(),
+                false,
+            ),
+            (
+                "a probe that reads three microseconds late",
+                &probe,
                 format!("({probe} + interval '3 microseconds')"),
                 false,
             ),
             (
-                "the canonical block at the height",
+                "a probe that reads the canonical block at the height",
+                &probe,
                 CANONICAL_HEIGHT_TIMESTAMP.to_owned(),
                 true,
             ),
+            (
+                "an inner lateral lineage join",
+                &joins.lateral,
+                joins
+                    .lateral
+                    .replacen("LEFT JOIN LATERAL", "JOIN LATERAL", 1),
+                false,
+            ),
         ];
-        let mut changed = [false; 3];
+        let mut changed = [false; 4];
         let mut failures = Vec::new();
         for (cell_index, cell) in cells.iter().enumerate() {
             for (statement_index, statement) in cell.statements.iter().enumerate() {
@@ -209,14 +238,14 @@ async fn registration_rows_match_the_previous_text() -> Result<()> {
                 prepare(
                     connection,
                     &format!("{name}_before"),
-                    &bound.sql.replace(&probe, "rb.block_timestamp"),
+                    &previous_text(&bound.sql, &probe, &joins),
                 )
                 .await?;
-                for (index, (_, expression, _)) in mutants.iter().enumerate() {
+                for (index, (_, text, mutant, _)) in mutants.iter().enumerate() {
                     prepare(
                         connection,
                         &format!("{name}_mutant_{index}"),
-                        &bound.sql.replace(&probe, expression),
+                        &bound.sql.replace(text.as_str(), mutant),
                     )
                     .await?;
                 }
@@ -237,7 +266,7 @@ async fn registration_rows_match_the_previous_text() -> Result<()> {
                              {before:#?}"
                         ));
                     }
-                    for (index, (_, _, noncanonical)) in mutants.iter().enumerate() {
+                    for (index, (_, _, _, noncanonical)) in mutants.iter().enumerate() {
                         if *noncanonical == cell.canonical_only {
                             continue;
                         }
@@ -274,11 +303,10 @@ async fn registration_rows_match_the_previous_text() -> Result<()> {
                 }
             }
         }
-        for ((label, _, _), changed) in mutants.iter().zip(changed) {
+        for ((label, _, _, _), changed) in mutants.iter().zip(changed) {
             if !changed {
                 failures.push(format!(
-                    "a probe that reads {label} changes no answer, so the fixture does not \
-                     exercise the event block"
+                    "{label} changes no answer, so the fixture does not exercise what it alters"
                 ));
             }
         }
@@ -290,6 +318,108 @@ async fn registration_rows_match_the_previous_text() -> Result<()> {
         Ok(())
     })
     .await
+}
+
+/// T1: the registration source is `source.rs`'s text and bound values with only the lineage join
+/// swapped, for the filter of every plan and row cell and every source flag.
+#[tokio::test]
+async fn registration_source_is_the_plain_source_with_the_lineage_probe() -> Result<()> {
+    with_fixture("registration_text", false, async |connection| {
+        let joins = LineageJoins::new();
+        let mut filters = plan_cells(connection)
+            .await?
+            .into_iter()
+            .map(|cell| (cell.label, cell.filter))
+            .collect::<Vec<_>>();
+        filters.extend(
+            row_cells(connection)
+                .await?
+                .into_iter()
+                .map(|cell| (cell.label, cell.filter)),
+        );
+        let mut failures = Vec::new();
+        for (label, filter) in &filters {
+            for flags in 0..8_u8 {
+                let canonical_only = flags & 1 != 0;
+                let include_cursor_row = flags & 2 != 0;
+                let include_candidates = flags & 4 != 0;
+                let cell_label = format!(
+                    "{label}, canonical only {canonical_only}, cursor row {include_cursor_row}, \
+                     candidates {include_candidates}"
+                );
+                let mut probed = QueryBuilder::<Postgres>::new("");
+                let kind = resolver_source::push_history_source_for_filter(
+                    &mut probed,
+                    filter,
+                    canonical_only,
+                    include_cursor_row,
+                    include_candidates,
+                );
+                if kind != ResolverSource::Condition {
+                    failures.push(format!("{cell_label}: the source is the resolver's arms"));
+                }
+                let mut plain = QueryBuilder::<Postgres>::new("");
+                source::push_history_source_for_filter(
+                    &mut plain,
+                    filter,
+                    canonical_only,
+                    include_cursor_row,
+                    include_candidates,
+                );
+                let probed = bind(connection, probed).await?;
+                let plain = bind(connection, plain).await?;
+                let lateral_joins = probed.sql.matches(joins.lateral.as_str()).count();
+                if lateral_joins != 1 {
+                    failures.push(format!(
+                        "{cell_label}: the source joins the lineage through the probe \
+                         {lateral_joins} times"
+                    ));
+                }
+                if joins.plain_join(&probed.sql) != plain.sql || probed.literals != plain.literals {
+                    failures.push(format!(
+                        "{cell_label}: the source differs from source.rs beyond the lineage \
+                         join\nprobe source: {} {}\nsource.rs: {} {}",
+                        probed.sql, probed.literals, plain.sql, plain.literals
+                    ));
+                }
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "registration source text:\n{}",
+            failures.join("\n\n")
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// The statement's lineage join as the registration source writes it and as `source.rs` does.
+struct LineageJoins {
+    lateral: String,
+    plain: String,
+}
+
+impl LineageJoins {
+    fn new() -> Self {
+        let mut lateral = QueryBuilder::<Postgres>::new("");
+        push_history_lineage_probe(&mut lateral);
+        let mut plain = QueryBuilder::<Postgres>::new("");
+        push_history_lineage_join(&mut plain);
+        Self {
+            lateral: lateral.sql().to_owned(),
+            plain: plain.sql().to_owned(),
+        }
+    }
+
+    fn plain_join(&self, sql: &str) -> String {
+        sql.replace(&self.lateral, &self.plain)
+    }
+}
+
+/// The text before the probes: the event block read through `rb`, and `rb` joined plainly.
+fn previous_text(sql: &str, probe: &str, joins: &LineageJoins) -> String {
+    joins.plain_join(&sql.replace(probe, "rb.block_timestamp"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,6 +530,15 @@ fn next_lease() -> Registration {
         id: NEXT_LEASE,
         names: vec![NAME],
         resources: vec![LEASE, NEXT_LEASE, WRAPPER],
+        public: true,
+    }
+}
+
+fn busy_lease() -> Registration {
+    Registration {
+        id: BUSY_LEASE,
+        names: vec![BUSY_NAME],
+        resources: vec![BUSY_LEASE],
         public: true,
     }
 }
@@ -704,9 +843,14 @@ async fn plan_cells(connection: &mut PgConnection) -> Result<Vec<PlanCell>> {
             count_and_page(200),
         ),
         cell(
-            "P10 with address=",
+            "P10 with an address selector, on the plain source (not the address walk)",
             with_selector(lease.clone(), address_selector()),
             page(200),
+        ),
+        cell(
+            "P12 a name with a row on each of 5,000 blocks",
+            windowed(read_filter(&busy_lease(), &none)),
+            count_and_page(20),
         ),
         cell(
             "P11 the registration precheck",
@@ -766,6 +910,17 @@ async fn row_cells(connection: &mut PgConnection) -> Result<Vec<RowCell>> {
         ("story:attr:8", false),
         ("story:migration", true),
     ];
+    // R8: rows with no block or whose block has no lineage row. Outside the block window only.
+    let unwindowed_lease_pins = {
+        let mut pins = lease_pins.clone();
+        pins.extend([
+            ("story:attr:null", true),
+            ("story:name:null", false),
+            ("story:name:missing", false),
+            ("story:registry:missing", false),
+        ]);
+        pins
+    };
     let next_lease_pins = vec![
         ("story:name:200:3", false),
         ("story:name:200:7", true),
@@ -786,18 +941,18 @@ async fn row_cells(connection: &mut PgConnection) -> Result<Vec<RowCell>> {
     lease_statements.extend(prechecks(&all_resources[..]));
     Ok(vec![
         RowCell {
-            label: "R1-R5 the lease, newest first",
+            label: "R1-R5, R8 the lease, newest first",
             filter: lease_filter.clone(),
             canonical_only: true,
             statements: lease_statements,
-            pins: lease_pins.clone(),
+            pins: unwindowed_lease_pins.clone(),
         },
         RowCell {
-            label: "R1-R5 the lease, oldest first",
+            label: "R1-R5, R8 the lease, oldest first",
             filter: with_order(lease_filter.clone(), HistoryOrder::Asc),
             canonical_only: true,
             statements: counted_pages(200),
-            pins: lease_pins.clone(),
+            pins: unwindowed_lease_pins,
         },
         RowCell {
             label: "R1-R5 the lease, in the /v1/events block window",
@@ -1370,6 +1525,10 @@ async fn with_fixture(
                 .execute(&mut *connection)
                 .await
                 .context("install the unrelated rows")?;
+            raw_sql(BUSY_NAME_SQL)
+                .execute(&mut *connection)
+                .await
+                .context("install the busy name")?;
         }
         raw_sql(
             "ANALYZE normalized_events, chain_lineage, surface_bindings, resources, name_surfaces",
@@ -1607,4 +1766,29 @@ SELECT 'noise:' || n, 'ens', pg_temp.name(1048576 + n % 400), pg_temp.rid(167772
     'ens_v1_unwrapped_authority', 'canonical',
     jsonb_build_object('namehash', pg_temp.node(1048576 + n % 400))
 FROM generate_series(0, 19999) n;
+"#;
+
+/// P12: a lease (0xa50) whose name (0xa5) has a resource-less row on each of blocks 1..=5000, so
+/// the name arm holds more rows than the page and its lineage has no repeated keys. The chain's
+/// lineage runs on to block 5000 for it.
+const BUSY_NAME_SQL: &str = r#"
+INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number, block_timestamp,
+    canonicality_state)
+SELECT 'ethereum-mainnet', 'b:' || n, 'b:' || (n - 1), n, pg_temp.ts(n), 'canonical'
+FROM generate_series(2001, 5000) n;
+INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes, normalizer_version,
+    visibility_state, chain_id, block_hash, block_number, canonicality_state)
+VALUES (pg_temp.name(165), 'ens', pg_temp.node(165), ARRAY[pg_temp.node(165)], 'fixture',
+    'active', 'ethereum-mainnet', 'b:1', 1, 'canonical');
+INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
+VALUES (pg_temp.rid(2640), 'ethereum-mainnet', 'b:1', 1, 'canonical');
+INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind,
+    authority_arm, active_from, active_to, chain_id, block_hash, block_number, canonicality_state)
+VALUES (pg_temp.rid(181), pg_temp.name(165), pg_temp.rid(2640), 'declared_registry_path',
+    'ens_v1', pg_temp.ts(1), NULL, 'ethereum-mainnet', 'b:1', 1, 'canonical');
+SELECT pg_temp.ev('busy:grant', 1, 'ens_v1_registrar_l1', 'RegistrationGranted',
+    pg_temp.rid(2640), pg_temp.name(165), jsonb_build_object('namehash', pg_temp.node(165)));
+SELECT pg_temp.ev('busy:name:' || n, n, 'ens_v1_resolver_l1', 'RecordChanged', NULL,
+    pg_temp.name(165))
+FROM generate_series(1, 5000) n;
 "#;

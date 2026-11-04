@@ -1,3 +1,24 @@
+use sqlx::{Postgres, QueryBuilder};
+
+/// Join the event's own block as `rb`, by the lineage primary key. The subquery reads `ne` and
+/// carries `OFFSET 0`, so PostgreSQL cannot flatten it into a plain join. Every plan it has for
+/// the subquery then takes `ne`'s row as a parameter, and such an inner side admits only a nested
+/// loop that runs the subquery per event row: no hash, merge or materialized scan of the lineage.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn push_history_lineage_probe(builder: &mut QueryBuilder<'_, Postgres>) {
+    builder.push(
+        r#"
+        LEFT JOIN LATERAL (
+            SELECT rb.block_timestamp, rb.canonicality_state
+            FROM bigname_phase.chain_lineage rb
+            WHERE rb.chain_id = ne.chain_id
+              AND rb.block_hash = ne.block_hash
+            OFFSET 0
+        ) rb ON TRUE
+        "#,
+    );
+}
+
 /// The block timestamp of `event`'s own block, read by the lineage primary key. Like the
 /// statement's `LEFT JOIN chain_lineage rb`, it is NULL when the event has no block or its block
 /// has no lineage row. A predicate that holds a subquery reads the block through this probe,
