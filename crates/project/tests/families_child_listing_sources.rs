@@ -190,7 +190,7 @@ async fn observed_elsewhere(fixture: &Fixture) -> Result<String> {
 }
 
 // Row 1: a label observed on another chain heals a holder here at this chain's next block, its
-// stored name and key equal to today's read-time answer, and the block journals the healed row
+// stored name and key equal to the page the reader serves, and the block journals the healed row
 // and the watermark's first read. A step that read only its own chain's observations would
 // leave the row spelling `[labelhash]`.
 #[tokio::test]

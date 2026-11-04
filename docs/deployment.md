@@ -5780,9 +5780,9 @@ composition pass derives every parent's rows in a children stream after the name
   row in one statement and journals every changed row. Above 100,000 rows the runner logs a
   `WARN` naming the chain, block, parent and row count, so a large undo journal can be traced to
   its block.
-- The readers need `SELECT` on both tables. Before restarting an existing API role, apply the
-  grant below on the primary and let it replay on any serving standby. Fresh role setup above
-  already includes it. Startup preflight refuses an API role without it.
+- The readers need `SELECT` on the listing and count tables. Before restarting an existing API
+  role, apply the grant below on the primary and let it replay on any serving standby. Fresh role
+  setup above already includes it. Startup preflight refuses an API role without it.
 
   ```sql
   GRANT SELECT ON bigname_phase.project_child_listing, bigname_phase.project_child_listing_count
