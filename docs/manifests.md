@@ -66,6 +66,8 @@ Each manifest contains:
 
 For one `(namespace, source_family, chain)` tuple in a selected deployment-profile root, at most one manifest version may declare `rollout_status = "active"`. Zero active versions remains valid for a family whose versions are only `draft`, `shadow`, or `deprecated`. Each `(namespace, source_family, chain, deployment_epoch, manifest_version)` tuple may come from only one file; the loader rejects duplicate tuples across repository layouts regardless of rollout status. Within one manifest version, every `[[contracts]].role` must be unique, except the instance role `ensv1_mirror_resolver`, which may repeat with distinct addresses (see [ENSv1 mirror resolver declarations](#ensv1-mirror-resolver-declarations)). The loader rejects these violations before repository sync.
 
+Do not edit a manifest file under its existing `manifest_version`. Bump the version instead. Manifest synchronization replaces an edited manifest's contract rows in place, which leaves the stored [event counts](projections.md#event-counts) (`project_event_count`) stale until a full-range Project redo.
+
 Every active `ens_v2_migration_l1` manifest requires both
 `correlation_addresses.ens_v1_name_wrapper` and
 `correlation_addresses.ens_v1_base_registrar`, because Interpret consumes both
