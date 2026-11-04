@@ -1,3 +1,18 @@
+/// The block timestamp of `event`'s own block, read by the lineage primary key. Like the
+/// statement's `LEFT JOIN chain_lineage rb`, it is NULL when the event has no block or its block
+/// has no lineage row. A predicate that holds a subquery reads the block through this probe,
+/// never through `rb`. PostgreSQL evaluates a predicate on the nullable side of an outer join at
+/// the join and costs its subqueries once per joined row there. It then prefers hashing every
+/// lineage row of the chain to probing the key once per candidate row.
+pub(super) fn event_block_timestamp(event: &str) -> String {
+    format!(
+        "(SELECT event_block.block_timestamp
+          FROM bigname_phase.chain_lineage event_block
+          WHERE event_block.chain_id = {event}.chain_id
+            AND event_block.block_hash = {event}.block_hash)"
+    )
+}
+
 // Canonical reads keep their existing predicates and partial-index plans. A
 // noncanonical read must prove that retained evidence and the event lie on one
 // parent-hash path; sharing a timestamp or a canonicality value is insufficient.

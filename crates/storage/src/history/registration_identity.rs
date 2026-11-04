@@ -12,7 +12,7 @@ use super::{
         push_attributed_record_filter_where, push_attributing_resource_is_registration,
         push_publication_bound,
     },
-    lineage::{same_fork_as, same_fork_predicate},
+    lineage::{event_block_timestamp, same_fork_as, same_fork_predicate},
 };
 
 /// The per-chain published block a product read is bound to. Every row that establishes
@@ -48,7 +48,18 @@ pub(super) async fn is_public_registration_id(
     canonical_only: bool,
     published: PublicationBounds<'_>,
 ) -> Result<bool, sqlx::Error> {
-    let mut builder = QueryBuilder::new(
+    let mut builder = QueryBuilder::new("");
+    push_is_public_registration_id_query(&mut builder, registration_id, canonical_only, published);
+    builder.build_query_scalar().fetch_one(pool).await
+}
+
+pub(super) fn push_is_public_registration_id_query(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    registration_id: Uuid,
+    canonical_only: bool,
+    published: PublicationBounds<'_>,
+) {
+    builder.push(
         "SELECT EXISTS (
             SELECT 1
             FROM bigname_phase.normalized_events ne
@@ -59,7 +70,7 @@ pub(super) async fn is_public_registration_id(
     );
     builder.push_bind(registration_id);
     builder.push(" AND ne.consumer_visibility = 'activated'");
-    push_publication_bound(&mut builder, "ne", published);
+    push_publication_bound(builder, "ne", published);
     if canonical_only {
         builder.push(
             " AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -70,13 +81,12 @@ pub(super) async fn is_public_registration_id(
         );
     }
     builder.push(" AND ");
-    push_public_registration_witness(&mut builder, canonical_only, &["ne"], published);
+    push_public_registration_witness(builder, canonical_only, &["ne"], published);
     builder.push(" AND (");
-    push_product_registration_id(&mut builder, canonical_only);
+    push_product_registration_id(builder, canonical_only);
     builder.push(" = ");
     builder.push_bind(registration_id);
     builder.push(") LIMIT 1)");
-    builder.build_query_scalar().fetch_one(pool).await
 }
 
 /// Keep only the rows of one registration. A row on a resource belongs to it when its
@@ -132,7 +142,8 @@ fn push_registration_binding_at_event(
     canonical_only: bool,
     published: PublicationBounds<'_>,
 ) {
-    builder.push(
+    let event_at = event_block_timestamp("ne");
+    builder.push(format!(
         "EXISTS (
             SELECT 1
             FROM (SELECT ne.chain_id, ne.block_hash, ne.block_number, ne.log_index,
@@ -144,13 +155,13 @@ fn push_registration_binding_at_event(
              AND binding_lineage.block_number = history_binding.block_number
             WHERE history_binding.logical_name_id = ne.logical_name_id
               AND history_binding.chain_id = ne.chain_id
-              AND history_binding.active_from <= rb.block_timestamp
+              AND history_binding.active_from <= {event_at}
                   + GREATEST(COALESCE(ne.log_index, 0), 0) * interval '1 microsecond'
               AND (history_binding.active_to IS NULL
-                   OR history_binding.active_to > rb.block_timestamp
+                   OR history_binding.active_to > {event_at}
                        + GREATEST(COALESCE(ne.log_index, 0), 0)
                          * interval '1 microsecond')",
-    );
+    ));
     push_publication_bound(builder, "history_binding", published);
     if canonical_only {
         builder.push(
@@ -402,6 +413,7 @@ fn push_product_registration_id_with_anchors(
         "ne",
         canonical_only,
     );
+    let event_at = event_block_timestamp("ne");
     // Emit a Boolean literal so canonical reads retain constant-folded index predicates.
     builder.push(format!(
         r#"
@@ -524,12 +536,12 @@ fn push_product_registration_id_with_anchors(
                                 WHERE binding.resource_id = ne.resource_id
                                   AND {binding_fork}
                                   AND binding.chain_id = ne.chain_id
-                                  AND binding.active_from <= rb.block_timestamp
+                                  AND binding.active_from <= {event_at}
                                       + GREATEST(COALESCE(ne.log_index, 0), 0)
                                         * interval '1 microsecond'
                                   AND (
                                       binding.active_to IS NULL
-                                      OR binding.active_to > rb.block_timestamp
+                                      OR binding.active_to > {event_at}
                                           + GREATEST(COALESCE(ne.log_index, 0), 0)
                                             * interval '1 microsecond'
                                   )
