@@ -33,30 +33,15 @@ pub(super) async fn load_history_keyset<'a>(
             block_number: position.block_number,
         });
     }
-    let mut builder = QueryBuilder::<Postgres>::new(" SELECT ne.block_number ");
-    let mut cursor_filter = filter.clone();
-    if !cursor_filter.bind_cursor_anchor_to_event_kinds {
-        cursor_filter.event_kinds.clear();
-    }
-    let resolver_source = push_history_source_for_filter(
+    let cursor_filter = history_keyset_filter(filter);
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_history_keyset_query(
         &mut builder,
         &cursor_filter,
         canonical_only,
-        false,
+        cursor,
         include_candidates,
     );
-    push_history_filters(
-        &mut builder,
-        &cursor_filter,
-        canonical_only,
-        resolver_source,
-    );
-    if !include_candidates {
-        push_product_history_duplicate_filter(&mut builder, &cursor_filter, canonical_only);
-    }
-    builder.push(" AND ne.event_identity = ");
-    builder.push_bind(&cursor.event_identity);
-    builder.push(" LIMIT 1");
 
     let block_number = builder
         .build_query_scalar::<Option<i64>>()
@@ -68,6 +53,41 @@ pub(super) async fn load_history_keyset<'a>(
         cursor,
         block_number,
     })
+}
+
+/// The filter the cursor's anchor row must still pass: the page's own, without its event
+/// kinds unless the cursor is bound to them.
+pub(super) fn history_keyset_filter(filter: &EventHistoryReadFilter) -> EventHistoryReadFilter {
+    let mut cursor_filter = filter.clone();
+    if !cursor_filter.bind_cursor_anchor_to_event_kinds {
+        cursor_filter.event_kinds.clear();
+    }
+    cursor_filter
+}
+
+/// The block number of the cursor's anchor row, when the row passes `cursor_filter`.
+pub(super) fn push_history_keyset_query<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    cursor_filter: &'a EventHistoryReadFilter,
+    canonical_only: bool,
+    cursor: &'a HistoryCursor,
+    include_candidates: bool,
+) {
+    builder.push(" SELECT ne.block_number ");
+    let resolver_source = push_history_source_for_filter(
+        builder,
+        cursor_filter,
+        canonical_only,
+        false,
+        include_candidates,
+    );
+    push_history_filters(builder, cursor_filter, canonical_only, resolver_source);
+    if !include_candidates {
+        push_product_history_duplicate_filter(builder, cursor_filter, canonical_only);
+    }
+    builder.push(" AND ne.event_identity = ");
+    builder.push_bind(&cursor.event_identity);
+    builder.push(" LIMIT 1");
 }
 
 /// `WITH history_cursor_row AS (…)`: the cursor's ordering values, bound as given when the cursor
