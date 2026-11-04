@@ -16,9 +16,8 @@
 //!   of redos, reads A again from block 0. While A's redo is in progress the step reads and does
 //!   not move the watermark. The read back catches up at about [`SOURCE_EVENTS`] observations
 //!   per B block, so a label only the redo revealed reaches B's stored names after about (A's
-//!   PreimageObserved rows / 1000) B blocks: for A = Ethereum Mainnet at about 7.8 million
-//!   observations and B = Base at 2 s blocks, about 7,800 blocks or 4.3 hours. Labels already in
-//!   `label_preimages` keep their stored names, and served names heal at read meanwhile.
+//!   PreimageObserved rows / 1000) B blocks. Labels already in `label_preimages` keep their stored
+//!   names, and served names heal at read meanwhile.
 //! - The watermark advances to A's finality floor (its finalized block, else its safe block) or
 //!   the highest block read, whichever is lower, and never back. A reorg of A deletes and
 //!   re-interprets A's events from the fork up (interpret `write.rs`), at block numbers B may
