@@ -5,7 +5,7 @@ mod envelopes;
 mod membership;
 mod prepare;
 mod sources;
-mod write;
+pub(super) mod write;
 
 use bigname_storage::{
     families::records::CurrentHistoryRelation, history_catalogue_contract::CATALOGUE_VERSION,

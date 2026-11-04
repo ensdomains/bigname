@@ -5278,7 +5278,7 @@ it), the child-registration arm (`child_arm.rs`), the resolver page arms
   and `registry_handoffs.rs`.
 - The fork walk of a non-canonical read in `lineage.rs` keeps its plain joins too. It is off
   the request path, because no route makes a non-canonical read.
-- The address-pair lookup (`pair_lineage` in `address_pairs.rs`) stays as it is, because
+- The address-pair lookup (`pair_lineage` in `count_contract.rs`) stays as it is, because
   outer parameters bind its key.
 - The history source is an input of the
   [projection content hash](glossary.md#projection-content-hash) only, because Project's
@@ -6206,3 +6206,33 @@ A release that adds an index to the drop list is deployed in this order:
    or the operator built, without a build. Run while the build is still going, it finds an
    invalid index under the name and fails its check.
 3. The API.
+
+## Stored event counts
+
+The build that stores event counts adds the event count family, `project_event_count`
+(see [event counts](projections.md#event-counts)). Project counts, per chain, anchor, namespace
+and event kind, the events an emitter's or a resolver's event read counts, at every
+publication, and journals the counts with the other families. The composition pass counts each
+catalogue window.
+
+- It needs `20261104130000_project_event_count.sql`. The schema-migration creates the empty
+  table. It resets nothing and builds no index on a populated table. Apply it before starting
+  the release: the family writer writes the table, so without it the first family block fails.
+- A family step that touches more than 10,000 count keys logs a `WARN` naming the chain, block
+  and key count.
+- The readers do not change in this build. Event `total_count` and the registry overview's
+  `counts.events` still count at read.
+- The count statement and its shared predicate are in `crates/project/src` and in
+  `crates/storage/src/history/count_contract.rs`, so the build rotates the
+  [projection content hash](glossary.md#projection-content-hash) for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next release that redoes Project and shares that release's
+  Project redo.
+- A manifest file edited under the same version replaces that manifest's contract rows in
+  place. Such an edit leaves the stored counts stale until a full-range Project redo (see
+  [event counts](projections.md#event-counts)).
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo.

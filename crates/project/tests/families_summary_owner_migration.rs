@@ -58,6 +58,24 @@ const CONTROL_TABLES: [&str; 3] = [
     "project_repair_record",
 ];
 
+/// The family tables added after the last migration with a reset list
+/// (migrations/20261104130000_project_event_count.sql creates them empty). The published reset
+/// lists cannot name them. The family reset (`families::family_tables`) clears them.
+const LATER_TABLES: [&str; 1] = ["project_event_count"];
+
+/// The family reset covers the tables added after the last reset list, so a later reset clears
+/// them.
+#[test]
+fn the_family_reset_names_the_later_tables() {
+    let tables = families::family_tables().collect::<BTreeSet<_>>();
+    for table in LATER_TABLES {
+        assert!(
+            tables.contains(table),
+            "{table} is not reset with the families"
+        );
+    }
+}
+
 /// The quoted names of the migration's `ARRAY[...]` reset list, read as text: it does not parse
 /// SQL, so a name inside a comment would still count.
 fn reset_literal(migration: &str) -> BTreeSet<String> {
@@ -95,6 +113,7 @@ fn reset_tables() -> Vec<String> {
                     | "project_lookup_inventory"
                     | "project_lookup_record"
                     | "project_lookup_dependency"
+                    | "project_event_count"
             )
         })
         .map(str::to_owned)
@@ -132,6 +151,7 @@ fn selector_reset_tables() -> Vec<String> {
                     | "project_lookup_inventory"
                     | "project_lookup_record"
                     | "project_lookup_dependency"
+                    | "project_event_count"
             )
         })
         .map(str::to_owned)
@@ -153,6 +173,7 @@ fn lifecycle_reset_literal_names_every_current_family_table() {
     assert_eq!(
         reset_literal(migration),
         families::family_tables()
+            .filter(|table| !LATER_TABLES.contains(table))
             .chain(CONTROL_TABLES)
             .map(str::to_owned)
             .collect::<BTreeSet<_>>()
@@ -164,6 +185,7 @@ fn bound_name_reset_literal_names_every_current_family_table() {
     assert_eq!(
         reset_literal(BOUND_MIGRATION),
         families::family_tables()
+            .filter(|table| !LATER_TABLES.contains(table))
             .chain(CONTROL_TABLES)
             .map(str::to_owned)
             .collect::<BTreeSet<_>>()
@@ -517,6 +539,7 @@ async fn the_bound_name_migration_takes_the_marker_table_before_any_reset() -> R
         BOUND_MIGRATION,
         BOUND_PREDECESSOR,
         families::family_tables()
+            .filter(|table| !LATER_TABLES.contains(table))
             .chain(CONTROL_TABLES)
             .map(str::to_owned)
             .collect(),
@@ -577,7 +600,10 @@ async fn the_bound_name_listing_refuses_after_the_migration_until_the_rebuild() 
     ensure!(served(&before), "before the migration: {before:?}");
     raw_sql(BOUND_PREDECESSOR).execute(&fixture.pool).await?;
     raw_sql(BOUND_MIGRATION).execute(&fixture.pool).await?;
-    for table in families::family_tables().chain(CONTROL_TABLES) {
+    for table in families::family_tables()
+        .filter(|table| !LATER_TABLES.contains(table))
+        .chain(CONTROL_TABLES)
+    {
         let mut connection = fixture.pool.acquire().await?;
         ensure!(
             row_count(&mut connection, table).await? == 0,

@@ -1,4 +1,5 @@
-//! Journal only changed chain-owned rows, preserving the first before-image of a generation.
+//! Journal only changed chain-owned rows, preserving the first before-image of a generation. The
+//! stored event counts (`event_counts.rs`) write through it too.
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
@@ -9,7 +10,7 @@ use crate::{ProjectError, Result};
 
 /// Diff rows already loaded on the locked chain transaction. The caller includes every row
 /// in the affected key set, including obsolete rows absent from `fresh`.
-pub(super) async fn replace(
+pub(in crate::families) async fn replace(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
     block: &BlockHeader,
@@ -21,7 +22,7 @@ pub(super) async fn replace(
         rows.into_iter()
             .map(|row| {
                 let object = row.as_object().ok_or_else(|| {
-                    ProjectError::data_integrity("history catalogue row is not an object")
+                    ProjectError::data_integrity(format!("{} row is not an object", table.name))
                 })?;
                 Ok((store::key_text(table, object), row))
             })
@@ -62,7 +63,9 @@ pub(super) async fn replace(
     .bind(Value::Array(journal))
     .execute(&mut **transaction)
     .await
-    .map_err(|e| ProjectError::database("failed to journal history catalogue before-images", e))?
+    .map_err(|e| {
+        ProjectError::database(format!("failed to journal {} before-images", table.name), e)
+    })?
     .rows_affected();
     let written = store::replace(transaction, table, keys, rows).await?;
     Ok((written, count))

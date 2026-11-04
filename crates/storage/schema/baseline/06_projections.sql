@@ -2718,6 +2718,39 @@ CREATE INDEX IF NOT EXISTS project_history_edge_source_idx ON project_history_so
 
 CREATE INDEX IF NOT EXISTS project_history_edge_resolver_node_idx ON project_history_source_edge (chain_id, pointer_resolver, node);
 
+CREATE TABLE IF NOT EXISTS project_event_count (
+    chain_id text NOT NULL,
+    anchor_kind smallint NOT NULL,
+    anchor text NOT NULL,
+    namespace text NOT NULL,
+    event_kind text NOT NULL,
+    event_count bigint NOT NULL,
+    PRIMARY KEY (chain_id, anchor_kind, anchor, namespace, event_kind),
+    CHECK (anchor_kind BETWEEN 0 AND 2),
+    CHECK (event_count > 0)
+);
+
+COMMENT ON TABLE project_event_count IS
+    'Project-owned stored event counts of family F20: per chain, anchor, namespace and event kind, the number of product-visible normalized events with a block at or below the family publication that the anchor''s event read admits. Each block adds its range''s counts in the family transaction and journals them for undo. A count of zero has no row.';
+
+COMMENT ON COLUMN project_event_count.chain_id IS
+    'This value is the chain every counted event lies on.';
+
+COMMENT ON COLUMN project_event_count.anchor_kind IS
+    'This value is how the anchor reads the event: 0 the anchor emitted it, 1 a ResolverChanged another contract emitted sets the pointer to the anchor, 2 a ResolverChanged another contract emitted clears the pointer from the anchor to another resolver. A resolver''s events are the sum of its three kinds.';
+
+COMMENT ON COLUMN project_event_count.anchor IS
+    'This value is the lower-case contract address the anchor kind names.';
+
+COMMENT ON COLUMN project_event_count.namespace IS
+    'This value is the namespace of the counted events.';
+
+COMMENT ON COLUMN project_event_count.event_kind IS
+    'This value is the event kind of the counted events, product kind or not.';
+
+COMMENT ON COLUMN project_event_count.event_count IS
+    'This value is the number of events the key covers.';
+
 -- Project-owned current lookup facts. NULL core/metadata is an explicitly evaluated absence.
 CREATE TABLE IF NOT EXISTS bigname_phase.project_lookup_name (
     chain_id text NOT NULL,
