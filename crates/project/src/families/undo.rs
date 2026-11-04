@@ -1,9 +1,10 @@
 //! Undo of one family block in its own transaction. The locked marker must be the block the
 //! driver planned to undo at the generation it planned from, and the repair record must be
 //! undoing under the driver's attempt. Every journalled before-image of the block is restored (a
-//! missing image deletes the row the block created), the index rows are derived again, the
-//! child listing rows the block changed are derived again at the restored block, the marker
-//! returns to the block's predecessor one sequence up, and the block's journal rows are deleted. The undo that reaches the repair's pending undo target also moves the record to
+//! missing image deletes the row the block created), the index rows are derived again, the child
+//! listing rows a kept label preimage spells further are healed at the restored block, the
+//! marker returns to the block's predecessor one sequence up, and the block's journal rows are
+//! deleted. The undo that reaches the repair's pending undo target also moves the record to
 //! replaying in the same commit, with the input revision it read inside the transaction. Undo
 //! never rewrites the repair record's facts and never touches `chain_phase_state`.
 use std::collections::BTreeMap;
@@ -110,7 +111,7 @@ pub(crate) async fn undo_block(
         &marker::Composition::recorded(&restored),
     )
     .await?;
-    rederive_listing(&mut transaction, chain_id, &restored, &journal).await?;
+    heal_listing(&mut transaction, chain_id, &restored, &journal).await?;
 
     super::history_catalogue::restored(&mut transaction, chain_id, &restored).await?;
     marker::advance(&mut transaction, chain_id, &restored).await?;
@@ -145,13 +146,15 @@ pub(crate) async fn undo_block(
     Ok(Some(restored))
 }
 
-/// Derive again, at the restored block, the child listing rows the undone block's journal names,
-/// after their before-images are restored. Interpret's redo never removes a label from
+/// Heal, at the restored block, the child listing rows the undone block's journal restored that
+/// still spell a label as `[labelhash]`. Interpret's redo never removes a label from
 /// `label_preimages` (`crates/interpret/src/write.rs`, `prepare_redo_range`), so a row the undone
-/// block healed is spelled again as a rebuild at the restored block spells it. The listing's own
-/// statement derives them (`derived/children.rs`), the counts move by the same diff, and nothing
-/// is journalled. With no restored block the families are empty.
-async fn rederive_listing(
+/// block healed would otherwise spell the label again while the relation at the restored block,
+/// and a rebuild there, spell it. The listing's own statement derives the rows
+/// (`derived/children.rs`, `derive_heals`) and writes only those it spells further, journalling
+/// nothing: any other difference comes from Interpret rows the repair already replaced, and the
+/// replay derives those. No count moves. With no restored block the families are empty.
+async fn heal_listing(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chain_id: &str,
     restored: &FamilyMarker,
@@ -161,8 +164,12 @@ async fn rederive_listing(
         return Ok(());
     };
     let mut children = Vec::new();
-    for (family, key, _) in journal {
-        if family != tables::CHILD_LISTING.name {
+    for (family, key, image) in journal {
+        let unhealed = image
+            .as_ref()
+            .and_then(|image| image.get("unhealed_labelhashes"))
+            .and_then(Value::as_array);
+        if family != tables::CHILD_LISTING.name || unhealed.is_none_or(Vec::is_empty) {
             continue;
         }
         let key = store::key_object(&tables::CHILD_LISTING, key)?;
@@ -180,18 +187,26 @@ async fn rederive_listing(
         return Ok(());
     }
     let timestamp_seconds = match restored.timestamp_seconds {
-        Some(seconds) => seconds,
-        None => {
-            input::read_block(transaction, chain_id, base.number)
-                .await?
-                .ok_or_else(|| {
-                    ProjectError::transient(format!(
-                        "chain {chain_id}'s restored block {} left the readable lineage",
-                        base.number
-                    ))
-                })?
-                .timestamp_seconds
-        }
+        Some(seconds) => Some(seconds),
+        None => sqlx::query_scalar(
+            "/* project:families.undo.restored_time */
+             SELECT extract(epoch FROM lineage.block_timestamp)::bigint
+             FROM chain_lineage lineage
+             WHERE lineage.chain_id = $1 AND lineage.block_number = $2
+               AND lineage.block_hash = $3",
+        )
+        .bind(chain_id)
+        .bind(base.number)
+        .bind(&base.hash)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to read the restored block", error))?,
+    };
+    let Some(timestamp_seconds) = timestamp_seconds else {
+        return Err(ProjectError::data_integrity(format!(
+            "chain {chain_id}'s restored block {} has no lineage row",
+            base.number
+        )));
     };
     let block = input::BlockHeader {
         number: base.number,
@@ -202,11 +217,10 @@ async fn rederive_listing(
         journal: false,
     };
     // Boxed, so the undo's future does not carry the derivation's state on the caller's stack.
-    Box::pin(derived::derive_child_listing(
+    Box::pin(derived::heal_child_listing(
         transaction,
         chain_id,
         &block,
-        &[],
         &children,
     ))
     .await?;

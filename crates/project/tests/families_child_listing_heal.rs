@@ -404,7 +404,7 @@ async fn a_label_observed_alone_and_by_name_in_one_block_heals_once() -> Result<
 // block 11, where the kept preimage spells it, so the row stays healed and the second apply
 // changes nothing.
 #[tokio::test]
-async fn a_label_only_observation_replayed_after_an_undo_heals_again() -> Result<()> {
+async fn a_label_only_observation_replayed_after_an_undo_stays_healed() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_label_only_undo", 20).await?;
     let c = held_by_one_child(&fixture).await?;
     let kept = fixture.exact().await?;

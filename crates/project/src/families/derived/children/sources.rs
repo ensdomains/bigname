@@ -35,7 +35,7 @@
 //!   a read can wait those steps.
 //! - Undoing an A block later does not un-heal B's names: a preimage is true whichever block
 //!   revealed it, and `label_preimages` keeps it.
-//! - Undoing B's block restores the watermark from the journal, and derives the listing rows it
+//! - Undoing B's block restores the watermark from the journal, and heals the listing rows it
 //!   healed again at B's restored block, where the kept preimage still spells them. Reading an A
 //!   block again derives rows that already spell its labels again, which changes nothing.
 //! - A source without a watermark is read from block 0. A rebuild's reset clears the watermarks
