@@ -268,23 +268,29 @@ impl Fixture {
     /// listable names as (name, expiry, authority), in name order; none when no chain is
     /// published for this build.
     pub async fn assert_expiry_selector(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        // A session of its own: tests that measure a statement's plan depend on what the
+        // fixture's one pooled session has already run. It is closed before this returns, so no
+        // session of it outlives the check.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(self.pool.connect_options().as_ref().clone())
+            .await?;
+        let checked = Self::expiry_selector_on(&pool).await;
+        pool.close().await;
+        checked
+    }
+
+    async fn expiry_selector_on(pool: &PgPool) -> Result<Vec<(String, String, Option<String>)>> {
         use bigname_storage::{
             NameCurrentExpiringFilter, NameCurrentListOrder, UnixSeconds,
             families::name::{
                 is_publication_unavailable, load_family_expiring_page,
-                load_family_names_by_logical_name_ids,
+                load_family_names_by_logical_name_ids, load_family_publication,
             },
             name_current_public_authority,
         };
         use std::collections::{BTreeMap, BTreeSet};
 
-        // A session of its own: tests that measure a statement's plan depend on what the
-        // fixture's one pooled session has already run.
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(self.pool.connect_options().as_ref().clone())
-            .await?;
-        let pool = &pool;
         let surfaces: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT surface.logical_name_id, surface.namespace, surface.chain_id
              FROM name_surfaces surface
@@ -293,6 +299,15 @@ impl Fixture {
         )
         .fetch_all(pool)
         .await?;
+        // The composed read drops its snapshot open when a chain is not published, which leaves
+        // the session in a transaction until sqlx flushes the queued rollback. The publications
+        // are read first, outside a transaction, so that read runs only when it can close.
+        let chains: BTreeSet<&str> = surfaces.iter().map(|(.., chain)| chain.as_str()).collect();
+        for chain in chains {
+            if load_family_publication(pool, chain).await?.is_none() {
+                return Ok(Vec::new());
+            }
+        }
         let names: Vec<String> = surfaces.iter().map(|(name, ..)| name.clone()).collect();
         let composed = match load_family_names_by_logical_name_ids(pool, &names).await {
             Ok(composed) => composed,
