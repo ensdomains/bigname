@@ -57,6 +57,7 @@ mod verify_compare;
 mod verify_level;
 pub mod verify_phase;
 mod verify_store;
+pub mod walk_index_restore;
 
 pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH};
 pub use progress_monitor::RunnerPhaseProgress;

@@ -501,6 +501,7 @@ include!("tests/v2_history_keyset.rs");
 include!("tests/v2_history_keyset_walk.rs");
 include!("tests/v2_history_query_filters.rs");
 include!("tests/v2_contract_event_counts.rs");
+include!("tests/v2_events_emitter_count.rs");
 include!("tests/v2_tokenless_expiry_events.rs");
 include!("tests/v2_history_block_order.rs");
 include!("tests/v2_history_block_order_children.rs");
@@ -537,6 +538,8 @@ mod v2_history_bounded_rebinding;
 mod v2_history_bounded_regeneration;
 #[path = "tests/v2_registry_permission_identity.rs"]
 mod v2_registry_permission_identity;
+#[path = "tests/v2_registry_role_counts_index.rs"]
+mod v2_registry_role_counts_index;
 #[path = "tests/v2_registry_token_ids.rs"]
 mod v2_registry_token_ids;
 include!("tests/v2_resolvers.rs");
@@ -545,6 +548,7 @@ mod v2_resolver_eac_resources;
 include!("tests/v2_resolver_collections.rs");
 include!("tests/v2_resolver_generation_races.rs");
 include!("tests/v2_registries.rs");
+include!("tests/v2_registry_event_count_cap.rs");
 include!("tests/v2_registries_manifest_history.rs");
 include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
@@ -597,6 +601,7 @@ include!("tests/v2_family_records_review.rs");
 include!("tests/v2_list_cursor.rs");
 include!("tests/v2_collection_cursor_completion.rs");
 include!("tests/v2_family_children.rs");
+include!("tests/v2_child_count_cap.rs");
 include!("tests/v2_family_registry_children.rs");
 include!("tests/v2_address_names_parent.rs");
 include!("tests/v2_bracketed_labelhash_names.rs");
@@ -665,3 +670,5 @@ mod v2_ens_v1_registry_read;
 mod v2_ens_v1_registry_read_mainnet;
 #[path = "tests/v2_ens_v1_registry_serving.rs"]
 mod v2_ens_v1_registry_serving;
+#[path = "tests/v2_implied_lease_routes.rs"]
+mod v2_implied_lease_routes;

@@ -18,6 +18,7 @@ pub async fn load_children_current_page(
         &ChildrenCurrentPageFilter::default(),
         cursor,
         page_size,
+        None,
     )
     .await
 }
@@ -46,13 +47,16 @@ pub async fn load_registry_children_current_page(
 }
 
 /// Exact count of the labels `registry_address` holds on `chain_id` at the current family
-/// publication, under the name the registry serves there.
+/// publication, under the name the registry serves there, or `None` when the registry holds more
+/// than `cap` registrations under that name: the count then stops reading at `cap + 1`
+/// registrations and is not computed.
 pub async fn count_registry_labels_current(
     db: impl Into<crate::ReadDb<'_>>,
     chain_id: &str,
     registry_address: &str,
-) -> Result<i64> {
-    super::families::registry_count_current(db.into(), chain_id, registry_address).await
+    cap: u64,
+) -> Result<Option<i64>> {
+    super::families::registry_count_current(db.into(), chain_id, registry_address, cap).await
 }
 
 pub async fn load_children_current_summaries(

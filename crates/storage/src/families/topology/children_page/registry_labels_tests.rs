@@ -70,10 +70,12 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                 let labels = RegistryLabels {
                     registry,
                     owner: *owner,
+                    registration_limit: None,
                 };
                 let label = format!("{mode} {parent} {registry} {owner:?}");
-                let narrowed = page(&mut conn, parent, &filter, Some(labels), None, 10_000).await?;
-                let query = page_query(parent, &filter, Some(labels), None, 10_001);
+                let narrowed =
+                    page(&mut conn, parent, &filter, Some(labels), None, 10_000, None).await?;
+                let query = page_query(parent, &filter, Some(labels), None, 10_001, None);
                 let before_sql = unnarrowed(query.sql())?;
                 let mut before = sqlx::query(&before_sql)
                     .bind(*parent)
@@ -105,7 +107,10 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                 );
                 ensure!(narrowed.rows == before_rows, "{label}: the rows differ");
                 if owner.is_none() {
-                    ensure!(count(&mut conn, parent, Some(registry.as_str())).await? == total);
+                    ensure!(
+                        count_registry_labels(&mut conn, parent, registry, 10_000).await?
+                            == Some(total)
+                    );
                 }
             }
         }
@@ -113,10 +118,13 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
         // both arms, 10 with no summary and both arms, 10 whose selected arm is ENSv1), two of
         // which are also released. Labels that expired without a release are held; another
         // instance's registrations are not.
-        let eth = count(&mut conn, ETH, Some(registry(1).as_str())).await?;
-        ensure!(eth == 800 - 50 - 30 + 2, "eth labels: {eth}");
-        ensure!(count(&mut conn, ETH, Some(registry(2).as_str())).await? == 0);
-        ensure!(count(&mut conn, OTHER_PARENT, Some(registry(2).as_str())).await? == 100);
+        let eth = count_registry_labels(&mut conn, ETH, &registry(1), 10_000).await?;
+        ensure!(eth == Some(800 - 50 - 30 + 2), "eth labels: {eth:?}");
+        ensure!(count_registry_labels(&mut conn, ETH, &registry(2), 10_000).await? == Some(0));
+        ensure!(
+            count_registry_labels(&mut conn, OTHER_PARENT, &registry(2), 10_000).await?
+                == Some(100)
+        );
 
         let mut count_query = QueryBuilder::<Postgres>::new("WITH ");
         let eth_registry = registry(1);
@@ -127,6 +135,7 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
             Some(RegistryLabels {
                 registry: &eth_registry,
                 owner: None,
+                registration_limit: None,
             }),
             None,
         );
@@ -199,6 +208,193 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
     .await;
     database.cleanup().await?;
     result
+}
+
+/// The capped registry count: exact while the registry holds at most `cap` registrations under
+/// the parent, `None` above, whatever the labels among them number. Registry 1 holds 750
+/// unreleased registrations under the eth parent, 722 of them labels; registry 2 holds 100 under
+/// the other parent, all labels.
+#[tokio::test]
+async fn registry_label_count_is_null_above_the_cap() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("registry_label_count_cap").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        for (parent, registry, cap, expected) in [
+            // At the cap the count is exact; one registration over it, none is reported, even
+            // when the labels among them are within the cap.
+            (ETH, registry(1), 750, Some(722)),
+            (ETH, registry(1), 749, None),
+            (ETH, registry(1), 722, None),
+            (OTHER_PARENT, registry(2), 100, Some(100)),
+            (OTHER_PARENT, registry(2), 99, None),
+            // No registration under the parent: zero at any cap.
+            (ETH, registry(2), 0, Some(0)),
+        ] {
+            let count = count_registry_labels(&mut conn, parent, &registry, cap).await?;
+            ensure!(
+                count == expected,
+                "{parent} {registry} cap {cap}: {count:?}, expected {expected:?}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// The capped count's statement keeps `cap + 1` registrations under a `Limit` inside
+/// `v2_candidates` and reads everything after them per kept registration: the registrations it
+/// visits, the edge probes by child node, and the candidate windows are bounded by the cap, not by
+/// the registry's 750 registrations or the parent's 4,000 ENSv1 edges. The wrapper and migration
+/// relations are not scanned per candidate.
+#[tokio::test]
+async fn registry_label_count_plan_stops_at_the_cap() -> Result<()> {
+    const CAP: u64 = 200;
+    const KEPT: u64 = CAP + 1;
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("registry_label_count_cap_plan").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        let hash = bigname_content_hash::PROJECTION_CONTENT_HASH;
+        let eth_registry = registry(1);
+        let limit = i64::try_from(KEPT)?;
+        let query = registry_labels_count_query(ETH, &eth_registry, limit);
+        raw_sql(&format!(
+            "PREPARE labels_capped (text, text, text, bigint, text) AS {}",
+            query.sql()
+        ))
+        .execute(&mut *conn)
+        .await?;
+        let mut failures = Vec::new();
+        for mode in PLAN_MODES {
+            raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await?;
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE labels_capped \
+                 ('{ETH}', '{hash}', '{eth_registry}', {limit}, '{eth_registry}')"
+            ))
+            .fetch_one(&mut *conn)
+            .await?;
+            let root = &plan[0]["Plan"];
+            let mut nodes = Vec::new();
+            every_node(root, &mut nodes);
+            let rows = |node: &Value| node["Actual Rows"].as_u64().unwrap_or_default();
+            let loops = |node: &Value| node["Actual Loops"].as_u64().unwrap_or_default();
+            let visited = |node: &Value| {
+                (node["Actual Rows"].as_u64().unwrap_or_default()
+                    + node["Rows Removed by Filter"].as_u64().unwrap_or_default())
+                    * node["Actual Loops"].as_u64().unwrap_or_default()
+            };
+            match nodes
+                .iter()
+                .find(|node| node["Subplan Name"] == "CTE v2_candidates")
+            {
+                Some(cte) if cte["Node Type"] == "Limit" && rows(cte) == KEPT => {}
+                cte => failures.push(format!(
+                    "{mode}: v2_candidates is not a Limit that keeps {KEPT}: {cte:?}"
+                )),
+            }
+            // The edge lookups are probes by child node, at most one per kept registration (and
+            // per edge found, for the latest-edge veto), not an enumeration of the parent's edges.
+            let mut probes = Vec::new();
+            scans(root, &mut probes);
+            for probe in probes.iter().filter(|scan| {
+                scan.relation == "project_child_edge_candidate"
+                    && matches!(scan.alias, "edge" | "other")
+                    && scan.loops > 0
+            }) {
+                let by_child = !probe.indexes.is_empty()
+                    && probe.indexes.iter().all(|(name, condition)| {
+                        *name == "project_child_edge_candidate_child_idx"
+                            && condition.contains("child_node")
+                    });
+                if !by_child || probe.loops > KEPT {
+                    failures.push(format!(
+                        "{mode}: {} of the edge candidates as {} is not a bounded probe by \
+                         child node: {:?}, {} loops",
+                        probe.node_type, probe.alias, probe.indexes, probe.loops
+                    ));
+                }
+            }
+            let registrations: u64 = nodes
+                .iter()
+                .filter(|node| {
+                    node["Relation Name"] == "project_child_registration_state"
+                        && node["Alias"] == "registration"
+                })
+                .map(|node| visited(node))
+                .sum();
+            if registrations > 2 * KEPT {
+                failures.push(format!(
+                    "{mode}: the count visited {registrations} registrations, over 2 x (cap + 1)"
+                ));
+            }
+            for node in &nodes {
+                let relation = node["Relation Name"].as_str().unwrap_or_default();
+                let alias = node["Alias"].as_str().unwrap_or_default();
+                if relation == "project_child_edge_candidate"
+                    && matches!(alias, "edge" | "other")
+                    && visited(node) > 2 * KEPT
+                {
+                    failures.push(format!(
+                        "{mode}: {alias} visited {} edge candidates, over 2 x (cap + 1)",
+                        visited(node)
+                    ));
+                }
+                if node["Node Type"] == "WindowAgg" && rows(node) > 2 * KEPT {
+                    failures.push(format!(
+                        "{mode}: a candidate window read {} rows, over 2 x (cap + 1)",
+                        rows(node)
+                    ));
+                }
+                if matches!(
+                    relation,
+                    "project_wrapper_state" | "migration_discovery_associations"
+                ) && node["Node Type"] == "Seq Scan"
+                    && loops(node) > 1
+                {
+                    failures.push(format!(
+                        "{mode}: {relation} is scanned {} times",
+                        loops(node)
+                    ));
+                }
+            }
+            let counted: (i64, i64) = sqlx::query_as(&format!(
+                "EXECUTE labels_capped ('{ETH}', '{hash}', '{eth_registry}', {limit}, \
+                 '{eth_registry}')"
+            ))
+            .fetch_one(&mut *conn)
+            .await?;
+            if counted.0 != limit {
+                failures.push(format!("{mode}: kept {} registrations", counted.0));
+            }
+            if !failures.is_empty() {
+                eprintln!("{mode}: {plan:#}");
+            }
+        }
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// Every node of a plan, sub-plans, init plans and CTE definitions included.
+fn every_node<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
+    output.push(node);
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        every_node(child, output);
+    }
 }
 
 /// One scan of a table in an `EXPLAIN (ANALYZE, FORMAT JSON)` plan, with each index it reads and

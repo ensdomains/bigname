@@ -10,13 +10,14 @@ This package builds two indexes on `bigname_phase.normalized_events`:
 The name key is the namespace, a colon, and the lowercased node.
 
 History's registry handoff read (`load_history_registry_handoffs` in
-`crates/storage/src/history/registry_handoffs.rs`) is their reader. For one name it
-looks up the owner events of that name in source family `ens_v1_registry_l1`:
-`AuthorityTransferred` events by `node` and `SubregistryChanged` events by `child_node`.
-Each lookup gives the chain and the name key, so it reads one index range instead of every
-owner event of the chain.
-[`docs/storage.md`](../../docs/storage.md#table-ownership) lists both indexes with that
-reader.
+`crates/storage/src/history/registry_handoffs.rs`) looks up the owner events of one name in
+source family `ens_v1_registry_l1` by chain and name key, so it reads one index range
+instead of every owner event of the chain. It finds `SubregistryChanged` events by
+`child_node` through `normalized_events_project_name_child_idx`. It finds `Transfer` events
+by `node` through `normalized_events_v1_transfer_node_idx`, which the normalized-events
+baseline and `20261102130000_normalized_events_v1_transfer_node_index.sql` install, not this
+package. It no longer reads `normalized_events_project_name_node_idx`.
+[`docs/storage.md`](../../docs/storage.md#table-ownership) lists the indexes it reads.
 
 Neither index restricts `consumer_visibility`. Both are limited to the relevant event kinds,
 to readable canonicality states and to non-null keys.

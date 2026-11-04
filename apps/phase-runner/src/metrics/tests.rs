@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use bigname_ingest::RpcCountKind;
 
 use super::*;
@@ -67,6 +69,7 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         "# TYPE phase_runner_served_publication_block gauge",
         "# TYPE phase_runner_universal_resolver_cut_over gauge",
         "# TYPE phase_runner_universal_resolver_unadmitted gauge",
+        "# TYPE phase_runner_walk_index_capacity_blocked gauge",
     ] {
         assert!(scrape.contains(metric_type), "missing {metric_type}");
     }
@@ -77,6 +80,7 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     for gauge in [
         "phase_runner_universal_resolver_cut_over",
         "phase_runner_universal_resolver_unadmitted",
+        "phase_runner_walk_index_capacity_blocked",
     ] {
         let line = format!("{gauge}{{chain=\"ethereum-mainnet\"}} 0\n");
         assert!(
@@ -86,6 +90,29 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     }
     assert!(scrape.contains("build_sha="));
     assert!(scrape.contains("interpreter_content_hash="));
+    Ok(())
+}
+
+#[test]
+fn exports_a_walk_index_rebuild_blocked_on_storage_capacity() -> Result<()> {
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
+    let metrics =
+        PipelineMetrics::new(900, loop_heartbeat.clone(), RunnerPhaseProgress::default())?;
+    let line = |value: i64| {
+        format!("phase_runner_walk_index_capacity_blocked{{chain=\"ethereum-mainnet\"}} {value}\n")
+    };
+    for (blocked, value) in [(false, 0), (true, 1), (false, 0)] {
+        loop_heartbeat.set_walk_index_capacity_blocked("ethereum-mainnet", blocked);
+        metrics.apply_rows(&[metric_row("interpret")])?;
+        let scrape = metrics.registry.encode()?;
+        assert!(scrape.contains(&line(value)), "{scrape}");
+    }
+    metrics.apply_rows(&[])?;
+    let scrape = metrics.registry.encode()?;
+    assert!(
+        !scrape.contains("phase_runner_walk_index_capacity_blocked{"),
+        "a removed chain's gauge is removed: {scrape}"
+    );
     Ok(())
 }
 

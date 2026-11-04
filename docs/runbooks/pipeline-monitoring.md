@@ -165,6 +165,11 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | Exporter health | Whether Prometheus can scrape the runner and whether the latest read of PostgreSQL state succeeded. |
 | RPC chain check | `phase_runner_rpc_chain_id{chain,source}` is the chain id each RPC endpoint reported to its latest [RPC chain check](../deployment.md#rpc-chain-check), or `-1` when none could be read; hydration URLs use `source="hydration"`, which they share with a configured source of that key. `phase_runner_rpc_chain_mismatch{chain,source}` is `1` once an Ingest or Live source failed the check during the run; a failed Verify reference shows as a failed Verify phase instead. |
 
+`phase_runner_walk_index_capacity_blocked{chain}` is `1` while the chain's rebuild of the
+indexes the [walk index set](../../ops/walk-index-set/README.md#the-phase-runners-rebuild)
+scripts drop waits for storage capacity before Project, and `0` otherwise. It is not on a
+dashboard panel.
+
 ## Ingest RPC traffic
 
 Three counters cover only the JSON-RPC traffic the shared Ingest and Live
@@ -476,6 +481,33 @@ Failures leave the committed prefix available for resumption. A malformed
 journal is a data-integrity error to investigate, not an instruction to edit
 markers or silently discard it. Follow the recovery runbook for operator redo
 or rebuild.
+
+A block whose value PostgreSQL cannot store stops that chain once instead of
+retrying ([projections](../projections.md#publication-and-resumption)). It
+pages through `BignamePhaseFailed`. The runner logs
+`chain supervisor stopped after a terminal error`, and
+`chain_phase_state.last_error` on the chain's `project` row ends with
+PostgreSQL's message:
+
+- `unsupported Unicode escape sequence` or
+  `invalid byte sequence for encoding "UTF8": 0x00` for a NUL byte
+- `index row size … exceeds btree version 4 maximum …` or
+  `index row requires … bytes, maximum size is …` for an oversized record key.
+
+A runner exits nonzero once every chain it runs has stopped, so a runner with
+one chain exits on this stop. Its restart policy starts it again, and it replays
+the same block and stops again. That loop can also page
+`BignamePhaseRunnerContainerRestarting`, and `BignamePhaseRunnerDown` if the
+runner stays down between starts. Stop that runner's container until a build
+that handles the value is deployed. On a runner with several chains the others
+keep running. The stopped chain's last publication is kept, and the API serves
+it only while it is within the
+[publication lag tolerance](../glossary.md#publication-lag-tolerance) of the
+stored head. Each restart in that loop runs Ingest to the source's head before
+Project meets the block again, so on a one-chain runner reads soon answer
+`409 stale`. A stop during catch-up does the same on any runner. The chain
+recovers once a build that handles the value catches it up.
+Do not edit markers or delete the event. Report the message and block.
 
 ## Alerts
 

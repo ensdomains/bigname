@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
             mut runtime,
             hydration_rpc_urls,
             project_families,
+            index_build,
             live_publication_lag_blocks,
         } => {
             // Only the supervised run and an explicit redo poll the token; the
@@ -92,7 +93,9 @@ async fn main() -> Result<()> {
                     .unwrap_or(u32::MAX)
                     .saturating_mul(2)
                     .max(4);
-                let database = RunnerDatabase::connect(&database_url, connections).await?;
+                let database = RunnerDatabase::connect(&database_url, connections)
+                    .await?
+                    .with_index_build_settings(index_build);
                 sync_loaded_manifests(
                     database.pool(),
                     &manifests_root,
@@ -186,12 +189,15 @@ async fn main() -> Result<()> {
             watch_set_coverage_attestations,
             hydration_rpc_urls,
             project_families,
+            index_build,
         } => {
             let cancellation = CancellationToken::new();
             phase_runner::shutdown::cancel_on_signal(&cancellation)
                 .context("register the stop signals before starting")?;
             let startup = async {
-                let database = RunnerDatabase::connect(&database_url, 4).await?;
+                let database = RunnerDatabase::connect(&database_url, 4)
+                    .await?
+                    .with_index_build_settings(index_build);
                 let mut chains = match chains {
                     RedoChains::Explicit(chains) => chains,
                     RedoChains::All { sources } => {

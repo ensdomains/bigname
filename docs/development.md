@@ -77,6 +77,25 @@ use or any required validation gate is removed.
 cache without running the shutdown scenario. CI uses this only to refresh a
 missing main-branch cache after the required queue validation.
 
+## CI without a pull request
+
+A push to a branch whose name starts with `ci/` runs the full suite, with the
+same jobs and steps as a pull request. Use it to run CI on a commit that is not
+ready for review, such as a failing test pushed ahead of its fix. Its checks
+report on the commit, and no pull request is needed.
+
+- Name the branch `ci/<ticket>-<purpose>`, for example `ci/tyr442-smoke`.
+- A newer push to the same branch cancels the older run.
+- The run restores the caches `main` saved and saves no cache entry of its own.
+  The repository's 10 GB cache limit would otherwise evict `main`'s entries.
+- The Rust source size ratchet compares allowances against the commit where the
+  branch left `main`, a `release/` branch or a `hotfix/` branch, whichever is
+  nearest, because a push has no base branch.
+- A push to a `release/` branch keeps the shape of a push to `main`: the warm
+  and artifact steps run and the tests do not.
+- No branch ruleset covers `ci/` branches, so they can be pushed and deleted
+  freely. Delete the branch once its run has been recorded.
+
 ## Database-backed tests
 
 Run DB-backed Rust tests through the isolated database harness:
