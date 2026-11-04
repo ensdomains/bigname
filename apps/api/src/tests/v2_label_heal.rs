@@ -904,23 +904,29 @@ async fn v2_label_heal_a_refused_or_failed_write_serves_what_no_write_serves() -
     database.cleanup().await
 }
 
-/// The value class a runner skips. A label with a NUL byte is not a normalized label, so no
-/// request proves one: the name route refuses it with a 400 and lookup answers it in band,
-/// before any read or write. Handed to the writer anyway, the database refuses the value, the
-/// write counts `failed`, and the process serves and writes as before. A label longer than a
-/// btree key holds is staged, since ens_names keys on the fixed-width labelhash.
+/// The value classes a runner skips: a NUL byte, and a value past what a btree key holds. No
+/// request proves either. The normalizer refuses a NUL and any label over the 255 bytes a DNS
+/// label holds, so the name route answers 400 and lookup answers in band, before any read or
+/// write. Handed to the writer anyway, the NUL counts `failed` and the overlong value stages,
+/// since ens_names keys only on the fixed-width labelhash. The process then serves and stages
+/// the longest label a request can prove exactly as a process with no write serves it.
 #[tokio::test]
 async fn v2_label_heal_a_nul_or_overlong_label_never_fails_a_response() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    // Hex of keccak digests, which a btree's compression cannot shrink to fit a key.
-    let long: String = (0..47_u64)
-        .map(|seed| hex::encode(alloy_primitives::keccak256(seed.to_be_bytes())))
-        .collect();
-    let long_hash = child_labelhash(&long);
+    // Hex of keccak digests, which a btree's compression cannot shrink.
+    let digests = |count: u64| -> String {
+        (0..count)
+            .map(|seed| hex::encode(alloy_primitives::keccak256(seed.to_be_bytes())))
+            .collect()
+    };
+    let longest = digests(4)[..255].to_owned();
+    // As long as the runner's own over-btree value.
+    let overlong = digests(63);
+    let longest_hash = child_labelhash(&longest);
     let (id, resource) = seed_textless_family_name(
         &database,
-        &[long_hash.clone(), child_labelhash("x"), child_labelhash("eth")],
+        &[longest_hash.clone(), child_labelhash("x"), child_labelhash("eth")],
         0x8f2_0000,
         "ens_v1",
         202,
@@ -932,7 +938,7 @@ async fn v2_label_heal_a_nul_or_overlong_label_never_fails_a_response() -> Resul
             &id,
             resource,
             &bigname_lookup::ens_namehash_hex("x.eth")?,
-            &long_hash,
+            &longest_hash,
             RC_OWNER,
             202,
         ),
@@ -943,37 +949,47 @@ async fn v2_label_heal_a_nul_or_overlong_label_never_fails_a_response() -> Resul
         .app_state_with_public_namespaces(&["ens"])
         .with_label_staging(lh_staging_off());
     let state = database.app_state_with_public_namespaces(&["ens"]);
-    let uri = format!("/v1/names/{long}.x.eth");
+    let uri = format!("/v1/names/{longest}.x.eth");
     let expected = lh_ok(&off, &uri).await?;
-    assert_eq!(expected["data"]["name"], json!(format!("{long}.x.eth")));
+    assert_eq!(expected["data"]["name"], json!(format!("{longest}.x.eth")));
 
-    let refused = app_router(state.clone())
-        .oneshot(Request::builder().uri("/v1/names/fi%00rst.x.eth").body(Body::empty())?)
-        .await?;
-    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-    let looked_up = lh_lookup(&state, json!({"inputs": [{"name": "fi\u{0}rst.x.eth"}]})).await?;
-    assert_eq!(
-        looked_up["data"][0]["normalization"]["reason"],
-        json!("invalid_normalized_name"),
-        "{looked_up:#}"
-    );
+    let nul = "fi\u{0}rst";
+    let too_long = format!("{longest}0");
+    for label in [nul, too_long.as_str()] {
+        let path = format!("/v1/names/{}.x.eth", label.replace('\0', "%00"));
+        let refused = app_router(state.clone())
+            .oneshot(Request::builder().uri(path.as_str()).body(Body::empty())?)
+            .await?;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{path}");
+        let looked_up =
+            lh_lookup(&state, json!({"inputs": [{"name": format!("{label}.x.eth")}]})).await?;
+        assert_eq!(
+            looked_up["data"][0]["normalization"]["reason"],
+            json!("invalid_normalized_name"),
+            "{looked_up:#}"
+        );
+    }
     state.label_staging.settled().await;
     assert!(lh_counts(&state).is_empty(), "{:?}", lh_counts(&state));
 
-    let nul = "fi\u{0}rst";
-    state.label_staging.submit(
-        &state.pool,
-        BTreeMap::from([(bigname_storage::rendered_name::label_hash(nul), nul.to_owned())]),
-    );
+    let label_hash = bigname_storage::rendered_name::label_hash;
+    state.label_staging.submit(&state.pool, BTreeMap::from([(label_hash(nul), nul.to_owned())]));
     assert!(lh_staged(&database, &state).await?.is_empty());
     assert_eq!(lh_counts(&state), BTreeMap::from([("failed", 1)]));
+    state.label_staging.submit(
+        &state.pool,
+        BTreeMap::from([(label_hash(&overlong), overlong.clone())]),
+    );
+    let overlong_row = (child_labelhash(&overlong), overlong);
+    assert_eq!(lh_staged(&database, &state).await?, [overlong_row.clone()]);
+    assert_eq!(lh_counts(&state), BTreeMap::from([("failed", 1), ("staged", 1)]));
 
     assert_eq!(lh_get(&state, &uri).await?, (StatusCode::OK, expected));
     let mut rows = lh_rows(&["x", "eth"]);
-    rows.push((long_hash, long));
+    rows.extend([(longest_hash, longest), overlong_row]);
     rows.sort();
     assert_eq!(lh_staged(&database, &state).await?, rows);
-    assert_eq!(lh_counts(&state), BTreeMap::from([("failed", 1), ("staged", 1)]));
+    assert_eq!(lh_counts(&state), BTreeMap::from([("failed", 1), ("staged", 2)]));
 
     database.cleanup().await
 }
