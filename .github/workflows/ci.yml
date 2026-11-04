@@ -1005,6 +1005,13 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
+
+      # The image build and the e2e build after it filled the root disk on
+      # 2026-11-03. The removals run in the background, as in the phase-runner
+      # shards.
+      - name: Free runner disk space
+        run: nohup scripts/ci-free-disk >"$RUNNER_TEMP/ci-free-disk.log" 2>&1 &
+
       - uses: dtolnay/rust-toolchain@master
         if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/')
         with:
@@ -1103,6 +1110,20 @@ jobs:
             v1-shutdown-image-${{ env.RUST_VERSION }}-${{ steps.base_images.outputs.builder }}-
             v1-shutdown-image-${{ env.RUST_VERSION }}-
 
+      # scripts/ci-free-disk prunes unused Docker images, so it must finish
+      # before the image build starts. It ends within about two minutes.
+      - name: Wait for the disk cleanup
+        run: |
+          start=$SECONDS
+          for _ in $(seq 180); do
+            pgrep -f scripts/ci-free-disk >/dev/null || break
+            sleep 1
+          done
+          echo "waited $((SECONDS - start)) s for the disk cleanup"
+
+      - name: Report disk before the build
+        run: scripts/ci-disk-report "before the build" "${{ job.services.postgres.id }}"
+
       - name: Prove exact-image API shutdown
         if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/')
         env:
@@ -1115,6 +1136,11 @@ jobs:
         env:
           BIGNAME_E2E_SHUTDOWN_BUILD_CACHE: ${{ runner.temp }}/shutdown-image-cache
         run: scripts/test-container-shutdown --build-only
+
+      - name: Report disk after the tests
+        if: always()
+        run: scripts/ci-disk-report "after the tests" "${{ job.services.postgres.id }}"
+
       - name: Retain shutdown evidence
         if: (always()) && (github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/'))
         uses: actions/upload-artifact@v7
