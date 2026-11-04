@@ -8,7 +8,8 @@ use bigname_project::families::{self, FamilyMode};
 use families_support::{
     CHAIN, Fixture, hash,
     listing_cases::{
-        OWNER, REGISTRY, assert_served, edge, journalled, label_state, listed, name, node, preimage,
+        OWNER, REGISTRY, assert_served, edge, ensure_equal_but_listing, journalled, label_state,
+        listed, name, node, preimage,
     },
 };
 use serde_json::json;
@@ -176,8 +177,9 @@ async fn a_label_on_a_spelled_ancestor_heals_its_children_when_first_observed() 
 // label and its parent's as `[labelhash]`. An observation of a name carrying `c` at block 12
 // heals its own label, and the row keeps the parent's; one of a name carrying `p` at block 13
 // spells it whole and leaves nothing unhealed. Each block journals the one row. The undo of
-// block 13 restores the row, its unhealed labels included, byte for byte, and the stored rows
-// equal today's read-time answer at every step.
+// block 13 restores every other family byte for byte and derives the row again at block 12.
+// `label_preimages` keeps `p`, so the row stays whole, as a rebuild at block 12 spells it. The
+// stored rows equal today's read-time answer at every step.
 #[tokio::test]
 async fn a_child_with_two_unknown_labels_heals_once_per_observation() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_two_labels", 20).await?;
@@ -227,11 +229,13 @@ async fn a_child_with_two_unknown_labels_heals_once_per_observation() -> Result<
 
     let undone = families::undo_to(&fixture.pool, CHAIN, 12).await?;
     ensure!(undone == 1, "undid {undone} blocks");
-    let restored = fixture.exact().await?;
-    for ((table, was), (_, now)) in kept.iter().zip(&restored) {
-        ensure!(was == now, "the undo left {table} as {now}, not {was}");
-    }
-    ensure!(unhealed(&fixture, &child).await? == std::slice::from_ref(&p));
+    ensure_equal_but_listing(&kept, &fixture.exact().await?)?;
+    ensure!(
+        listed(&fixture, &name(1)).await? == second,
+        "the undo derives the row again at block 12, where both labels are known"
+    );
+    ensure!(unhealed(&fixture, &child).await?.is_empty());
+    fixture.assert_child_listing(CHAIN).await?;
     fixture.apply(13, FamilyMode::Normal).await?;
     ensure!(listed(&fixture, &name(1)).await? == second);
     fixture.assert_rebuild_equal(13).await?;
@@ -396,8 +400,9 @@ async fn a_label_observed_alone_and_by_name_in_one_block_heals_once() -> Result<
 }
 
 // Label-only row 7: the block of a label-only observation is undone, as a reorg's undo does, and
-// the block is applied again with the label observed again. The undo restores the unhealed row
-// byte for byte, and the second apply heals it again.
+// the block is applied again with the label observed again. The undo derives the row again at
+// block 11, where the kept preimage spells it, so the row stays healed and the second apply
+// changes nothing.
 #[tokio::test]
 async fn a_label_only_observation_replayed_after_an_undo_heals_again() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_label_only_undo", 20).await?;
@@ -408,20 +413,208 @@ async fn a_label_only_observation_replayed_after_an_undo_heals_again() -> Result
     fixture.apply(12, FamilyMode::Normal).await?;
     heals_the_one_child(&fixture).await?;
 
+    undo_keeps_the_one_child_healed(&fixture, &kept).await?;
+    replace_events(&fixture).await?;
+    observe_label(&fixture, 12, 0, "c").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    replayed_without_change(&fixture).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+/// Undo block 12 to block 11, which `kept` snapshots: every family but the listing is restored
+/// byte for byte, and the one child of `held_by_one_child` stays healed, equal to the relation at
+/// block 11.
+async fn undo_keeps_the_one_child_healed(
+    fixture: &Fixture,
+    kept: &[(String, String)],
+) -> Result<()> {
+    let undone = families::undo_to(&fixture.pool, CHAIN, 11).await?;
+    ensure!(undone == 1, "undid {undone} blocks");
+    ensure_equal_but_listing(kept, &fixture.exact().await?)?;
+    let healed = listed(fixture, &name(1)).await?;
+    ensure!(
+        healed[0].1.starts_with("c.") && healed[0].2 == healed[0].1,
+        "the undo keeps the child healed: {healed:?}"
+    );
+    ensure!(unhealed(fixture, &name(11)).await?.is_empty());
+    fixture.assert_child_listing(CHAIN).await
+}
+
+/// Interpret's redo deletes the undone blocks' events, from block 12 up, before it writes the
+/// replacement blocks'.
+async fn replace_events(fixture: &Fixture) -> Result<()> {
+    sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1 AND block_number >= 12")
+        .bind(CHAIN)
+        .execute(&fixture.pool)
+        .await?;
+    Ok(())
+}
+
+/// The replacement block 12 leaves the healed child as it stands and journals no listing row.
+async fn replayed_without_change(fixture: &Fixture) -> Result<()> {
+    ensure!(unhealed(fixture, &name(11)).await?.is_empty());
+    ensure!(
+        journalled(fixture, 12, "project_child_listing").await? == (0, 0),
+        "the replacement block changes no listing row"
+    );
+    assert_served(fixture, &name(1)).await
+}
+
+// Undo row U1: the block that observed a name carrying `c` is undone, and its replacement does
+// not observe it. `label_preimages` keeps `c`, so the undo derives the child again at block 11
+// and it stays healed, as a rebuild spells it.
+#[tokio::test]
+async fn undoing_a_named_observation_keeps_its_holder_healed() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_undo_named", 20).await?;
+    let c = held_by_one_child(&fixture).await?;
+    let o = labelhash("o");
+    unspelled(&fixture, 7, &[&c, &o]).await?;
+    let kept = fixture.exact().await?;
+    observe(&fixture, 12, 7).await?;
+    preimage(&fixture, &c, "c").await?;
+    preimage(&fixture, &o, "o").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    heals_the_one_child(&fixture).await?;
+    undo_keeps_the_one_child_healed(&fixture, &kept).await?;
+    replace_events(&fixture).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    replayed_without_change(&fixture).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+// Undo row U2: the same with a label-only observation.
+#[tokio::test]
+async fn undoing_a_label_only_observation_keeps_its_holder_healed() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_undo_label_only", 20).await?;
+    let c = held_by_one_child(&fixture).await?;
+    let kept = fixture.exact().await?;
+    observe_label(&fixture, 12, 0, "c").await?;
+    preimage(&fixture, &c, "c").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    heals_the_one_child(&fixture).await?;
+    undo_keeps_the_one_child_healed(&fixture, &kept).await?;
+    replace_events(&fixture).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    replayed_without_change(&fixture).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+// Undo row U4: the replacement block observes another label, `d`. The undo keeps `c`'s holder
+// healed, and the replacement heals `d`'s holder and journals only that row.
+#[tokio::test]
+async fn a_replacement_observing_another_label_heals_only_its_holder() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_undo_other_label", 20).await?;
+    let (c, d) = (labelhash("c"), labelhash("d"));
+    fixture.surface(&name(1), &node(1)).await?;
+    edge(&fixture, (10, 0), 1, 11, &c, OWNER).await?;
+    edge(&fixture, (10, 1), 1, 12, &d, OWNER).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    ensure!(unhealed(&fixture, &name(11)).await? == std::slice::from_ref(&c));
+    ensure!(unhealed(&fixture, &name(12)).await? == std::slice::from_ref(&d));
+    let kept = fixture.exact().await?;
+    observe_label(&fixture, 12, 0, "c").await?;
+    preimage(&fixture, &c, "c").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    ensure!(unhealed(&fixture, &name(11)).await?.is_empty());
+
+    let undone = families::undo_to(&fixture.pool, CHAIN, 11).await?;
+    ensure!(undone == 1, "undid {undone} blocks");
+    ensure_equal_but_listing(&kept, &fixture.exact().await?)?;
+    ensure!(unhealed(&fixture, &name(11)).await?.is_empty());
+    ensure!(unhealed(&fixture, &name(12)).await? == std::slice::from_ref(&d));
+    fixture.assert_child_listing(CHAIN).await?;
+    replace_events(&fixture).await?;
+    observe_label(&fixture, 12, 0, "d").await?;
+    preimage(&fixture, &d, "d").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    ensure!(unhealed(&fixture, &name(11)).await?.is_empty());
+    ensure!(unhealed(&fixture, &name(12)).await?.is_empty());
+    ensure!(
+        journalled(&fixture, 12, "project_child_listing").await? == (1, 1),
+        "the replacement block journals only the row `d` heals"
+    );
+    assert_served(&fixture, &name(1)).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+// Undo row U5: an undo of two blocks. A child `c` of the unspelled parent `p.eth` heals its own
+// label at block 12 and its parent's at block 13, so both undone blocks touch it. Each undo step
+// derives it again at its own restored block, and the row stays whole. The replacement blocks
+// observe nothing.
+#[tokio::test]
+async fn a_two_block_undo_keeps_a_holder_both_blocks_healed() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_undo_two_blocks", 20).await?;
+    let (c, p, eth) = (labelhash("c"), labelhash("p"), labelhash("eth"));
+    preimage(&fixture, &eth, "eth").await?;
+    unspelled(&fixture, 1, &[&p, &eth]).await?;
+    edge(&fixture, (10, 0), 1, 11, &c, OWNER).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    ensure!(unhealed(&fixture, &name(11)).await? == [c.clone(), p.clone()]);
+    let kept = fixture.exact().await?;
+    observe_label(&fixture, 12, 0, "c").await?;
+    observe_label(&fixture, 13, 0, "p").await?;
+    preimage(&fixture, &c, "c").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    preimage(&fixture, &p, "p").await?;
+    fixture.apply(13, FamilyMode::Normal).await?;
+    for block in [12, 13] {
+        ensure!(
+            journalled(&fixture, block, "project_child_listing").await? == (1, 1),
+            "block {block} journals the row"
+        );
+    }
+
+    let undone = families::undo_to(&fixture.pool, CHAIN, 11).await?;
+    ensure!(undone == 2, "undid {undone} blocks");
+    ensure_equal_but_listing(&kept, &fixture.exact().await?)?;
+    let whole = listed(&fixture, &name(1)).await?;
+    ensure!(
+        whole[0].1 == "c.p.eth" && whole[0].2 == "c.p.eth",
+        "the undo keeps the row whole: {whole:?}"
+    );
+    ensure!(unhealed(&fixture, &name(11)).await?.is_empty());
+    fixture.assert_child_listing(CHAIN).await?;
+    replace_events(&fixture).await?;
+    fixture.apply(13, FamilyMode::Normal).await?;
+    ensure!(listed(&fixture, &name(1)).await? == whole);
+    assert_served(&fixture, &name(1)).await?;
+    fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}
+
+// Undo row U6: the holder's edge is created in the undone block, which also observes its label.
+// Its row has no before-image, and at block 11 the relation has no such child, so the undo
+// removes the row and its count, and nothing is left to heal.
+#[tokio::test]
+async fn undoing_the_block_that_created_a_holder_removes_it() -> Result<()> {
+    let fixture = Fixture::new("families_child_listing_undo_created", 20).await?;
+    let c = labelhash("c");
+    fixture.surface(&name(1), &node(1)).await?;
+    edge(&fixture, (10, 0), 1, 21, &labelhash("k"), OWNER).await?;
+    preimage(&fixture, &labelhash("k"), "k").await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    let kept = fixture.exact().await?;
+    edge(&fixture, (12, 0), 1, 11, &c, OWNER).await?;
+    observe_label(&fixture, 12, 1, "c").await?;
+    preimage(&fixture, &c, "c").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    ensure!(listed(&fixture, &name(1)).await?.len() == 2);
+
     let undone = families::undo_to(&fixture.pool, CHAIN, 11).await?;
     ensure!(undone == 1, "undid {undone} blocks");
     let restored = fixture.exact().await?;
     for ((table, was), (_, now)) in kept.iter().zip(&restored) {
         ensure!(was == now, "the undo left {table} as {now}, not {was}");
     }
-    // Interpret replaces the block's events with the replacement block's.
-    sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1 AND block_number >= 12")
-        .bind(CHAIN)
-        .execute(&fixture.pool)
-        .await?;
-    observe_label(&fixture, 12, 0, "c").await?;
+    fixture.assert_child_listing(CHAIN).await?;
+    replace_events(&fixture).await?;
     fixture.apply(12, FamilyMode::Normal).await?;
-    heals_the_one_child(&fixture).await?;
+    ensure!(listed(&fixture, &name(1)).await?.len() == 1);
+    assert_served(&fixture, &name(1)).await?;
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }

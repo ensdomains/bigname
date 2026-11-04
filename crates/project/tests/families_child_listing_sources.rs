@@ -10,7 +10,8 @@ use bigname_project::families::{self, FamilyMode, FamilyOptions, RebuildRanges};
 use families_support::{
     CHAIN, CONTENT_HASH, Event, Fixture, hash,
     listing_cases::{
-        OWNER, assert_served, edge, journalled, label_state, listed, name, node, preimage,
+        OWNER, assert_served, edge, ensure_equal_but_listing, journalled, label_state, listed,
+        name, node, preimage,
     },
 };
 
@@ -299,25 +300,28 @@ async fn reading_an_already_read_source_block_again_changes_nothing() -> Result<
     fixture.cleanup().await
 }
 
-// Row 3: undoing this chain's block restores the watermark from the journal with the rows it
-// healed, byte for byte, and running the block again heals them the same way.
+// Row 3: undoing this chain's block restores the watermark from the journal, and every family
+// but the listing byte for byte. The holder the block healed through the other chain's
+// observation is journalled with this chain's block, so the undo derives it again at block 11.
+// The kept preimage spells it there, so it stays healed. Running the block again reads the other
+// chain again and changes no row.
 #[tokio::test]
-async fn undoing_the_block_restores_the_watermark_and_the_rerun_heals_again() -> Result<()> {
+async fn undoing_the_block_restores_the_watermark_and_keeps_the_holder_healed() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_undo", 20).await?;
-    let c = observed_elsewhere(&fixture).await?;
+    observed_elsewhere(&fixture).await?;
     let kept = fixture.exact().await?;
     fixture.apply(12, FamilyMode::Normal).await?;
     let healed = listed(&fixture, &name(1)).await?;
     let undone = families::undo_to(&fixture.pool, CHAIN, 11).await?;
     ensure!(undone == 1, "undid {undone} blocks");
-    let restored = fixture.exact().await?;
-    for ((table, was), (_, now)) in kept.iter().zip(&restored) {
-        ensure!(was == now, "the undo left {table} as {now}, not {was}");
-    }
+    ensure_equal_but_listing(&kept, &fixture.exact().await?)?;
     ensure!(watermark(&fixture).await?.is_none());
-    ensure!(unhealed(&fixture, &name(11)).await? == std::slice::from_ref(&c));
+    ensure!(listed(&fixture, &name(1)).await? == healed);
+    ensure!(unhealed(&fixture, &name(11)).await?.is_empty());
+    fixture.assert_child_listing(CHAIN).await?;
     fixture.apply(12, FamilyMode::Normal).await?;
     ensure!(listed(&fixture, &name(1)).await? == healed);
+    ensure!(journalled(&fixture, 12, "project_child_listing").await? == (0, 0));
     ensure!(watermark(&fixture).await? == Some(5));
     assert_served(&fixture, &name(1)).await?;
     fixture.assert_rebuild_equal(12).await?;
@@ -595,7 +599,9 @@ async fn each_other_chain_heals_its_own_labels_under_its_own_watermark() -> Resu
 
 // The other chain later drops the observation that healed a holder here, as an undo or a reorg
 // of its block does: the preimage stays true and `label_preimages` keeps it, so the holder,
-// derived again for its own chain's reason, stays healed.
+// derived again for its own chain's reason, stays healed. The listing and its counts equal a
+// rebuild's. The watermark does not: it never moves back from block 5, and the rebuild's pass
+// starts none, since the other chain has no observation left. Both read nothing more.
 #[tokio::test]
 async fn the_other_chain_dropping_the_observation_does_not_unheal() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_source_dropped", 20).await?;
@@ -614,7 +620,30 @@ async fn the_other_chain_dropping_the_observation_does_not_unheal() -> Result<()
     ensure!(unhealed(&fixture, &name(11)).await?.is_empty());
     ensure!(journalled(&fixture, 13, "project_child_listing").await? == (1, 1));
     assert_served(&fixture, &name(1)).await?;
+    assert_listing_rebuild_equal(&fixture, 13).await?;
     fixture.cleanup().await
+}
+
+/// The listing and its counts after a rebuild at `target` equal the incremental ones.
+async fn assert_listing_rebuild_equal(fixture: &Fixture, target: i64) -> Result<()> {
+    let tables = ["project_child_listing", "project_child_listing_count"];
+    let mut incremental = Vec::new();
+    for table in tables {
+        incremental.push(fixture.rows(table).await?);
+    }
+    let options =
+        FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Through(target));
+    fixture
+        .apply_with(target, FamilyMode::Rebuild, &options)
+        .await?;
+    for (table, was) in tables.iter().zip(incremental) {
+        let now = fixture.rows(table).await?;
+        ensure!(
+            now == was,
+            "a rebuild at {target} left {table} as {now:?}, not {was:?}"
+        );
+    }
+    Ok(())
 }
 
 // An other chain with no safe or finalized head, which only a fixture or a head row before its

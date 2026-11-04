@@ -140,6 +140,18 @@ pub async fn assert_served(fixture: &Fixture, parent: &str) -> Result<()> {
     Ok(())
 }
 
+/// `kept` and `now`, two `Fixture::exact` snapshots, agree on every family table but the child
+/// listing, which an undo derives again at the restored block.
+pub fn ensure_equal_but_listing(kept: &[(String, String)], now: &[(String, String)]) -> Result<()> {
+    for ((table, was), (_, is)) in kept.iter().zip(now) {
+        if table == "project_child_listing" {
+            continue;
+        }
+        ensure!(was == is, "the undo left {table} as {is}, not {was}");
+    }
+    Ok(())
+}
+
 /// The undo rows block `block` journalled for `family`: (rows, rows with a before-image).
 pub async fn journalled(fixture: &Fixture, block: i64, family: &str) -> Result<(i64, i64)> {
     Ok(sqlx::query_as(
