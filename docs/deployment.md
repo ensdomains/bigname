@@ -6229,6 +6229,11 @@ composition pass derives every parent's rows in a children stream after the name
   the registry's parent name is known. On mainnet most blocks carry a preimage observation and
   most labels are unhealed, so selecting by label instead would derive every unspelled name under
   a shared label, such as every unspelled `.eth` name, at nearly every block.
+- An undo restores the listing rows and counts from the journal like the other families. It then
+  derives the rows the undone block changed again at the restored block, journalling nothing, and
+  moves the counts by the same diff. Interpret's redo never removes a label from
+  `label_preimages`, so a row the undone block healed keeps its healed name, as a rebuild at that
+  block spells it.
 - A label first learned on another chain reaches the stored name at this chain's next block.
   An imported label reaches it only when its row is derived again for another reason
   (TYR-373/374). Served names heal at read time.

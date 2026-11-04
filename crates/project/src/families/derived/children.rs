@@ -4,7 +4,10 @@
 //! (`bigname_storage::families::topology::listing_statement`) at the block, compared with the
 //! stored rows, and every changed row is journalled with its before-image and written, in the
 //! block's transaction. The counts move by the same diff. Undo restores both from the journal,
-//! like any other family, so it derives nothing.
+//! like any other family. It then derives the listing rows the undone block changed again at the
+//! restored block, by the same `derive`, journalling nothing (`families/undo.rs`). Interpret's
+//! redo never removes a label from `label_preimages`, so a row the undone block healed stays
+//! healed, as a rebuild at the restored block spells it.
 //!
 //! The work list (`work.rs`) has two arms. A child is derived again, under every parent that can
 //! list it, when the block touched a fact of its own: its name summary, an ENSv1 or Basenames

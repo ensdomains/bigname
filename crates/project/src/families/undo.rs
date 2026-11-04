@@ -2,8 +2,8 @@
 //! driver planned to undo at the generation it planned from, and the repair record must be
 //! undoing under the driver's attempt. Every journalled before-image of the block is restored (a
 //! missing image deletes the row the block created), the index rows are derived again, the
-//! marker returns to the block's predecessor one sequence up, and the block's journal rows are
-//! deleted. The undo that reaches the repair's pending undo target also moves the record to
+//! child listing rows the block changed are derived again at the restored block, the marker
+//! returns to the block's predecessor one sequence up, and the block's journal rows are deleted. The undo that reaches the repair's pending undo target also moves the record to
 //! replaying in the same commit, with the input revision it read inside the transaction. Undo
 //! never rewrites the repair record's facts and never touches `chain_phase_state`.
 use std::collections::BTreeMap;
@@ -110,6 +110,7 @@ pub(crate) async fn undo_block(
         &marker::Composition::recorded(&restored),
     )
     .await?;
+    rederive_listing(&mut transaction, chain_id, &restored, &journal).await?;
 
     super::history_catalogue::restored(&mut transaction, chain_id, &restored).await?;
     marker::advance(&mut transaction, chain_id, &restored).await?;
@@ -142,6 +143,74 @@ pub(crate) async fn undo_block(
         .await
         .map_err(|error| ProjectError::database("failed to commit a family undo", error))?;
     Ok(Some(restored))
+}
+
+/// Derive again, at the restored block, the child listing rows the undone block's journal names,
+/// after their before-images are restored. Interpret's redo never removes a label from
+/// `label_preimages` (`crates/interpret/src/write.rs`, `prepare_redo_range`), so a row the undone
+/// block healed is spelled again as a rebuild at the restored block spells it. The listing's own
+/// statement derives them (`derived/children.rs`), the counts move by the same diff, and nothing
+/// is journalled. With no restored block the families are empty.
+async fn rederive_listing(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain_id: &str,
+    restored: &FamilyMarker,
+    journal: &[(String, String, Option<Value>)],
+) -> Result<()> {
+    let Some(base) = restored.current.as_ref() else {
+        return Ok(());
+    };
+    let mut children = Vec::new();
+    for (family, key, _) in journal {
+        if family != tables::CHILD_LISTING.name {
+            continue;
+        }
+        let key = store::key_object(&tables::CHILD_LISTING, key)?;
+        let child = key
+            .get("child_logical_name_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ProjectError::data_integrity(format!(
+                    "child listing undo key of chain {chain_id} names no child"
+                ))
+            })?;
+        children.push(child.to_owned());
+    }
+    if children.is_empty() {
+        return Ok(());
+    }
+    let timestamp_seconds = match restored.timestamp_seconds {
+        Some(seconds) => seconds,
+        None => {
+            input::read_block(transaction, chain_id, base.number)
+                .await?
+                .ok_or_else(|| {
+                    ProjectError::transient(format!(
+                        "chain {chain_id}'s restored block {} left the readable lineage",
+                        base.number
+                    ))
+                })?
+                .timestamp_seconds
+        }
+    };
+    let block = input::BlockHeader {
+        number: base.number,
+        hash: base.hash.clone(),
+        predecessor_hash: None,
+        timestamp_seconds,
+        timestamp: Value::Null,
+        journal: false,
+    };
+    // Boxed, so the undo's future does not carry the derivation's state on the caller's stack.
+    Box::pin(derived::derive_child_listing(
+        transaction,
+        chain_id,
+        &block,
+        &[],
+        &children,
+    ))
+    .await?;
+    Ok(())
 }
 
 /// Move an undoing repair whose marker already stands at or below its pending undo target to
