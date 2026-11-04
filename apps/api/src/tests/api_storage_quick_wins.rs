@@ -27,6 +27,7 @@ async fn api_serve_tolerates_an_absent_phase_schema() -> Result<()> {
         status_max_block_lag: v2::support::status_freshness::DEFAULT_MAX_BLOCK_LAG,
         status_max_lag_secs: v2::support::status_freshness::DEFAULT_MAX_LAG_SECS,
         publication_lag_tolerance_blocks: bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS,
+        label_staging: crate::label_staging::LabelStagingConfig::default(),
         database: database.database_config(6)?,
     };
 
@@ -68,6 +69,7 @@ async fn api_serve_refuses_a_schema_missing_normalized_events() -> Result<()> {
         status_max_block_lag: v2::support::status_freshness::DEFAULT_MAX_BLOCK_LAG,
         status_max_lag_secs: v2::support::status_freshness::DEFAULT_MAX_LAG_SECS,
         publication_lag_tolerance_blocks: bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS,
+        label_staging: crate::label_staging::LabelStagingConfig::default(),
         database: database.database_config(6)?,
     };
 

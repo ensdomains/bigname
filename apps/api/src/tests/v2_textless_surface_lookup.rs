@@ -75,12 +75,13 @@ async fn verified_lookup_of_a_textless_name_is_unsupported_without_a_provider_ca
     let unreachable = unreachable_rpc_url()?;
     let alice = format!("{}.eth", tl_bracket(&child_labelhash("alice")));
 
-    for route in ["alice.eth".to_owned(), tl_path(&alice)] {
+    // The plain spelling proves `alice`, so it shows the text. The store still holds no bytes.
+    for (route, served) in [("alice.eth".to_owned(), "alice.eth"), (tl_path(&alice), alice.as_str())] {
         let uri = format!("/v1/names/{route}?source=verified");
         let (status, detail) = sepolia_verified_get(&database, &unreachable, &uri).await?;
         assert_eq!(status, StatusCode::OK, "{uri}: {detail}");
         let data = &detail["data"];
-        assert_eq!(data["name"], json!(alice), "{uri}: {detail}");
+        assert_eq!(data["name"], json!(served), "{uri}: {detail}");
         assert_eq!(data["read_status"], json!("unsupported"), "{uri}: {detail}");
         assert_eq!(
             data["unsupported_reason"],
@@ -151,16 +152,24 @@ async fn v2_textless_eth_second_level_name_serves_its_labelhash_as_token_id() ->
     publish_test_families(&database, 240).await?;
     let token_id = alloy_primitives::U256::from_str_radix(&"5a".repeat(32), 16)?.to_string();
     let route = format!("/v1/names/{}.eth", tl_path(&tl_bracket(&labelhash)));
-
-    // With no preimage even `eth` is served as its hash; the token id is the leaf labelhash
-    // either way, never a hash of the bracketed text.
-    let unnamed = tl_get(&database, &route).await?;
-    assert_eq!(
-        unnamed["data"]["name"],
-        json!(format!("{}.{}", tl_bracket(&labelhash), tl_bracket(&child_labelhash("eth")))),
-        "{unnamed:#}"
+    let hashed_route = format!(
+        "/v1/names/{}.{}",
+        tl_path(&tl_bracket(&labelhash)),
+        tl_path(&tl_bracket(&child_labelhash("eth")))
     );
-    assert_eq!(unnamed["data"]["token_id"], json!(token_id), "{unnamed:#}");
+
+    // With no preimage `eth` still reads as text, since both routes spell it: a bracketed `eth`
+    // is read as `eth` (docs/api-v1.md, "Name inputs"). The token id is the leaf labelhash
+    // either way, never a hash of the bracketed text.
+    for uri in [&route, &hashed_route] {
+        let unnamed = tl_get(&database, uri).await?;
+        assert_eq!(
+            unnamed["data"]["name"],
+            json!(format!("{}.eth", tl_bracket(&labelhash))),
+            "{uri}: {unnamed:#}"
+        );
+        assert_eq!(unnamed["data"]["token_id"], json!(token_id), "{uri}: {unnamed:#}");
+    }
     insert_family_label_preimage(&database.pool, b"eth").await?;
     let named = tl_get(&database, &route).await?;
     assert_eq!(

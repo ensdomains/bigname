@@ -379,7 +379,7 @@ pub(crate) async fn get_name_records(
     data.canonical_name = alias.map(|alias| alias.canonical_name);
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
-
+    super::support::heal_name_records(&state, &normalized, &row, &mut data);
     Ok(Json(Envelope {
         data,
         page: None,

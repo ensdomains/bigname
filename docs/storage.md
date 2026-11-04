@@ -475,7 +475,7 @@ field requires no schema migration or replay.
 | `project_lookup_name`, `project_lookup_relation`, `project_lookup_inventory`, `project_lookup_record`, `project_lookup_dependency` | Project | Journalled current lookup facts, exact relations and per-resource selected records/dependencies; published with the family marker. |
 | `name_search_documents`, `name_search_postings` | Interpret and the verified label-preimage importer | Atomic current spelling and lexical indexes; rebuilt from surface and retained verified label evidence. |
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
-| `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
+| `ens_names` | operator rainbow load, and the API's [label candidates](deployment.md#api-label-candidates) | Unverified rainbow-table candidates consumed by the import command. No serving path reads them. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
@@ -802,6 +802,25 @@ row:
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
+
+The expiring listing of `GET /v1/names` with `parent` adds one more, installed by the identity
+baseline and `20261104120000_name_surfaces_project_parent_key_index.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_surfaces_project_parent_key_idx` | `storage:families.name.expiring_names` and `storage:families.name.expiring_union`: the surfaces one label below a parent, by namespace and the hash of their labelhashes after the first |
+
+It is a btree on `(namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0))` over
+every surface. It is not partial, because PostgreSQL estimates an expression from an index's
+statistics only when the index has no predicate. The statement keeps its visibility and
+root-name terms as filters. The statement also compares
+the labelhashes after the first with the parent's path, so a hash collision never lists a name.
+A parent with few names below it is read from this index. A parent above most names, such as
+`eth`, is read from `project_name_summary_expiry_idx`, with the key compared on each row. With a
+parent, both statements run unprepared, so each is planned with its own parent and the index statistics
+choose between the two. `crates/storage/src/families/name/list/expiring/parent_tests.rs` checks
+the rows of every parent class and the rows each plan examines. Interpret pays one btree entry
+when it inserts a surface.
 
 Interpret and the verified label-preimage importer write `name_search_documents`. The
 API's prefix search adds three read-only indexes on it, installed by the identity baseline
@@ -1976,7 +1995,10 @@ candidate, where the generator records `hash =
 keccak256(name)`.[^graph-ens-rainbow-table][^graph-ens-rainbow-hash]
 
 Authority stays split between the two tables. `ens_names` is an unverified
-staging store: every operator-loaded row is only a claim. `label_preimages`
+staging store: every operator-loaded row is only a claim. The API also stages
+there each label a name request proves
+([name inputs](api-v1.md#name-inputs)), and the import checks those rows like
+any other. `label_preimages`
 remains the verified store: a candidate becomes a preimage row only when it is
 exactly one DNS label and re-hashes — keccak256 of the raw label bytes — to the
 row's recorded hash. A rejected candidate leaves no trace beyond the import's
@@ -1997,7 +2019,13 @@ fills a table the importer never reads, and the run reports zero scanned rows
 rather than failing — the phase table exists, it is just empty. Load the dump's
 rows into `bigname_phase.ens_names` without letting the rest of the dump run
 against that table: `\copy` the data section, or extract the dump's `COPY`
-statement and retarget only that. Do not rewrite the dump's schema
+statement and retarget only that. A `COPY` into the table fails on the first
+hash it already holds, and API hosts may already have staged label candidates
+there. Setting `BIGNAME_API_LABEL_STAGING_PER_SECOND=0` stops new candidates
+but keeps those already staged. So whenever the table may hold candidates, copy
+into a temporary table and insert from it with `ON CONFLICT DO NOTHING`. Copy
+directly only when staging is `0` on every API host and the table is still empty
+after that. Do not rewrite the dump's schema
 qualification globally, because the same rewrite also redirects the dump's
 `DROP TABLE`
 (upstream: .refs/ens_rainbow/src/main.rs:L33 @ ens_rainbow@bc44492)

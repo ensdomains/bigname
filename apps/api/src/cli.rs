@@ -5,6 +5,7 @@ use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
 use crate::ApiBoundsConfig;
+use crate::label_staging::LabelStagingConfig;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub(crate) enum RpcChainCheck {
@@ -100,6 +101,8 @@ pub(crate) struct ServeArgs {
     pub(crate) ccip_gateway_deny_cidrs: Option<String>,
     #[command(flatten)]
     pub(crate) bounds: ApiBoundsConfig,
+    #[command(flatten)]
+    pub(crate) label_staging: LabelStagingConfig,
     #[arg(
         long,
         env = "BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS",
@@ -228,6 +231,24 @@ mod tests {
                 "{diagnostic}"
             );
         }
+    }
+
+    #[test]
+    fn label_staging_defaults_to_ten_writes_a_second_and_can_be_switched_off() {
+        let staging = serve_args(&[]).label_staging;
+        assert_eq!(
+            (
+                staging.per_second,
+                staging.burst,
+                staging.max_labels,
+                staging.max_in_flight
+            ),
+            (10, 20, 65_536, 2)
+        );
+        let off = serve_args(&["--label-staging-per-second=0"]).label_staging;
+        assert_eq!(off.per_second, 0);
+        off.validate()
+            .expect("staging off is a valid configuration");
     }
 
     #[test]

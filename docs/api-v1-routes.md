@@ -368,7 +368,10 @@ collection route carry neither header.
   failure_reason?, normalization?, record?, records?, page?}`. `input` echoes
   the caller-supplied input, including `id` when supplied; omitted `id` is not
   synthesized. `kind` is `name` or `address`. Name results use `record` for the
-  single record object. Reverse results use `records` for zero or more record
+  single record object. Every name input proves the labels it spells as text,
+  for every record of the batch: a record's `name` and `display_name` show that
+  text in place of the label's placeholder, an address input's records included
+  ([name inputs](api-v1.md#name-inputs)). Reverse results use `records` for zero or more record
   rows with `is_primary` and `relations` in addition to the shared record
   fields; a `resolves_to` row carries `relations: ["resolves_to"]` and
   `resolution: {coin_type, record_key}`, and its `is_primary` and
@@ -684,7 +687,7 @@ collection route carry neither header.
 | `grace_ends_before` | query | string | no | none | Exclusive finite grace-deadline upper bound, as decimal Unix seconds or RFC 3339; later than grace_ends_after when both are supplied. Cannot combine with expiry parameters. |
 | `grace_ends_window` | query | repeated array [1, 32] of string | no | none | Repeat for disjoint half-open grace-deadline windows with the same rules as expires_window. Input order defines grace_ends_window_index. Cannot combine with scalar grace or any expiry parameter. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
-| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by labelhash path, are listed. A bracketed labelhash label names the node it hashes. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `sort` | query | enum `expires_at`, `grace_ends_at` | no | none | Defaults to the supplied date family; explicit sort must match it. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -733,9 +736,12 @@ collection route carry neither header.
   unordered comma-separated set of served authority values using the grammar
   of [address names](#get-v1addressesaddressnames); rows that serve no authority
   match no set. `parent` selects names exactly one label below the supplied
-  ENSIP-15-normalized name by served spelling, including its
-  [rendered-name](glossary.md#rendered-name) rules, not registry topology.
-  `parent=eth` selects second-level `.eth` names and excludes deeper subnames.
+  ENSIP-15-normalized name by labelhash path, not by served spelling. A
+  bracketed labelhash label in `parent` names the node it hashes, and a name is
+  listed whatever text its labels are served under, a
+  [rendered-name](glossary.md#rendered-name) label with no verified text
+  included. `parent=eth` selects second-level `.eth` names and excludes deeper
+  subnames.
   Both filters apply before paging. Empty or invalid parents and invalid
   authority sets return `400 invalid_input`.
 - A proved canonical allocation remains discoverable when current authority is
@@ -762,9 +768,10 @@ collection route carry neither header.
   before selecting at most `page_size + 1` names for composition. A repeated
   request selects at most that many narrow keys per window, then composes only
   the global first `page_size + 1` once. Namespace/deadline and
-  namespace/authority/deadline indexes support both families. Composition is
-  bounded even when a sparse parent filter or many names sharing a deadline
-  require inspecting more narrow keys; the database chooses the query plan.
+  namespace/authority/deadline indexes support both families, and a parent key
+  index reads the names below a parent with few names below it. Composition is
+  bounded even when many names sharing a deadline require inspecting more
+  narrow keys. With `parent`, the database chooses the query plan for each request's values.
   A mismatch between a selected stored deadline and its composed row fails
   with `500 internal_error` rather than returning a shortened page.
 - Each page reads one publication snapshot. Its cursor binds the date family,
@@ -825,6 +832,10 @@ collection route carry neither header.
   served path's record under the requested `name`, `display_name` and `namehash`, with
   `canonical_name` naming the served path. A path that resolves to no token answers as
   before, with the name's own row or `404 not_found`.
+- Proven labels: a label the request spells as text shows as that text in `name`,
+  `display_name` and `canonical_name` wherever the row would serve its labelhash
+  placeholder, and is staged for the preimage import
+  ([name inputs](api-v1.md#name-inputs)).
 - ENSv1 registry resolver: ENSv1 clients read a name's resolver from the ENSv1
   registry (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f).
   A name whose `authority` is `ens_v1` or `ens_v0`, that serves a resolver and
@@ -1265,6 +1276,10 @@ its value map:
   resolver, indexed records and inventory, and `canonical_name` names the served path.
   `source=verified` and the verified keys of `source=auto` read the chain for the
   requested path. A path that resolves to no token answers as before.
+- Proven labels: the response carries no name of the row except `canonical_name`,
+  which shows a label the request spells as text, as on name detail. The labels
+  the row serves as placeholders and the request proves are staged for the
+  preimage import ([name inputs](api-v1.md#name-inputs)).
 - ENSv1 registry resolver: as on [name detail](#get-v1namesname), a name whose
   `authority` is `ens_v1` or `ens_v0` serves the resolver its ENSv1 registry
   pointer names, `ens_v1.resolver`, and that resolver's records for the node,
@@ -2042,8 +2057,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   spelling with the row. Its row never takes the escape form: a label whose
   preimage is not valid text reads as the placeholder. A parent whose surface
   stores no raw label bytes lists and counts its children under its own
-  rendered name, at any depth. Admitted ENSv1 `NewOwner` events create these
-  surfaces when the complete labelhash path is proven back to the root.
+  rendered name, at any depth. A parent label the request spells as text shows
+  as that text in every row's `name` and `display_name`, while a child's own
+  label keeps its placeholder unless the request spells that same label
+  ([name inputs](api-v1.md#name-inputs)). Cursors,
+  order and counts do not change with the spelling. Admitted ENSv1 `NewOwner`
+  events create these surfaces when the complete labelhash path is proven back
+  to the root.
   The escape form is never a name input. Resolver records are not included here;
   use `GET /v1/names/{name}` for `resolver` and grouped `records`, or `GET /v1/names/{name}/records` for per-key record
   answers.
@@ -3603,10 +3623,10 @@ introduces it rebuilds Project from full history before serving the option; see
   `authority` (Basenames rows and ownerless registry rows) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
-  `parent` keeps only names exactly one label below the given name, by the
-  rule it has on [`GET /v1/names`](#get-v1names): the value is normalized as a
-  path name, and a row matches by its normalized name spelling, not by node or
-  registry topology, so `parent=eth` keeps the `.eth` second-level names and
+  `parent` keeps only names exactly one label below the given name. The value
+  is normalized as a path name, and a row matches by its normalized name
+  spelling, not by node or registry topology. [`GET /v1/names`](#get-v1names)
+  matches by labelhash path instead. Here `parent=eth` keeps the `.eth` second-level names and
   no deeper subname, wrapped or not (see the
   [naming dictionary](api-v1.md#naming-dictionary)). An ENSv1 registry child
   with no name row matches by the name it serves, which spells an unknown

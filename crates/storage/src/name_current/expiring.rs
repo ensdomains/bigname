@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use sqlx::{PgExecutor, Postgres, QueryBuilder};
 
 use crate::UnixSeconds;
+use crate::families::name::rendered::label_hash;
 
 use super::list::{
     NAME_CURRENT_LIST_SELECT, NameCurrentListCursor, NameCurrentListCursorValue,
@@ -72,7 +73,8 @@ pub struct NameCurrentExpiringFilter {
     /// Public `authority` values (`ens_v0`, `ens_v1`, `ens_v2`); a row matches when the value it
     /// serves is any listed one.
     pub authorities: Option<Vec<String>>,
-    /// A normalized name: only names exactly one label below it.
+    /// A normalized name, whose labels may be bracketed labelhashes: only names exactly one
+    /// label below its node, by labelhash path ([`parent_labelhash_path`]).
     pub parent: Option<String>,
 }
 
@@ -132,6 +134,47 @@ pub(crate) fn push_parent_predicate(
     builder.push(" ESCAPE '\\'");
 }
 
+/// The labelhash path of `parent`, a normalized name: one labelhash per label in name order,
+/// `0x` and lowercase hex, either keccak256 of the label or the hash a bracketed label spells.
+pub(crate) fn parent_labelhash_path(parent: &str) -> Vec<String> {
+    parent
+        .split('.')
+        .map(|label| format!("0x{}", alloy_primitives::hex::encode(label_hash(label))))
+        .collect()
+}
+
+/// ` AND` the `name_surfaces` row aliased `surface` is exactly one label below the node whose
+/// labelhash path is `path`: its labelhashes after the first are `path`, compared without
+/// regard to hex case, whatever text its labels are served under. The first conjunct is the
+/// key of `name_surfaces_project_parent_key_idx`, a hash of each stored labelhash with its
+/// low 32 bits cleared. The second decides, so a hash collision never lists a name.
+///
+/// The second conjunct is wrapped in `COALESCE` on purpose, so keep it wrapped. A row that
+/// matches the key also matches the path unless two paths' hashes collide, so the recheck only
+/// excludes collisions and its true selectivity is about 1. PostgreSQL has no statistics for
+/// the expression and estimates a bare equality at 0.005. That makes a parent above most names,
+/// such as `eth`, look sparse, and it is then planned through the key and a sort of every name
+/// below it. PostgreSQL estimates the `COALESCE` at 0.5, so the key's own statistics decide
+/// the plan. The rows are unchanged, because inside the top-level `AND` a NULL and a FALSE both
+/// exclude the row. The expiry and grace plan tests in
+/// `families/name/list/expiring/parent_tests.rs` guard this.
+pub(crate) fn push_parent_key_predicate(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    surface: &str,
+    path: &[String],
+) {
+    builder.push(format!(
+        " AND hash_array_extended(bigname_phase.entry_key_hashes({surface}.labelhashes[2:]), 0) \
+         = hash_array_extended(bigname_phase.entry_key_hashes("
+    ));
+    builder.push_bind(path.to_vec());
+    builder.push(format!(
+        "::text[]), 0) AND COALESCE(lower(({surface}.labelhashes[2:])::text) = ("
+    ));
+    builder.push_bind(path.to_vec());
+    builder.push("::text[])::text, FALSE)");
+}
+
 /// The expiring page over the served rows, or with `composed` over those rows instead (see
 /// `list_page_from`). One statement, so the composed reader runs it inside its read snapshot.
 pub(crate) async fn expiring_page_from(
@@ -178,7 +221,7 @@ pub(crate) async fn expiring_page_from(
             push_public_authority_predicate(builder, "nc", authorities);
         }
         if let Some(parent) = &filter.parent {
-            push_parent_predicate(builder, "nc.raw_name", parent);
+            push_parent_key_predicate(builder, "surface", &parent_labelhash_path(parent));
         }
     });
     builder.push(NAME_CURRENT_LIST_SELECT);
@@ -239,7 +282,7 @@ mod tests {
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     use super::*;
-    use crate::families::{control::lifecycle::NamePlace, name::rendered::label_hash};
+    use crate::families::control::lifecycle::NamePlace;
 
     async fn one_below(pool: &sqlx::PgPool, names: &[&str], parent: &str) -> Result<Vec<String>> {
         let mut query = QueryBuilder::<Postgres>::new("SELECT name FROM unnest(");

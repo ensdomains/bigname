@@ -1353,8 +1353,10 @@ one count for every chain, so the same value covers six times as much time on a
 `/v1/status` report `stale` while the API still serves. Same-chain verified
 record and primary-name calls run at the publication's block, and Basenames
 calls at the Ethereum position the projected name carries, so verified answers
-keep serving through the same lag. Every API path is read-only, including verified records, automatic
-live fallback, primary names with an omitted `source`, and diagnostics.
+keep serving through the same lag. Every API path reads only, including verified records, automatic
+live fallback, primary names with an omitted `source`, and diagnostics, with
+one exception: the [label candidates](#api-label-candidates) below, the API's
+only write.
 `BIGNAME_API_DATABASE_URL` may point at a primary or a physical streaming hot
 standby with the reviewed schema installed. Logical replicas are not supported:
 lookup authority checks compare PostgreSQL manifest row versions, which physical
@@ -1372,13 +1374,46 @@ when connected to a writable primary. Existing observations remain available to
 operators and may still be retired by Project or reorg handling. No serving
 path reads them.
 
+<a id="api-label-candidates"></a>
+The API's first and only write path is the label candidate. A name request
+whose plain label hashes to a labelhash the response serves as its placeholder
+proves that label's text, and the response shows it
+([name inputs](api-v1.md#name-inputs)). After the response is complete, the API
+inserts each such `(labelhash, label)` pair into `bigname_phase.ens_names` on
+its own connection, with conflicts ignored and a one-second statement timeout.
+No serving path reads `ens_names`. Only
+`phase-runner label-preimages import-ens-rainbow` reads it, and the import
+proof-checks every row ([storage](storage.md#rainbow-table-preimage-import)).
+So a write changes no served answer until the operator runs the import.
+
+The write is best effort and never delays or fails a response. On a hot
+standby, or for a role without `INSERT` on the table, the database refuses it.
+The API then serves exactly as before and counts each refusal. It logs one
+warning for the first refusal of each kind, and a warning at each doubling of
+the count of other failures. A refused label is offered again by a later
+request, within the same bounds, so a grant applied to a running API takes
+effect without a restart. An API that always reads from a hot standby can set
+`BIGNAME_API_LABEL_STAGING_PER_SECOND=0` to skip those attempts. The counter is `label_candidate_writes_total`, by `outcome`:
+`staged`, `duplicate`, `throttled`, `denied`, `read_only`, `disabled`, or
+`failed`. These settings bound the writes of one process:
+
+- `BIGNAME_API_LABEL_STAGING_PER_SECOND`: writes a second, 10 by default. Zero
+  stages nothing, and responses still show proven labels.
+- `BIGNAME_API_LABEL_STAGING_BURST`: the writes allowed at once after a quiet
+  period, 20 by default.
+- `BIGNAME_API_LABEL_STAGING_MAX_IN_FLIGHT`: concurrent writes, 2 by default.
+- `BIGNAME_API_LABEL_STAGING_MAX_LABELS`: labelhashes the process remembers as
+  staged, so it writes each label once, 65,536 by default.
+
 The API role needs `USAGE` on `bigname_phase`, `SELECT` on the serving relations
-below, and `EXECUTE` only on the fixed read-only snapshot guard below. This
-fixed-`search_path`, security-definer function is owned by the schema owner; its
+below, `EXECUTE` only on the fixed read-only snapshot guard below, and `INSERT`
+on `bigname_phase.ens_names` for the label candidates. The snapshot guard is a
+fixed-`search_path`, security-definer function owned by the schema owner. Its
 installer revokes default `PUBLIC` execution. Do not grant the API role
-`CREATE` on `bigname_phase` or `public`, writes on any application relation, or
-execution of the retained diagnostic ledger writer. The nine-argument boolean
-core is private to the schema owner and must not be granted to the API role.
+`CREATE` on `bigname_phase` or `public`, any other write on an application
+relation, or execution of the retained diagnostic ledger writer. The
+nine-argument boolean core is private to the schema owner and must not be
+granted to the API role.
 
 API startup tolerates a wholly absent phase schema so `/v1/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks
@@ -1386,7 +1421,8 @@ every phase-schema relation, function, and type its serving paths read:
 relations by name and `SELECT` privilege, the snapshot guard by exact signature
 and `EXECUTE` privilege, and the `canonicality_state` type. If an object or its
 required privilege is unavailable, the API refuses to start and its diagnostic
-names every unavailable identity.
+names every unavailable identity. Startup does not check the `INSERT` on
+`ens_names`: the API serves without it.
 
 After the phase schema exists, the schema owner provisions the dedicated login
 with these privileges (substitute
@@ -1471,7 +1507,13 @@ TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
     text, bigint, text, jsonb, jsonb, uuid, text, text
 ) TO bigname_api;
+GRANT INSERT ON TABLE bigname_phase.ens_names TO bigname_api;
 ```
+
+For an existing API role, the schema owner applies the `INSERT` grant on
+`bigname_phase.ens_names` on the primary before serving the first API image
+that stages label candidates. An image that runs without it serves exactly as
+before and counts every candidate `denied`.
 
 <a id="address-history-catalogue-role-upgrade"></a>
 For an existing API role, after applying
@@ -5538,3 +5580,96 @@ every index is in place. The phase runner logs
 and `install.sql` builds only what is missing and fails unless every index is valid, ready
 and of the reviewed definition. When one is missing, let the phase runner build it or run
 `install.sql` first.
+
+## A parent key index for the names listing
+
+The build that adds `name_surfaces_project_parent_key_idx` changes how `GET /v1/names` with
+`parent` selects the names one label below the parent
+([table ownership](storage.md#table-ownership)).
+
+- Before, the statement in `crates/storage/src/families/name/list/expiring.rs` tested every
+  name of the expiry window against the parent's text with `LIKE`. A parent with few names
+  below it read the whole window before it could answer, and a wide window ran into the API's
+  statement timeout.
+- The statement now matches the parent by labelhash path, and the new index keys each surface
+  by its parent's path. A parent with few names below it is read from the index. A parent
+  above most names, such as `eth`, is still read in expiry order. A selection with a parent
+  is planned for its own values, so the planner chooses by the parent's statistics.
+- A name is now listed by its place in the tree, not by the text it is served under. A parent
+  label spelled as its labelhash lists the names below that node, and a name whose middle
+  label has no known text is listed under the parent spelled in text.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the changed statements are in serving readers, not hashed files. No redo is needed. The
+  change ships as an image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order:
+
+1. Prebuild the index with the statements below.
+2. Apply schema-migration `20261104120000_name_surfaces_project_parent_key_index.sql`.
+3. Swap the image.
+
+The schema-migration installs the index. Where an index of that name already exists, valid and
+ready, with the reviewed definition, it adopts it without a build and without a lock, so it is
+a no-op on a database where the index was already built by hand with the statement below. An
+empty `name_surfaces` builds it directly. A populated table without it is refused, so on an
+initialized database prebuild it concurrently first, outside a transaction. The phase runner
+and API can keep running while it builds. The previous image does not read the index, and
+Interpret keeps it current like the table's other indexes. It holds one hash and the namespace
+for each surface, about the size of `name_surfaces_project_path_hash_idx`. It is not partial:
+PostgreSQL estimates an expression from an index's statistics only when the index has no
+predicate, and the planner needs those statistics to tell a parent with few names below it
+from `eth`. The statement keeps its visibility and root-name terms as filters.
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_parent_key_idx
+    ON bigname_phase.name_surfaces
+        (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), 0));
+ANALYZE bigname_phase.name_surfaces;
+```
+
+The `ANALYZE` is part of the step. Until it runs, the planner has no statistics for the indexed
+expression and cannot tell a parent with few names below it from `eth`.
+
+`IF NOT EXISTS` matches the index name only, and an interrupted concurrent build leaves an
+invalid index. Check the index after the build:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'name_surfaces_project_parent_key_idx';
+RESET search_path;
+```
+
+It must return one row with `relkind` `i`, `indrelid` `bigname_phase.name_surfaces`, and
+`indisvalid` and `indisready` true. The definition must be exactly this line, which is the text
+the schema-migration compares:
+
+```text
+CREATE INDEX name_surfaces_project_parent_key_idx ON bigname_phase.name_surfaces USING btree (namespace, hash_array_extended(bigname_phase.entry_key_hashes(labelhashes[2:]), (0)::bigint))
+```
+
+The schema-migration refuses a name that is not an index, an index on another table or one
+that is not valid and ready, and another definition. Its error names the index and, for
+another definition, prints the definition it found and the one it expects. The recovery
+steps:
+
+- A name that is not an index: remove or rename that relation, then build the index with the
+  statements above.
+- Any other refusal: confirm in `pg_stat_progress_create_index` that no build of the index is
+  still running, drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.name_surfaces_project_parent_key_idx`, then build it
+  again with the statements above.
+
+Then run the schema-migrations again. The new image without the index gives the same
+answers, but a `parent` request reads every name of its expiry window.
+
+The index reads `bigname_phase.entry_key_hashes`, so that function can no longer be dropped
+while the index exists. Where the recovery of
+`20261012120000_name_surfaces_project_path_indexes.sql` drops the function, drop this index
+first and build it again afterwards with the statements above.
