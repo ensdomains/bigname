@@ -981,7 +981,7 @@ async fn v2_label_heal_a_nul_or_overlong_label_never_fails_a_response() -> Resul
         BTreeMap::from([(label_hash(&overlong), overlong.clone())]),
     );
     let overlong_row = (child_labelhash(&overlong), overlong);
-    assert_eq!(lh_staged(&database, &state).await?, [overlong_row.clone()]);
+    assert_eq!(lh_staged(&database, &state).await?, std::slice::from_ref(&overlong_row));
     assert_eq!(lh_counts(&state), BTreeMap::from([("failed", 1), ("staged", 1)]));
 
     assert_eq!(lh_get(&state, &uri).await?, (StatusCode::OK, expected));
