@@ -6232,8 +6232,9 @@ Interpret or Ingest redo.
 
 `name_surfaces_name_prefix_idx` is a `text_pattern_ops` index on `name_surfaces` that an
 operator may have built by hand to give a raw-name `LIKE` prefix a range. A prefix search now
-reads the [prefix bucket indexes](#prefix-bucket-indexes-for-search), and no other statement
-reads this index. Every write to `name_surfaces` still maintains it.
+reads search documents, through the [prefix bucket indexes](#prefix-bucket-indexes-for-search)
+for a dense class and by id for any other. No statement reads this index, and every write to
+`name_surfaces` still maintains it.
 
 - Responses, their order and their cursors do not change.
 - Neither content hash rotates. The baselines and schema-migrations are inputs of neither. No

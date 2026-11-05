@@ -1,7 +1,8 @@
 # Sourced by check-schema with its scratch schema and assertion helpers.
-# 20261105120000_name_surfaces_drop_raw_prefix_index.sql and the schema-migration before it, in
-# a schema of the current fresh baseline. The baseline does not define the index, and neither
-# schema-migration builds it from a schema without it. The drop removes exactly the hand-built
+# 20261105120000_name_surfaces_drop_raw_prefix_index.sql and
+# 20261028120000_serving_read_indexes.sql, in a schema of the current fresh baseline. The
+# baseline does not define the index, and neither schema-migration builds it from a schema
+# without it. The drop removes exactly the hand-built
 # index, valid or left invalid, built concurrently as the operator built it, and a rerun changes
 # nothing. It leaves the caller's search_path, quote_all_identifiers and lock_timeout as it found
 # them. It refuses, and so never drops, an index of another definition, an index of the name on

@@ -1,7 +1,8 @@
 -- Existing schema-v2 databases lose name_surfaces_name_prefix_idx, a raw-name prefix index an
 -- operator may have built by hand before the bucket indexes of
--- 20261029120000_search_prefix_bucket_indexes.sql. A prefix search reads those buckets, so no
--- statement reads this index, and every write to bigname_phase.name_surfaces maintained it.
+-- 20261029120000_search_prefix_bucket_indexes.sql. A prefix search reads search documents,
+-- through those buckets for a dense class and by id for any other, so no statement reads this
+-- index, and every write to bigname_phase.name_surfaces maintained it.
 -- Only that index changes: no table, column, row or comment does. The baseline does not define
 -- it and no schema-migration builds it, so this schema-migration is a no-op on a database
 -- initialized from the baseline, and on an empty schema-migration database.
