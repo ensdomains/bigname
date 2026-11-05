@@ -2657,8 +2657,8 @@ async fn a_record_only_the_2017_registry_holds_is_no_registration() -> Result<()
                    "owner": OWNER, "ens_v1_expiry": LEASE_EXPIRY.to_string()}),
         )?;
     }
-    // The address index keeps every address the name's events named. The served page drops
-    // them, as it drops a released name's.
+    // The address index keeps every address the name's events named. The served page leaves
+    // the name out, as it does a released name.
     for address in [OWNER, OTHER] {
         let page = load_family_address_names_capped_page(
             &fixture.pool,

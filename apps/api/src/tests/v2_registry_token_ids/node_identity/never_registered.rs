@@ -214,8 +214,8 @@ async fn the_children_of_a_never_registered_name_stay_listed() -> Result<()> {
     database.cleanup().await
 }
 
-/// A name below it is a registry child, whose record's owner owns it in the only registry
-/// that has it.
+/// A name below a name only the 2017 registry recorded is a registry child, whose record's
+/// owner owns it in the only registry that has it.
 #[tokio::test]
 async fn a_subname_of_a_never_registered_name_keeps_its_record_owner() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
