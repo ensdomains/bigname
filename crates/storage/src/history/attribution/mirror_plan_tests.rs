@@ -591,3 +591,50 @@ VALUES ('class:unpositioned', 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
         'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
         jsonb_build_object('node', pg_temp.node(202), 'resolver', pg_temp.resolver(202)));
 "#;
+
+/// PROBE ONLY (ci/ branch, never merged): the previous statement's custom plan as the share of
+/// unrelated ENSv1 pointers grows.
+#[tokio::test]
+async fn mirror_registry_probe_scale_probe() -> Result<()> {
+    use std::io::Write;
+    with_fixture("mirror_registry_scale_probe", async |connection| {
+        let published = BTreeMap::from([(MAINNET.to_owned(), BOUND)]);
+        let mut offset = 30_000;
+        for extra in [0, 30_000, 90_000, 240_000] {
+            if extra > 0 {
+                raw_sql(&format!(
+                    "INSERT INTO normalized_events(event_identity, namespace, event_kind, source_family,
+                        manifest_version, chain_id, block_hash, block_number, transaction_hash,
+                        transaction_index, log_index, derivation_kind, canonicality_state, after_state)
+                     SELECT 'probe:pointer:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+                            'ethereum-mainnet', 'block-' || (100 + n % 30000), 100 + n % 30000,
+                            'tx-probe-' || n, 1, n % 1000, 'ens_v1_unwrapped_authority',
+                            'canonical'::canonicality_state,
+                            jsonb_build_object('node', '0x' || lpad(to_hex(200000 + n % 2000), 64, '0'),
+                                               'resolver', '0x' || lpad(to_hex(9), 40, '0'))
+                     FROM generate_series({offset}, {offset} + {extra} - 1) n"
+                ))
+                .execute(&mut *connection)
+                .await?;
+                offset += extra;
+            }
+            Statistics::Off.apply(connection).await?;
+            for (label, k) in [("old pointer", CHILD_NODE), ("hot node", HOT_NODE)] {
+                let walk = walk(&[(k, &[])]);
+                let (sql, arguments) = render(&walk, &published)?;
+                let previous = previous_sql(&sql)?;
+                for generic in [false, true] {
+                    let plan = explain(connection, &previous, arguments.clone(), generic).await?;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "scale probe | extra {extra} | {label} | generic {generic} | exec {} | {}",
+                        plan[0]["Execution Time"],
+                        json!(registry_reads(&plan[0]["Plan"]))
+                    );
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+}
