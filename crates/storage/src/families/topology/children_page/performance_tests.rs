@@ -10,9 +10,9 @@ use sqlx::raw_sql;
 
 use super::*;
 
-const CHILDREN: i64 = 2_000;
-const PARENT: &str = "ens:parent";
-const CHAIN: &str = "ethereum-mainnet";
+pub(super) const CHILDREN: i64 = 2_000;
+pub(super) const PARENT: &str = "ens:parent";
+pub(super) const CHAIN: &str = "ethereum-mainnet";
 
 #[tokio::test]
 async fn a_small_child_page_does_not_rescan_all_candidates_per_child() -> Result<()> {
@@ -178,7 +178,7 @@ fn child_id(n: i64) -> String {
     format!("ens:0x{n:064x}")
 }
 
-async fn install(conn: &mut PgConnection) -> Result<()> {
+pub(super) async fn install(conn: &mut PgConnection) -> Result<()> {
     raw_sql("CREATE SCHEMA bigname_phase; SET search_path TO bigname_phase, public; SET jit = off")
         .execute(&mut *conn)
         .await?;
@@ -503,7 +503,7 @@ async fn child_counts_do_not_probe_the_lifecycle_table() -> Result<()> {
             ),
         ] {
             ensure!(
-                !query.sql().contains("child_node = ANY("),
+                !query.sql().contains("wanted_node"),
                 "{name} narrows its children"
             );
             raw_sql(&format!("PREPARE {name} ({types}) AS {}", query.sql()))
@@ -558,14 +558,14 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
         ensure!(
             !page_query(PARENT, &filter, None, None, 6, None)
                 .sql()
-                .contains("child_node = ANY(")
+                .contains("wanted_node")
         );
         let parents = vec![PARENT.to_owned()];
         let candidates = vec![child.clone()];
         let nodes = vec![node];
         let query = owned_children_query(owner, &candidates, &nodes, &parents, 100);
         raw_sql(&format!(
-            "PREPARE owned (text[], text, text[], text[], text[], text, text, bigint) AS {}",
+            "PREPARE owned (text[], text, text[], text[], text, text, bigint) AS {}",
             query.sql()
         ))
         .execute(&mut *conn)
@@ -576,8 +576,7 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
                 .await?;
             let plan: Value = sqlx::query_scalar(&format!(
                 "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE owned (ARRAY['{PARENT}'],
-                     '{hash}', ARRAY['{node}'], ARRAY['{node}'], ARRAY['{child}'], '{owner}',
-                     '{owner}', 100)",
+                     '{hash}', ARRAY['{node}'], ARRAY['{child}'], '{owner}', '{owner}', 100)",
                 node = nodes[0],
                 hash = bigname_content_hash::PROJECTION_CONTENT_HASH
             ))
@@ -590,7 +589,7 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
                     scan["Index Name"] == "project_child_edge_candidate_child_idx"
                         && scan["Index Cond"]
                             .as_str()
-                            .is_some_and(|condition| condition.contains("child_node = ANY"))
+                            .is_some_and(|condition| condition.contains("child_node ="))
                 }),
                 "{mode}: no edge scan by candidate node: {plan}"
             );
@@ -627,4 +626,87 @@ fn edge_scans(plan: &Value) -> Vec<&Value> {
         scans.extend(edge_scans(child));
     }
     scans
+}
+
+// The parent-wide arm of the child listing (TYR-455, the parent-wide plan row): Project derives
+// a parent's every listing row in one statement (`topology::listing_rows`). Over the 2,000-child
+// parent among 20,000 edges of 200 other parents, under both plan modes, the parent's edges are
+// read by a range of the edge key on the parent node, never by a scan of the edge family, and
+// the statement returns the parent's 2,000 rows.
+#[tokio::test]
+async fn the_parent_wide_listing_reads_the_parents_edges_by_range() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("children_listing_plan").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        raw_sql(&format!(
+            "INSERT INTO project_child_edge_candidate(chain_id, namespace, parent_node,
+                 child_node, authority_arm, block_number, transaction_index, log_index,
+                 event_identity, owner, labelhash, source_family)
+             SELECT '{CHAIN}', 'ens', 'other' || n % 200, '0x' || lpad(to_hex(n), 64, '0'),
+                 'ens_v1', 100,
+                 1, n, 'other:' || n || ':0', '0x1111111111111111111111111111111111111111',
+                 '0x' || lpad(to_hex(n), 64, '0'), 'ens_v1_registry_l1'
+             FROM generate_series({CHILDREN} + 1, {CHILDREN} + 20000) n;
+             ANALYZE project_child_edge_candidate;"
+        ))
+        .execute(&mut *conn)
+        .await?;
+        let parents = vec![PARENT.to_owned()];
+        let block = crate::families::topology::ListingBlock {
+            chain_id: CHAIN,
+            number: 100,
+            timestamp_seconds: 100,
+        };
+        let query = crate::families::topology::listing_rows("", block, &parents, None);
+        raw_sql(&format!(
+            "PREPARE listing (text[], text, bigint, bigint, bigint) AS {}",
+            query.sql()
+        ))
+        .execute(&mut *conn)
+        .await?;
+        for mode in ["force_custom_plan", "force_generic_plan"] {
+            raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await?;
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE listing \
+                 ('{{{PARENT}}}', '{CHAIN}', 100, 100, 100)"
+            ))
+            .fetch_one(&mut *conn)
+            .await?;
+            ensure!(
+                plan[0]["Plan"]["Actual Rows"] == CHILDREN,
+                "{mode}: {}",
+                plan[0]["Plan"]["Actual Rows"]
+            );
+            let scans = edge_scans(&plan[0]["Plan"]);
+            ensure!(
+                scans
+                    .iter()
+                    .all(|scan| scan["Node Type"] != "Seq Scan" || scan["Alias"] != "edge"),
+                "{mode}: the parent's edges are read by a scan of the family: {plan}"
+            );
+            let ranged = scans.iter().any(|scan| {
+                let condition = match scan["Node Type"].as_str() {
+                    Some("Index Scan" | "Index Only Scan") => scan["Index Cond"].as_str(),
+                    Some("Bitmap Heap Scan") => scan["Recheck Cond"].as_str(),
+                    _ => None,
+                };
+                scan["Alias"] == "edge"
+                    && condition.is_some_and(|text| text.contains("parent_node"))
+            });
+            ensure!(
+                ranged,
+                "{mode}: no range of the edge key on the parent node: {plan}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
 }

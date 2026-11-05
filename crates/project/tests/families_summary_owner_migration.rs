@@ -59,9 +59,15 @@ const CONTROL_TABLES: [&str; 3] = [
 ];
 
 /// The family tables added after the last migration with a reset list
-/// (migrations/20261104130000_project_event_count.sql creates them empty). The published reset
-/// lists cannot name them. The family reset (`families::family_tables`) clears them.
-const LATER_TABLES: [&str; 1] = ["project_event_count"];
+/// (migrations/20261103120000_project_child_listing.sql and
+/// migrations/20261104130000_project_event_count.sql create them). The published reset lists
+/// cannot name them. The family reset (`families::family_tables`) clears them.
+const LATER_TABLES: [&str; 4] = [
+    "project_child_listing",
+    "project_child_listing_count",
+    "project_child_preimage_watermark",
+    "project_event_count",
+];
 
 /// The family reset covers the tables added after the last reset list, so a later reset clears
 /// them.
@@ -113,6 +119,9 @@ fn reset_tables() -> Vec<String> {
                     | "project_lookup_inventory"
                     | "project_lookup_record"
                     | "project_lookup_dependency"
+                    | "project_child_listing"
+                    | "project_child_listing_count"
+                    | "project_child_preimage_watermark"
                     | "project_event_count"
             )
         })
@@ -151,6 +160,9 @@ fn selector_reset_tables() -> Vec<String> {
                     | "project_lookup_inventory"
                     | "project_lookup_record"
                     | "project_lookup_dependency"
+                    | "project_child_listing"
+                    | "project_child_listing_count"
+                    | "project_child_preimage_watermark"
                     | "project_event_count"
             )
         })

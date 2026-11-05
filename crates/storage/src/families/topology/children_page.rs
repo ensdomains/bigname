@@ -12,7 +12,7 @@
 //! status the fence checks and the owner the labels' owner filter reads are the child's name summary (`project_name_summary`), which the
 //! family step writes from the child's composed `declared_summary`; a child with no name surface
 //! is released when its node's registrar lease is ([`released_lease`]), and its lease's holder,
-//! when the registrar retains one, is [`token_holder`].
+//! when the registrar retains one, is [`token_holder`](child_flags::token_holder).
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -24,13 +24,10 @@ use crate::{
     families::name::ensure_published,
 };
 
-use super::{
-    children::{CHILD_DISPLAY_NAME, CHILD_SURFACE_FILTER, Parents, push_selected},
-    name_summary::CHILD_SUMMARY_JOIN,
-};
-use child_flags::{LIFECYCLE_SHADOW, WRAPPER_HELD, released_lease, token_holder};
+use super::children::{CHILD_DISPLAY_NAME, Parents, Relation, push_listed};
+use child_flags::released_lease;
 
-mod child_flags;
+pub(super) mod child_flags;
 
 /// One served child, the wire fields of the subnames route (docs/api-v1-routes.md, subnames).
 /// The row carries no per-row provenance, chain positions or target blocks: those are not family
@@ -51,17 +48,18 @@ pub struct FamilyChildRow {
     /// normalization, so no name row composes for it) and a NameWrapper or ENSv1 registrar event
     /// observed that name, so wrapper state or a lease can be projected for it without a name
     /// row. A shadow only another observer wrote, such as a resolver `NameChanged`, does not
-    /// count ([`LIFECYCLE_SHADOW`]).
+    /// count ([`LIFECYCLE_SHADOW`](child_flags::LIFECYCLE_SHADOW)).
     pub lifecycle_shadow: bool,
     /// A lifecycle shadow whose registry owner is the NameWrapper that observed it: the wrapper
-    /// holds the node for a token holder bigname does not record ([`WRAPPER_HELD`])
+    /// holds the node for a token holder bigname does not record
+    /// ([`WRAPPER_HELD`](child_flags::WRAPPER_HELD))
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
     pub wrapper_held: bool,
     /// The child has no name surface and its node's registrar lease has been released
     /// ([`released_lease`]).
     pub released_lease: bool,
     /// The holder of the node's registrar lease when the child has no name surface and the
-    /// registrar retains one ([`token_holder`]).
+    /// registrar retains one ([`token_holder`](child_flags::token_holder)).
     pub token_holder: Option<String>,
 }
 
@@ -367,7 +365,15 @@ fn page_query<'a>(
         registry,
         None,
     );
-    builder.push("), page AS (SELECT * FROM children WHERE TRUE");
+    let sort_timestamp = match filter.sort {
+        ChildrenCurrentSort::Name => "NULL::NUMERIC",
+        ChildrenCurrentSort::ExpiresAt => "children.expires_at",
+        ChildrenCurrentSort::RegisteredAt => "children.registered_at",
+    };
+    builder.push(format!(
+        "), sorted AS (SELECT children.*, {sort_timestamp} AS sort_timestamp FROM children),
+         page AS (SELECT * FROM sorted WHERE TRUE"
+    ));
     if let Some(cursor) = cursor {
         push_cursor_after(&mut builder, filter.order, cursor);
     }
@@ -397,37 +403,14 @@ pub(super) fn push_children<'a>(
     registry: Option<RegistryLabels<'a>>,
     children: Option<&'a [String]>,
 ) {
-    push_selected(
+    push_listed(
         builder,
         parents,
         registry.map(|labels| labels.registry),
         children,
         registry.and_then(|labels| labels.registration_limit),
+        Relation::Served,
     );
-    let sort_timestamp = match filter.sort {
-        ChildrenCurrentSort::Name => "NULL::NUMERIC",
-        ChildrenCurrentSort::ExpiresAt => "summary.expires_at",
-        ChildrenCurrentSort::RegisteredAt => "EXTRACT(EPOCH FROM summary.registered_at)",
-    };
-    builder.push(format!(
-        " children AS (
-            SELECT selected.parent_logical_name_id, selected.child_logical_name_id,
-                   selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
-                   selected.namehash, selected.labelhash, selected.owner, selected.registrant,
-                   selected.registry_authority,
-                   {LIFECYCLE_SHADOW} AS lifecycle_shadow, {WRAPPER_HELD} AS wrapper_held,
-                   {released_lease} AS released_lease, {token_holder} AS token_holder,
-                   {sort_timestamp} AS sort_timestamp
-            FROM selected
-            JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
-            JOIN clock ON clock.chain_id = parent.chain_id
-            LEFT JOIN bigname_phase.name_surfaces child_surface
-              ON child_surface.logical_name_id = selected.child_logical_name_id
-            {CHILD_SUMMARY_JOIN}
-            WHERE selected.pair_rank = 1{CHILD_SURFACE_FILTER}",
-        released_lease = released_lease(),
-        token_holder = token_holder(),
-    ));
     if let Some(labels) = registry {
         builder.push(" AND selected.registry_address = ");
         builder.push_bind(labels.registry);
@@ -594,6 +577,8 @@ fn null_rank(is_null: bool, order: ChildrenCurrentOrder) -> i32 {
     }
 }
 
+#[cfg(test)]
+mod narrowed_plan_tests;
 #[cfg(test)]
 mod performance_tests;
 #[cfg(test)]
