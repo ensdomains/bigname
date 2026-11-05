@@ -256,9 +256,9 @@ pub trait Phase: Send + Sync {
         0
     }
 
-    /// Work that follows a batch once its progress is recorded, in transactions of its own; Project
-    /// applies the owned key families here, one family run per call, and Interpret refreshes the
-    /// planner statistics of `normalized_events`. The runner calls again while
+    /// Work that follows a batch once its progress is recorded, in transactions of its own: Project
+    /// refreshes the planner statistics of the tables the permission reads join, one table per
+    /// call, and Interpret those of `normalized_events`. The runner calls again while
     /// it returns `More`, probing the lock, recording the phase heartbeat and passing the capacity
     /// guard before every call. An error fails the phase run, keeping the batch. A wrapper around
     /// a phase that overrides this, such as `ProjectPhase`, must forward both this and
