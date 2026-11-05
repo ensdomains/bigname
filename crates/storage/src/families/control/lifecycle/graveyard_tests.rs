@@ -833,6 +833,35 @@ fn a_cleared_wrapped_subname_handed_to_a_registry_only_binding_keeps_its_token_h
     }
 }
 
+/// Codex P2 on #1390: a wrapped `.eth` name past its NameWrapper expiry, claimed. The claim's
+/// registry write names the Graveyard, which ends the NameWrapper authority and selects a
+/// registry-only binding. The lease's BaseRegistrar history is retained, including its transfer
+/// into the NameWrapper at the wrap, which the registration laterals keep as the last transfer.
+/// The lapsed owner is the wrapped token's holder, never the NameWrapper. Each registry-only flag
+/// a handoff binding can carry.
+#[test]
+fn a_claimed_wrapped_eth_name_handed_to_a_registry_only_binding_keeps_its_token_holder() {
+    for flag in [true, false] {
+        let mut input = handed_off(CLAIM_BLOCK, CLAIM_TIME, flag, &[]);
+        input.place = NamePlace::EthSecondLevel;
+        let mut wrap = event(
+            "TokenControlTransferred",
+            "ens_v1_registrar_l1",
+            LEASE,
+            8,
+            json!({"authority_kind": "registrar", "source_event": "Transfer",
+                   "to_address": NAME_WRAPPER, "transaction_hash": "0xwrap"}),
+        );
+        wrap.position.log_index = Some(0);
+        input
+            .events
+            .splice(0..0, [lease_grant(7, LAPSED_EXPIRY), wrap]);
+        let (arm, shadow) = select_handed_off(input.claimed(), CLAIM_TIME);
+        assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {flag}");
+        assert_held(&shadow, Some(HOLDER));
+    }
+}
+
 /// A wrapped subname unwrapped to `NEXT_OWNER` (or its record overwritten by the parent's
 /// `setSubnodeOwner`, which leaves the same facts), then cleared: the registry record was not the
 /// NameWrapper's when the Graveyard claimed it, so the holder is the owner its last registry write
