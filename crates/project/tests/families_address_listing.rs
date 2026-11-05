@@ -191,12 +191,13 @@ async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<(
     );
     ensure!(journalled(&fixture, 10, FAMILY).await? == (1, 0));
 
+    let spelled = bigname_domain::normalization::normalize_name("kid.parent.eth")?;
     sqlx::query(
-        "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, namehash, labelhashes,
-             normalizer_version, visibility_state, chain_id, block_hash, block_number,
-             canonicality_state)
-         VALUES ($1, 'ens', 'kid.parent.eth', $2, ARRAY[$3, $4, $5], $6, 'active', $7, $8, 12,
-                 'canonical')",
+        "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, 'ens', 'kid.parent.eth', $9, $10, $2, ARRAY[$3, $4, $5], $6, 'active', $7,
+                 $8, 12, 'canonical')",
     )
     .bind(name(11))
     .bind(node(11))
@@ -206,6 +207,8 @@ async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<(
     .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
     .bind(CHAIN)
     .bind(hash(12))
+    .bind(spelled.normalized_labels)
+    .bind(spelled.dns_encoded_name)
     .execute(&fixture.pool)
     .await?;
     fixture.apply(12, FamilyMode::Normal).await?;
@@ -252,6 +255,18 @@ async fn a_basenames_registry_child_lists_no_row() -> Result<()> {
         )
         .await?;
     fixture.apply(10, FamilyMode::Normal).await?;
+    let edges: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_child_edge_candidate
+         WHERE chain_id = $1 AND child_node = lower($2) AND authority_arm = 'basenames'",
+    )
+    .bind(CHAIN)
+    .bind(node(11))
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        edges == 1,
+        "the children relation reads the Basenames child: {edges} edges"
+    );
     let rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM project_address_listing WHERE chain_id = $1 AND logical_name_id = $2",
     )

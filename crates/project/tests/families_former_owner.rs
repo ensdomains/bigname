@@ -177,9 +177,25 @@ fn long_name(first: &str, labels: usize) -> String {
     name.join(".")
 }
 
+/// A name of `labels` labels of 64 hex characters under `.eth`, the first label `first`: hashes,
+/// which PostgreSQL cannot compress, so the stored name and an index key of it keep their width.
+fn hex_name(first: &str, labels: usize) -> String {
+    let mut name = vec![first.to_owned()];
+    name.extend(
+        (0..labels)
+            .map(|i| format!("{:#x}", keccak256(format!("label {i}").as_bytes()))[2..].to_owned()),
+    );
+    name.push("eth".to_owned());
+    name.join(".")
+}
+
 /// `prefix` followed by labels of at most 60 characters and `.eth`, `total` bytes long.
 fn padded(prefix: &str, total: usize) -> String {
     let mut name = prefix.to_owned();
+    assert!(
+        total >= name.len() + ".eth".len() + 2,
+        "{prefix} leaves no room for a label"
+    );
     loop {
         let left = total - name.len() - ".eth".len();
         if left == 0 {
@@ -315,10 +331,21 @@ async fn an_unregistered_ens_v2_registration_retains_its_last_holder_and_schedul
 async fn a_name_past_the_btree_row_limit_lists_and_is_found_by_q_parent_and_former_owner()
 -> Result<()> {
     let fixture = Fixture::new("families_former_long_name", 12).await?;
-    let long = long_name("x", 46);
+    let long = hex_name("x", 44);
     ensure!(long.len() > 2704, "{} bytes", long.len());
     let (name, resource) = registered(&fixture, &long, 1).await?;
     fixture.apply(4, FamilyMode::Normal).await?;
+    // The stored name keeps its width: an index keyed by the whole of it could not hold it.
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT pg_column_size(normalized_name)::bigint FROM project_address_listing
+         WHERE chain_id = $1 AND address = $2 AND logical_name_id = $3",
+    )
+    .bind(CHAIN)
+    .bind(BOB)
+    .bind(&name)
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(stored > 2704, "the stored name takes {stored} bytes");
     let q: String = long.chars().take(150).collect();
     let by_q = q_read(CHAIN, BOB, &q);
     ensure!(
@@ -370,9 +397,10 @@ async fn a_name_past_the_btree_row_limit_lists_and_is_found_by_q_parent_and_form
 
 // Rows "500 boundary" and "former tie" of TYR-127: the former-owner key is the normalized name
 // cut as display_key is cut, to its first 500 characters when it is longer than 2000 bytes. A
-// name of exactly 500 characters keys whole, and so do the first 500 characters of two longer
-// names that start with it: the three tie on expiry, namespace and key, and order by namehash,
-// which is not their name order. A name of exactly 2000 bytes is not cut, and follows them.
+// name of exactly 500 characters keys whole, and so do the first 500 characters of longer names
+// that start with it, one of them 2001 bytes: the four tie on expiry, namespace and key, and
+// order by namehash, which is not their name order. A name of exactly 2000 bytes is not cut,
+// and follows them.
 #[tokio::test]
 async fn former_owner_names_sharing_their_first_500_characters_order_by_namehash() -> Result<()> {
     let fixture = Fixture::new("families_former_tie", 12).await?;
@@ -390,8 +418,9 @@ async fn former_owner_names_sharing_their_first_500_characters_order_by_namehash
         .find(|(a, b)| a < b && namehash(a) > namehash(b))
         .expect("two names whose namehash order is not their name order");
     let whole = padded(&format!("{head}.eth0"), 2000);
-    ensure!(whole.len() == 2000, "{} bytes", whole.len());
-    let tied = [exact, first.clone(), second.clone()];
+    let cut = padded(&format!("{head}.eth9"), 2001);
+    ensure!(whole.len() == 2000 && cut.len() == 2001);
+    let tied = [exact, first.clone(), second.clone(), cut];
     let mut ids = Vec::new();
     for (n, name) in tied.iter().chain([&whole]).enumerate() {
         let n = u32::try_from(n + 1)?;
@@ -401,10 +430,10 @@ async fn former_owner_names_sharing_their_first_500_characters_order_by_namehash
     }
     fixture.apply(6, FamilyMode::Normal).await?;
 
-    let mut expected: Vec<&(String, String)> = ids[..3].iter().collect();
+    let mut expected: Vec<&(String, String)> = ids[..4].iter().collect();
     expected.sort_by_key(|(name, _)| namehash(name));
     let mut expected: Vec<String> = expected.into_iter().map(|(_, id)| id.clone()).collect();
-    expected.push(ids[3].1.clone());
+    expected.push(ids[4].1.clone());
     let former = former_read(CHAIN, BOB);
     let page = fixture.listing_read(&former).await?;
     ensure!(
@@ -420,7 +449,7 @@ async fn former_owner_names_sharing_their_first_500_characters_order_by_namehash
     .fetch_all(&fixture.pool)
     .await?;
     ensure!(
-        keys == [500, 500, 500, 2000],
+        keys == [500, 500, 500, 500, 2000],
         "the former-owner keys: {keys:?}"
     );
     fixture

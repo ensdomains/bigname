@@ -69,6 +69,14 @@ fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// `value` with the LIKE wildcards and the escape character escaped: a label may hold `_`.
+fn like_escaped(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// The read of the names `address` lists on `chain` whose normalized name starts with `q`, as a
 /// reader keys `project_address_listing_q_idx`: the first 100 characters of `q` as a range over
 /// the index's cut key, then the whole `q` checked against the full name. The values are
@@ -81,7 +89,7 @@ pub fn q_read(chain: &str, address: &str, q: &str) -> String {
            AND left(normalized_name, 100) LIKE {range} AND starts_with(normalized_name, {q})",
         address = literal(address),
         chain = literal(chain),
-        range = literal(&format!("{cut}%")),
+        range = literal(&format!("{}%", like_escaped(&cut))),
         q = literal(q),
     )
 }
@@ -123,8 +131,9 @@ impl Fixture {
     }
 
     /// `read` is served by an index scan of `index` whose index condition names `condition`,
-    /// with no sort, when sequential scans, bitmap scans and sorts are off: the shape of the index answers
-    /// the read, whatever the planner would pick for this small fixture.
+    /// with no sort of any kind, when sequential scans, bitmap scans and sorts are off: the
+    /// shape of the index answers the read, whatever the planner would pick for this small
+    /// fixture.
     pub async fn ensure_index_serves(
         &self,
         read: &str,
@@ -134,7 +143,7 @@ impl Fixture {
         let mut transaction = self.pool.begin().await?;
         sqlx::raw_sql(
             "SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
-             SET LOCAL enable_sort = off",
+             SET LOCAL enable_sort = off; SET LOCAL enable_incremental_sort = off",
         )
         .execute(&mut *transaction)
         .await?;
@@ -146,7 +155,11 @@ impl Fixture {
         let mut nodes = Vec::new();
         collect_nodes(&plan, &mut nodes);
         ensure!(
-            nodes.iter().all(|node| node["Node Type"] != "Sort"),
+            nodes.iter().all(|node| {
+                !node["Node Type"]
+                    .as_str()
+                    .is_some_and(|kind| kind.ends_with("Sort"))
+            }),
             "{index} leaves a sort: {plan}"
         );
         ensure!(
