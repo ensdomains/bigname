@@ -145,7 +145,7 @@ Tests have time limits:
   finished has a "has been running for over 60 seconds" line and no result
   line.
 
-On CI the slowest test, the one `core-arms` runs, takes about 11 minutes.
+On CI the slowest test, the one `core-arms` runs, takes about 7 minutes.
 Every other test takes under 6 minutes.
 
 The CI jobs for the core, API and phase-runner suites record where a stalled
