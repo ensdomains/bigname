@@ -66,6 +66,79 @@ replacement, zero-link default selection, and empty values are part of that
 capability. Ownership-only ingestion does not establish this capability, and a
 source pin or successful decode alone is not replacement evidence.
 
+## Indexed record support
+
+### Served record families
+
+The records routes answer three record families from the index, under the
+record-key grammar of
+[`GET /v1/names/{name}/records`](api-v1-routes.md#get-v1namesnamerecords):
+
+- `addr`: `addr:<coin_type>`.
+- `text`: `text:<key>`, and `avatar`, which reads `text:avatar`.
+- `contenthash`: `contenthash`.
+
+Any other family is not served as a key, so a `pubkey` write shows no key. The
+inventory lists ABI content types in `abi_content_types`.
+
+### Admitted resolvers
+
+Indexed record values come only from a resolver a checked-in manifest admits.
+The manifests under `manifests/` are the authority for this list, and
+[`manifests.md`](manifests.md) gives each ENS Labs PublicResolver generation's
+limits. An indexed read of any other resolver, including an offchain one,
+reports `unsupported`. `source=verified` reads such a resolver from the chain
+where the namespace supports verified records.
+
+| Network | Contract | Address |
+| --- | --- | --- |
+| Ethereum Mainnet | PublicResolver, latest | `0xF29100983E058B709F3D539b0c765937B804AC15` |
+| Ethereum Mainnet | PublicResolver, older generations | `0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63`, `0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41`, `0xDaaF96c344f63131acadD0Ea35170E7892d3dfBA`, `0x226159d592E2b063810a10Ebf6dcbADA94Ed68b8`, `0x5FfC014343cd971B7eb70732021E26C35B744cc4`, `0x1da022710dF5002339274AaDEe8D58218e9D6AB5` |
+| Ethereum Mainnet | PublicResolverV2 | `0x66f9f566ff2f26309c1bd9134388478a801da3e1` |
+| Ethereum Mainnet | ENSV1Resolver ([ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)) | `0x394d8eb4a4fdf599384deab25f31d111d755c398` |
+| Ethereum Mainnet | PermissionedResolver proxies, by implementation | `0x565b0f456a04ac9b48758190e90030623cff57c5` |
+| Base | Basenames L2Resolver | `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD` |
+| Sepolia | PublicResolver, latest | `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5` |
+| Sepolia | PublicResolver, older generations | `0x8948458626811dd0c23EB25Cc74291247077cC51`, `0x8FADE66B79cC9f707aB26799354482EB93a5B7dD`, `0x0CeEC524b2807841739D3B5E161F5bf1430FFA48` |
+| Sepolia | PublicResolverV2 | `0xdc4a563d00f5c3012b699794eb9e13a561be386f` |
+| Sepolia | ENSV1Resolver ([ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)) | `0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0` |
+| Sepolia | PermissionedResolver proxies, by implementation | `0x115eb53f0c60696633855f90b138178fb40b2b2c` |
+
+A PermissionedResolver is admitted when its latest observed proxy upgrade names
+the declared implementation.
+
+### Inventory reason codes
+
+`meta.unsupported_reason` on the records routes uses two codes for the inventory
+behind an indexed answer
+([`meta.completeness`](api-v1-routes.md#get-v1namesnamerecords)). The inventory's
+`abi_unsupported_reason` can carry the same two:
+
+| Code | Meaning |
+| --- | --- |
+| `inventory_not_authoritative` | The inventory row is `unsupported`, so it cannot speak for the resolver's storage. The resolver is not admitted, or a mirror's registry walk finds no projected ENSv1 resolver. |
+| `inventory_not_available` | The name has no record inventory it may serve. It has no resolver of its own, or it is released, unbound or reserved, or its resolution is withheld. |
+
+Under `inventory_not_authoritative`, each requested key reports the row's own
+reason, for example:
+
+| Key reason | Meaning |
+| --- | --- |
+| `resolver_not_declared` | No resolver manifest declares the address. |
+| `resolver_implementation_unknown` | No retained upgrade identifies the proxy's implementation. |
+| `resolver_implementation_not_declared` | The proxy's implementation is not the declared one. |
+| `resolver_classification_missing` | The resolver has no classification, or a classification from another namespace. |
+| `mirrored_resolver_not_projected` | A mirror's registry walk finds no projected ENSv1 resolver. |
+| `indexed_record_inventory_not_authoritative` | The row names no reason of its own. |
+
+An admitted resolver can still report a key `unsupported`, which leaves
+`meta.completeness=full`:
+
+| Key reason | Meaning |
+| --- | --- |
+| `value_not_retained` | An event named the key, but bigname retained no value for it. |
+| `record_family_not_supported_by_resolver` | The admitted resolver has no getter for the family. |
+
 ## Direct PublicResolverV2 record support
 
 For an owned local chain or the [official Sepolia deployment](sepolia-deployment.md), the exact `public_resolver_v2` declaration described in

@@ -25,7 +25,9 @@ use super::super::{
 };
 use super::{NameRecords, RecordAnswer, RecordAnswerMeta, RecordSelection, VerifiedRecordLookup};
 
+mod completeness;
 mod discovery;
+pub(crate) use completeness::{apply_inventory_completeness, records_meta};
 use discovery::terminal_no_declared_resolver;
 pub(crate) use discovery::{ens_universal_resolver_discovery_candidate, verified_discovery};
 
