@@ -1095,24 +1095,48 @@ fn a_reclaim_then_a_graveyard_write_in_another_transaction_start_a_new_hold() {
     );
 }
 
-/// After ruling 4's hold, the token's new holder wraps the name, whose `reclaim` writes the record
-/// to the NameWrapper and mints the wrapped token to the holder, and unwraps it to the Graveyard,
-/// in one transaction. The write names the NameWrapper, but the transaction moves no wrapped token
-/// to the Graveyard, so it is no re-parent: it ends the run like any reclaim.
+/// A BaseRegistrar transfer of the lease at `RECLAIM_BLOCK`, at `log`, carrying the later wrap's
+/// transaction.
+fn lease_transfer_at_reclaim(log: i64, to: &str) -> LifecycleEvent {
+    let mut transfer = event(
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        LEASE,
+        RECLAIM_BLOCK,
+        json!({"authority_kind": "registrar", "source_event": "Transfer",
+               "to_address": to, "transaction_hash": "0xrewrap"}),
+    );
+    transfer.position.log_index = Some(log);
+    transfer.position.event_identity = format!("lease-transfer:{log}");
+    transfer
+}
+
+/// After ruling 4's hold, the token's new holder wraps the name with itself as the wrapped owner
+/// (`wrapETH2LD`: the BaseRegistrar token moves into the NameWrapper, whose `reclaim` writes the
+/// record to it, and the wrapped token is minted to the holder), then unwraps it with the
+/// Graveyard as the registry owner (`unwrapETH2LD`: the record is written to the Graveyard and the
+/// BaseRegistrar token is returned), in one transaction. The wrapped token went to the holder, so
+/// the hold ends: the holder is the wrapped token's.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L277 @ ens_v1@91c966f)
 #[test]
 fn a_holders_wrap_and_unwrap_to_the_graveyard_in_one_transaction_start_a_new_hold() {
     let mut input = held_then_moved();
     input
+        .events
+        .push(lease_transfer_at_reclaim(0, NAME_WRAPPER));
+    input
         .writes
-        .push(reclaim_block_write(0, 0, NAME_WRAPPER, None));
+        .push(reclaim_block_write(0, 1, NAME_WRAPPER, None));
     let mut mint = wrapper_transfer(RECLAIM_BLOCK, NEXT_OWNER);
-    mint.position.log_index = Some(1);
+    mint.resource_id = Some(REWRAPPED.to_owned());
+    mint.position.log_index = Some(2);
     input.events.push(mint);
     input
         .writes
-        .push(reclaim_block_write(0, 2, GRAVEYARD, Some("graveyard")));
+        .push(reclaim_block_write(0, 4, GRAVEYARD, Some("graveyard")));
+    input.events.push(lease_transfer_at_reclaim(5, NEXT_OWNER));
     assert_held_at(
-        &read_at_reclaim(&input, vec![wrapper_binding()]),
+        &read_at_reclaim(&input, vec![rewrap_binding(RECLAIM_BLOCK)]),
         Some(NEXT_OWNER),
         RECLAIM_TIME,
     );
@@ -1256,7 +1280,7 @@ fn a_eth_name_wrapped_to_the_graveyard_then_claimed_keeps_the_first_claim() {
         LEASE,
         80,
         json!({"authority_kind": "registrar", "source_event": "Transfer",
-               "to_address": NAME_WRAPPER, "transaction_hash": "0xwrap"}),
+               "to_address": NAME_WRAPPER, "transaction_hash": "0xrewrap"}),
     );
     custody.position.log_index = Some(0);
     input.events.push(custody);
@@ -1264,13 +1288,14 @@ fn a_eth_name_wrapped_to_the_graveyard_then_claimed_keeps_the_first_claim() {
     wrap.position.log_index = Some(1);
     input.writes.push(wrap);
     let mut mint = wrapper_transfer(80, GRAVEYARD);
+    mint.resource_id = Some(REWRAPPED.to_owned());
     mint.position.log_index = Some(3);
     input.events.push(mint);
     input
         .writes
         .push(write(LATER_BLOCK, LEASE, GRAVEYARD, Some("graveyard")));
     assert_held(
-        &read_at_reclaim(&input, vec![wrapper_binding()]),
+        &read_at_reclaim(&input, vec![rewrap_binding(80)]),
         Some(HOLDER),
     );
 }
@@ -1301,7 +1326,7 @@ fn an_old_wraps_holder_is_not_the_holder_after_a_bare_name_wrapper_write() {
             (80, 0, 0, NAME_WRAPPER),
             (RECLAIM_BLOCK, 0, 2, GRAVEYARD),
         ],
-        &[(8, 0, 1, HOLDER)],
+        &[(8, 0, 3, HOLDER)],
     );
     facts.block_seconds = Arc::new(BTreeMap::from([
         (CLAIM_BLOCK, CLAIM_TIME),
