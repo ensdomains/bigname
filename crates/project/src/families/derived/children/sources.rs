@@ -97,11 +97,10 @@ const CUTOFF: &str = "/* project:families.derived.child_listing_source_cutoff */
         LIMIT $3
     ) first";
 
-/// The rows of chain `$1` whose stored name still holds a label chain `$2` observed in blocks
-/// `$3` (exclusive) to `$4`: a label of an observed name, whose surface is probed by its key, or
-/// the label hash an observation carries in its after state, as an observation of a label with no
-/// name does.
-const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders */
+/// The labels chain `$1` observed in blocks `$2` (exclusive) to `$3`: the labels of an observed
+/// name, whose surface is probed by its key, and the label hash an observation carries in its
+/// after state, as an observation of a label with no name does.
+const OBSERVED_LABELS: &str = "/* project:families.derived.child_listing_source_labels */
     WITH observation AS MATERIALIZED (
         SELECT event.logical_name_id, event.labelhash
         FROM unnest('{canonical,safe,finalized}'::canonicality_state[]) state (canonicality_state)
@@ -110,8 +109,8 @@ const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders 
             FROM normalized_events observed
             WHERE observed.event_kind = 'PreimageObserved'
               AND observed.canonicality_state = state.canonicality_state
-              AND observed.chain_id = $2
-              AND observed.block_number > $3 AND observed.block_number <= $4
+              AND observed.chain_id = $1
+              AND observed.block_number > $2 AND observed.block_number <= $3
               AND observed.consumer_visibility = 'activated'
               AND EXISTS (
                   SELECT 1 FROM chain_lineage lineage
@@ -122,26 +121,27 @@ const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders 
               )
             OFFSET 0
         ) event
-    ),
-    observed AS MATERIALIZED (
-        SELECT array_agg(DISTINCT label.labelhash) AS labelhashes
-        FROM (
-            SELECT lower(surface_label.labelhash) AS labelhash
-            FROM observation
-            CROSS JOIN LATERAL (
-                SELECT surface.labelhashes FROM name_surfaces surface
-                WHERE surface.logical_name_id = observation.logical_name_id
-                OFFSET 0
-            ) surface
-            CROSS JOIN LATERAL unnest(surface.labelhashes) surface_label (labelhash)
-            UNION ALL
-            SELECT lower(observation.labelhash) FROM observation
-            WHERE observation.labelhash IS NOT NULL
-        ) label
     )
+    SELECT COALESCE(array_agg(DISTINCT label.labelhash), '{}'::text[])
+    FROM (
+        SELECT lower(surface_label.labelhash) AS labelhash
+        FROM observation
+        CROSS JOIN LATERAL (
+            SELECT surface.labelhashes FROM name_surfaces surface
+            WHERE surface.logical_name_id = observation.logical_name_id
+            OFFSET 0
+        ) surface
+        CROSS JOIN LATERAL unnest(surface.labelhashes) surface_label (labelhash)
+        UNION ALL
+        SELECT lower(observation.labelhash) FROM observation
+        WHERE observation.labelhash IS NOT NULL
+    ) label";
+
+/// The rows of chain `$1` whose stored name still holds one of the labels `$2`.
+const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders */
     SELECT listing.child_logical_name_id FROM project_child_listing listing
     WHERE listing.chain_id = $1 AND listing.unhealed_labelhashes <> '{}'
-      AND listing.unhealed_labelhashes && (SELECT observed.labelhashes FROM observed)
+      AND listing.unhealed_labelhashes && $2::text[]
     ORDER BY 1";
 
 /// The journal row of chain `$1`'s watermark for source `$4` at block `$2` (hash `$3`), with
@@ -187,10 +187,13 @@ const TOP: &str = "/* project:families.derived.child_listing_source_top */
         LIMIT 1
     ) event";
 
-/// What a family step read from the other chains: the rows to derive again, and the watermark
-/// rows to write, each with the source's Interpret revision.
+/// What a family step read from the other chains: the labels they observed, the child listing
+/// rows that hold one of them, and the watermark rows to write, each with the source's Interpret
+/// revision. The address listing family heals from the same labels (`derived/address_listing.rs`)
+/// before the watermark moves, so one watermark serves both.
 #[derive(Debug, Default)]
-pub(super) struct Read {
+pub(crate) struct Read {
+    pub(crate) labels: Vec<String>,
     pub(super) holders: Vec<String>,
     advances: Vec<(String, i64, input::Revision)>,
 }
@@ -279,7 +282,7 @@ async fn sources(
 
 /// Read every other chain's preimage observations above chain `chain_id`'s watermarks, and the
 /// rows of `chain_id` that hold one of their labels.
-pub(super) async fn read(
+pub(crate) async fn read(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<Read> {
@@ -310,23 +313,35 @@ pub(super) async fn read(
         let Some(cutoff) = cutoff else {
             continue;
         };
-        let holders: Vec<String> = sqlx::query_scalar(HOLDERS)
-            .bind(chain_id)
+        let labels: Vec<String> = sqlx::query_scalar(OBSERVED_LABELS)
             .bind(&source)
             .bind(after)
             .bind(cutoff)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database(
+                    format!("failed to read the labels {source} observed"),
+                    error,
+                )
+            })?;
+        read.labels.extend(labels);
+    }
+    read.labels.sort();
+    read.labels.dedup();
+    if !read.labels.is_empty() {
+        read.holders = sqlx::query_scalar(HOLDERS)
+            .bind(chain_id)
+            .bind(&read.labels)
             .fetch_all(&mut **transaction)
             .await
             .map_err(|error| {
                 ProjectError::database(
-                    format!("failed to read the rows {source}'s observations heal"),
+                    "failed to read the rows other chains' observations heal",
                     error,
                 )
             })?;
-        read.holders.extend(holders);
     }
-    read.holders.sort();
-    read.holders.dedup();
     Ok(read)
 }
 
@@ -380,7 +395,7 @@ pub(crate) async fn seed(
 
 /// Journal (when the block journals) and advance chain `chain_id`'s watermark for every source
 /// `read` moves. Returns the watermark rows written and the undo rows journalled.
-pub(super) async fn advance(
+pub(crate) async fn advance(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,

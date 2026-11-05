@@ -12,11 +12,18 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
-use sqlx::{PgConnection, Postgres, QueryBuilder, Row, types::Uuid};
+use sqlx::{
+    Execute, PgConnection, Postgres, QueryBuilder, Row, postgres::PgArguments, types::Uuid,
+};
 
 use crate::{ChildrenCurrentPageFilter, families::name::rendered::composed_surface_sql};
 
-use super::{children::Parents, children_page::push_children, require_publication};
+use super::{
+    children::{ListingBlock, Parents, Relation, push_listed},
+    children_page::push_children,
+    listing::{DISPLAY_KEY_BYTES, DISPLAY_KEY_CHARS, MISSING_TIMESTAMP},
+    require_publication,
+};
 
 /// One surface-less registry child as the subnames route serves it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,29 +56,7 @@ pub(crate) async fn load_owned_registry_children(
     candidates: &[String],
     published_block: i64,
 ) -> Result<Vec<RegistryChildRow>> {
-    // The predicates repeat `normalized_events_v1_subregistry_after_child_scope_idx`'s, so the
-    // lookup by child reads that index.
-    let parents: Vec<String> = sqlx::query_scalar(
-        "/* storage:families.topology.registry_child_parents */
-         SELECT DISTINCT event.namespace || ':' || lower(event.after_state ->> 'node')
-         FROM bigname_phase.normalized_events event
-         WHERE event.chain_id = $1
-           AND (event.namespace || ':' || lower(event.after_state ->> 'child_node')) = ANY($2)
-           AND event.event_kind = 'SubregistryChanged'
-           AND event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-           AND event.source_family = 'ens_v1_registry_l1'
-           AND event.consumer_visibility = 'activated'
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND event.after_state ->> 'node' IS NOT NULL
-           AND btrim(event.after_state ->> 'node') <> ''
-           AND event.after_state ->> 'child_node' IS NOT NULL
-           AND btrim(event.after_state ->> 'child_node') <> ''",
-    )
-    .bind(chain_id)
-    .bind(candidates)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to read the parents of the surface-less registry children")?;
+    let parents = registry_child_parents(conn, chain_id, candidates).await?;
     if parents.is_empty() {
         return Ok(Vec::new());
     }
@@ -104,6 +89,39 @@ pub(crate) async fn load_owned_registry_children(
         }
     }
     Ok(children)
+}
+
+/// The parents an `ens_v1_registry_l1` NewOwner named for the child ids `candidates` of
+/// `chain_id`, as `<namespace>:<node>`: the nodes the retained SubregistryChanged events of each
+/// child carry.
+pub async fn registry_child_parents(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    candidates: &[String],
+) -> Result<Vec<String>> {
+    // The predicates repeat `normalized_events_v1_subregistry_after_child_scope_idx`'s, so the
+    // lookup by child reads that index.
+    sqlx::query_scalar(
+        "/* storage:families.topology.registry_child_parents */
+         SELECT DISTINCT event.namespace || ':' || lower(event.after_state ->> 'node')
+         FROM bigname_phase.normalized_events event
+         WHERE event.chain_id = $1
+           AND (event.namespace || ':' || lower(event.after_state ->> 'child_node')) = ANY($2)
+           AND event.event_kind = 'SubregistryChanged'
+           AND event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+           AND event.source_family = 'ens_v1_registry_l1'
+           AND event.consumer_visibility = 'activated'
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND event.after_state ->> 'node' IS NOT NULL
+           AND btrim(event.after_state ->> 'node') <> ''
+           AND event.after_state ->> 'child_node' IS NOT NULL
+           AND btrim(event.after_state ->> 'child_node') <> ''",
+    )
+    .bind(chain_id)
+    .bind(candidates)
+    .fetch_all(&mut *conn)
+    .await
+    .context("failed to read the parents of the surface-less registry children")
 }
 
 /// The child nodes of `<namespace>:<node>` name ids.
@@ -193,4 +211,114 @@ fn push_published_surface_exists(
     builder.push(head);
     builder.push_bind(published_block);
     builder.push(tail);
+}
+
+/// The address listing rows (`project_address_listing`, F18, in the order of
+/// `records::ADDRESS_LISTING_COLUMNS`) of the surface-less registry children that `parents` list
+/// at `block`, narrowed to the child nodes `nodes` and the child ids `candidates` when given:
+/// the rows [`load_owned_registry_children`] serves for each address, at the block Project
+/// publishes and with the chain-data spelling ([`Relation::Stored`]). Each child is listed for
+/// its served owner (the lease's holder, else its registry owner) as `token_holder` and its
+/// registry owner as `effective_controller`, only where the address index lists the child for
+/// the address as the route's candidate query reads it, and never while the NameWrapper holds it
+/// or its lease is released (`records::registry_children`). Returned as owned SQL and arguments
+/// for a caller whose future must be `Send` (`topology::listing_statement`).
+pub fn registry_child_listing_statement(
+    head: &str,
+    block: ListingBlock<'_>,
+    parents: &[String],
+    nodes: Option<&[String]>,
+    candidates: Option<&[String]>,
+) -> Result<(String, PgArguments), sqlx::Error> {
+    let mut builder = QueryBuilder::<Postgres>::new(format!(
+        "/* storage:families.topology.registry_child_listing */ {head} WITH "
+    ));
+    push_listed(
+        &mut builder,
+        Parents::Many(parents),
+        None,
+        nodes,
+        None,
+        Relation::Stored(block),
+    );
+    builder.push(
+        "), child AS (
+            SELECT children.chain_id, children.parent_logical_name_id,
+                   children.child_logical_name_id, children.namespace,
+                   children.canonical_display_name, children.namehash, children.owner,
+                   children.registry_authority, children.token_holder,
+                   children.unhealed_labelhashes, state.owner_resource_id
+            FROM children
+            JOIN bigname_phase.project_registry_node_state state
+              ON state.chain_id = children.chain_id AND state.namespace = children.namespace
+             AND state.node = lower(children.namehash)
+            WHERE state.owner_resource_id IS NOT NULL
+              AND NOT children.wrapper_held AND NOT children.released_lease",
+    );
+    if let Some(candidates) = candidates {
+        builder.push(" AND children.child_logical_name_id = ANY(");
+        builder.push_bind(candidates.to_vec());
+        builder.push(")");
+    }
+    builder.push(" AND NOT ");
+    push_published_surface_exists(&mut builder, "children.child_logical_name_id", block.number);
+    // The route reads a child only under a parent an `ens_v1_registry_l1` NewOwner named for it
+    // (`registry_child_parents`), never a Basenames registry's child.
+    builder.push(
+        " AND EXISTS (
+              SELECT 1 FROM bigname_phase.normalized_events event
+              WHERE event.chain_id = children.chain_id
+                AND (event.namespace || ':' || lower(event.after_state ->> 'child_node'))
+                    = children.child_logical_name_id
+                AND event.event_kind = 'SubregistryChanged'
+                AND event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+                AND event.source_family = 'ens_v1_registry_l1'
+                AND event.consumer_visibility = 'activated'
+                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                AND event.namespace || ':' || lower(event.after_state ->> 'node')
+                    = children.parent_logical_name_id)",
+    );
+    builder.push(format!(
+        "
+        ), related AS (
+            SELECT child.*, related.address,
+                   bool_or(related.relation = 0) OVER pair AS token_holder_relation,
+                   bool_or(related.relation = 1) OVER pair AS controller_relation
+            FROM child
+            CROSS JOIN LATERAL (VALUES (COALESCE(child.token_holder, child.owner), 0),
+                                       (child.owner, 1)) related (address, relation)
+            WHERE related.address IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM bigname_phase.project_address_name_index indexed
+                  WHERE indexed.address = related.address
+                    AND indexed.logical_name_id = child.child_logical_name_id
+                    AND indexed.relation = 'effective_controller'
+                    AND indexed.chain_id = child.chain_id)
+            WINDOW pair AS (PARTITION BY related.address, child.child_logical_name_id)
+        )
+        SELECT DISTINCT ON (related.address, related.child_logical_name_id)
+               related.chain_id, related.address, related.child_logical_name_id,
+               related.namespace,
+               CASE WHEN octet_length(related.canonical_display_name) <= {DISPLAY_KEY_BYTES}
+                    THEN related.canonical_display_name
+                    ELSE left(related.canonical_display_name, {DISPLAY_KEY_CHARS}) END,
+               related.canonical_display_name, related.canonical_display_name,
+               CASE WHEN strpos(related.canonical_display_name, '.') > 1
+                    THEN substr(related.canonical_display_name,
+                                strpos(related.canonical_display_name, '.') + 1) END,
+               related.namehash, related.owner_resource_id,
+               related.token_holder_relation, related.controller_relation, FALSE, TRUE, FALSE,
+               TRUE, related.parent_logical_name_id, FALSE, related.registry_authority, FALSE,
+               {MISSING_TIMESTAMP}, {MISSING_TIMESTAMP}, {MISSING_TIMESTAMP}, {MISSING_TIMESTAMP},
+               NULL::bigint, NULL::bigint, NULL::bigint, related.unhealed_labelhashes
+        FROM related
+        ORDER BY related.address, related.child_logical_name_id,
+                 related.parent_logical_name_id"
+    ));
+    let arguments = builder
+        .build()
+        .take_arguments()
+        .map_err(sqlx::Error::Encode)?
+        .unwrap_or_default();
+    Ok((builder.into_sql(), arguments))
 }
