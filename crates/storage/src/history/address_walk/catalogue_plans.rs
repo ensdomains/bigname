@@ -1,12 +1,15 @@
 //! Explicit read-only plan capture of the production statements on the retained first gate.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
-use sqlx::{Connection, PgConnection, Postgres, QueryBuilder};
+use sqlx::{Connection, PgConnection, Postgres, QueryBuilder, Row};
 
-use super::{AddressRead, catalogue_count, catalogue_source};
+use super::{AddressRead, catalogue_count, catalogue_fence_tests::ROUTE_KINDS, catalogue_source};
 use crate::history::{
     ChainBlockRange, EventHistoryReadFilter, HistoryBlockWindow, HistoryOrder, HistoryScope,
 };
@@ -102,6 +105,112 @@ async fn address_history_retained_catalogue_plans() -> Result<()> {
     let mut query = QueryBuilder::<Postgres>::new(prefix);
     catalogue_count::push_proof_query(&mut query, &read, &filter, &names, 10_001);
     explain(&mut connection, query, directory, "count-proof-first").await?;
+    sqlx::raw_sql("ROLLBACK").execute(&mut connection).await?;
+    Ok(())
+}
+
+/// The fenced and the previous catalogue probes of one address at one bucket on a retained
+/// database, for the before and after record: the candidate statement and the seek from that
+/// bucket, each as a custom plan executed under `EXPLAIN (ANALYZE, BUFFERS)` and as a generic
+/// plan. Read-only. The address, the bucket and the candidate limit come from the environment;
+/// the published bound is the database's family marker.
+#[tokio::test]
+#[ignore = "manual read-only plans of the fenced and previous catalogue probes for one address"]
+async fn address_history_catalogue_fence_plans() -> Result<()> {
+    let url = std::env::var("BIGNAME_HISTORY_RETAINED_DATABASE_URL")?;
+    let directory = PathBuf::from(std::env::var("BIGNAME_ADDRESS_HISTORY_PLAN_DIR")?);
+    std::fs::create_dir_all(&directory)?;
+    let address = std::env::var("BIGNAME_HISTORY_FENCE_ADDRESS")?.to_lowercase();
+    let bucket: i64 = std::env::var("BIGNAME_HISTORY_FENCE_BUCKET")?.parse()?;
+    let limit: i64 = std::env::var("BIGNAME_HISTORY_FENCE_LIMIT")
+        .ok()
+        .map(|limit| limit.parse())
+        .transpose()?
+        .unwrap_or(21);
+    let chain = "ethereum-mainnet";
+    let mut connection = PgConnection::connect(&url).await?;
+    sqlx::raw_sql(
+        "SET search_path=bigname_phase,public; SET jit=off; SET statement_timeout='280s'; BEGIN READ ONLY",
+    )
+    .execute(&mut connection)
+    .await?;
+    let block: i64 = sqlx::query_scalar(
+        "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(&mut connection)
+    .await?;
+    let published = BTreeMap::from([(chain.to_owned(), block)]);
+    let read = AddressRead {
+        address: &address,
+        namespace: Some("ens"),
+        relations: None,
+        scope: HistoryScope::Both,
+        canonical_only: true,
+        published: Some(&published),
+        catalogue: true,
+    };
+    let filter = EventHistoryReadFilter {
+        order: HistoryOrder::Desc,
+        event_kinds: ROUTE_KINDS.map(str::to_owned).to_vec(),
+        block_window: Some(HistoryBlockWindow {
+            ranges: vec![ChainBlockRange {
+                chain_id: chain.to_owned(),
+                from_block: None,
+                to_block: Some(block),
+            }],
+        }),
+        ..Default::default()
+    };
+    for (version, fence) in [("fenced", true), ("previous", false)] {
+        for statement in ["candidate", "seek"] {
+            let label = format!("{version}-{statement}-{bucket}");
+            for generic in [false, true] {
+                let mut query = QueryBuilder::<Postgres>::new(if generic {
+                    "EXPLAIN (GENERIC_PLAN, FORMAT JSON) "
+                } else {
+                    "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "
+                });
+                if statement == "candidate" {
+                    catalogue_source::push_candidate_statement(
+                        &mut query, &read, &filter, None, bucket, None, limit, fence,
+                    );
+                } else {
+                    catalogue_source::push_seek_statement(
+                        &mut query,
+                        &read,
+                        &filter,
+                        Some(bucket),
+                        fence,
+                    );
+                }
+                let mode = if generic { "generic" } else { "custom" };
+                std::fs::write(directory.join(format!("{label}.sql")), query.sql())?;
+                let plan: Value = if generic {
+                    sqlx::raw_sql(query.sql())
+                        .fetch_one(&mut connection)
+                        .await?
+                        .get(0)
+                } else {
+                    query
+                        .build_query_scalar()
+                        .persistent(false)
+                        .fetch_one(&mut connection)
+                        .await?
+                };
+                std::fs::write(
+                    directory.join(format!("{label}-{mode}.json")),
+                    serde_json::to_vec_pretty(&plan)?,
+                )?;
+                let mut scans = Vec::new();
+                collect_scans(&plan[0]["Plan"], &mut scans);
+                println!(
+                    "{label}-{mode}: {}",
+                    json!({"planning_ms":plan[0]["Planning Time"], "execution_ms":plan[0]["Execution Time"], "scans":scans})
+                );
+            }
+        }
+    }
     sqlx::raw_sql("ROLLBACK").execute(&mut connection).await?;
     Ok(())
 }
