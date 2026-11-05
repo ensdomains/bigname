@@ -303,10 +303,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The resolver arm equivalence test is the storage library's longest
-          # test and set core's wall time, so it runs alone in core-arms. Both
-          # entries build the same packages and features and share one cache
-          # key. `test` needs every entry, so core-arms gates a merge too.
+          # The storage library's longest test runs alone in core-arms so it no
+          # longer sets core's wall time. `test` needs every entry.
           - name: core
             packages: >-
               -p bigname-domain
@@ -323,7 +321,7 @@ jobs:
               -p bigname-manifests
               -p bigname-adapters
               -p bigname-test-support
-            test_args: "-- --exact history::paging::tests::resolver_arm_equivalence_tests::arm_shape_requests_match_the_plain_statement"
+            test_args: "-- history::paging::tests::resolver_arm_equivalence_tests::"
             postgres_initdb_args: "--set=jit=off --set=log_lock_waits=on"
     services:
       postgres:
