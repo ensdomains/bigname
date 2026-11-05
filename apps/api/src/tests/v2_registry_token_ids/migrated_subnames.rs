@@ -73,6 +73,7 @@ fn emitted(
     log
 }
 async fn publish(database: &TestDatabase, block: i64) -> Result<()> {
+    bigname_storage::stack_probe::mark("api::publish");
     let block = BASE + block;
     publish_test_families_on(&database.pool, PATH_CHAIN, block).await?;
     database.seed_snapshot_selector_chain_positions(&json!({PATH_CHAIN:{"chain_id":PATH_CHAIN,"block_number":block,"block_hash":format!("0xhistory{block}"),"timestamp":bigname_storage::UnixSeconds::from(timestamp(1_700_000_000+block)).internal_string()}})).await
@@ -521,6 +522,7 @@ async fn seed_and_run_with_targets(
     targets: &[(i64, i64, &str)],
     clock: Option<i64>,
 ) -> Result<()> {
+    bigname_storage::stack_probe::mark("api::seed_and_run_with_targets");
     let blocks = (BASE + start..=BASE + end)
         .map(|n| {
             raw_block(
@@ -653,6 +655,7 @@ async fn assert_name_consumers(
     resolver: Address,
     reason: Option<&str>,
 ) -> Result<()> {
+    bigname_storage::stack_probe::mark("api::assert_name_consumers");
     let detail_record = lookup_publication::assert_name_prepared_parity(database, name).await?;
     let detail = json!({"data":detail_record});
     let lookup = path_lookup(database, json!({"profile":"detail","inputs":[{"name":name},{"address":address,"relation":"resolves_to"}]})).await?;
@@ -901,6 +904,7 @@ async fn migrated_subname_parent_only_changes_restore_and_withhold_all_consumers
 
 // Real Sepolia namespace selection; older shared test routers force ENS to mainnet.
 async fn path_get(database: &TestDatabase, uri: &str) -> Result<Value> {
+    bigname_storage::stack_probe::mark("api::path_get");
     let state = AppState::new_with_rpc_urls(
         database.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),

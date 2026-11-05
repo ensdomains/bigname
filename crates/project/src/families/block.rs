@@ -241,6 +241,7 @@ pub(crate) async fn publish(
     plan: &Plan<'_>,
     options: &FamilyOptions,
 ) -> Result<(FamilyMarker, BlockStats)> {
+    bigname_storage::stack_probe::mark("block::publish");
     let Opened {
         mut transaction,
         prior,
@@ -368,6 +369,7 @@ async fn write(
     composition: &marker::Composition,
     (sweeps, composes): (super::derived::Sweeps, bool),
 ) -> Result<BlockStats> {
+    bigname_storage::stack_probe::mark("block::write");
     let changes = rows.written();
     let mut stats = BlockStats::default();
     if changes.is_empty() && !composes {

@@ -101,6 +101,7 @@ async fn compose_summaries(
     logical_name_ids: &[String],
     include_relations: bool,
 ) -> Result<NameSummaryPublication> {
+    crate::stack_probe::mark("storage::compose_summaries");
     if logical_name_ids.is_empty() {
         return Ok(NameSummaryPublication::default());
     }

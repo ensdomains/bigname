@@ -17,6 +17,7 @@ pub(super) async fn refresh(
     composition: &super::marker::Composition,
     stats: &mut BlockStats,
 ) -> Result<()> {
+    bigname_storage::stack_probe::mark("lookup::refresh");
     let publication = super::marker::publication(chain, block, composition)?;
     names::refresh(transaction, &publication, block, stats).await?;
     inventories::refresh(transaction, &publication, block, stats).await

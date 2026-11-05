@@ -264,6 +264,7 @@ pub(crate) async fn refresh(
     after: i64,
     touched: (&[String], &[String]),
 ) -> Result<Refreshed> {
+    bigname_storage::stack_probe::mark("children::refresh");
     let observed = sources::read(transaction, chain_id).await?;
     let (mut children, parents) = work::list(transaction, chain_id, block, after, touched).await?;
     if !observed.holders.is_empty() {
@@ -310,6 +311,7 @@ async fn derive_with(
     (parents, children): (&[String], &[String]),
     heals_only: bool,
 ) -> Result<Refreshed> {
+    bigname_storage::stack_probe::mark("children::derive_with");
     if parents.is_empty() && children.is_empty() {
         return Ok(Refreshed::default());
     }

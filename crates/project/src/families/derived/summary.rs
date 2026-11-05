@@ -65,6 +65,7 @@ pub(super) async fn refresh(
     sweeps: super::Sweeps,
     composition: &super::super::marker::Composition,
 ) -> Result<Refreshed> {
+    bigname_storage::stack_probe::mark("summary::refresh");
     let block = input::read_block(transaction, chain_id, number)
         .await?
         .ok_or_else(|| {
@@ -138,6 +139,7 @@ pub(crate) async fn compose(
     publication: &bigname_storage::families::name::FamilyPublication,
     chunk: &[String],
 ) -> Result<bigname_storage::families::name::NameSummaryPublication> {
+    bigname_storage::stack_probe::mark("summary::compose");
     bigname_storage::families::name::compose_name_summary_publication(
         transaction,
         publication,
