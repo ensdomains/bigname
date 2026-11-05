@@ -7,8 +7,24 @@ use tracing::{error, info};
 use crate::{
     config::RuntimeConfig,
     error::{RunnerError, RunnerResult},
-    runner::{PhaseRunner, SupervisorReport},
+    runner::PhaseRunner,
 };
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SupervisorReport {
+    pub stopped_chains: Vec<(String, RunnerError)>,
+    /// How many of `stopped_chains`, from the front, stopped before a stop was requested. Only
+    /// a supervised run sets it.
+    pub failed_before_stop: usize,
+}
+
+impl SupervisorReport {
+    /// The chains that failed once a stop had been requested. These are the failures a
+    /// supervised run still exits nonzero on.
+    pub fn stop_time_failures(&self) -> &[(String, RunnerError)] {
+        &self.stopped_chains[self.failed_before_stop..]
+    }
+}
 
 pub(crate) async fn run(
     runner: Arc<PhaseRunner>,
