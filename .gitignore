@@ -1,5 +1,8 @@
 /target
 /.env
+/.env.*
+!/.env.example
+!/.env.*.example
 .DS_Store
 /.agents/state/
 /manifests/.bigname-e2e-runtime-profile-*

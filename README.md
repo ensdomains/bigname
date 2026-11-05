@@ -33,6 +33,16 @@ outcomes or durable [execution traces](docs/glossary.md).
 
 ## Local development
 
+Install the [prerequisites](docs/development.md#prerequisites), then fetch the
+[pinned upstream copies](docs/development.md#pinned-upstream-copies):
+
+```sh
+scripts/sync-refs
+```
+
+This needs network access to GitHub. Unit tests and the end-to-end tests read
+the copies. The API and the phase runner run without them.
+
 For a fresh, disposable local database:
 
 ```sh
