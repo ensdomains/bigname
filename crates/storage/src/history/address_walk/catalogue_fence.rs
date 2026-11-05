@@ -2,15 +2,8 @@
 
 use sqlx::{Postgres, QueryBuilder};
 
-use super::{
-    AddressRead,
-    catalogue_source::{Bucket, block_window, push_bucket},
-};
-use crate::history::{
-    EventHistoryReadFilter,
-    keyset::{HistoryKeyset, push_history_cursor_block_bound},
-    paging::push_history_order_terms,
-};
+use super::{AddressRead, catalogue_source::Bucket};
+use crate::history::{EventHistoryReadFilter, keyset::HistoryKeyset};
 
 /// The `FROM` item of one probe: `normalized_events` itself, or behind the fence.
 ///
@@ -38,31 +31,7 @@ pub(super) fn push_event_rows<'a>(
     fence: bool,
     push_key: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
 ) {
-    if !fence {
-        query.push("normalized_events ne");
-        return;
-    }
-    query.push("(SELECT ne.* FROM normalized_events ne WHERE ne.consumer_visibility = 'activated'");
-    if read.canonical_only {
-        query.push(" AND ne.canonicality_state IN ('canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state)");
-    }
-    query.push(" AND ");
-    push_key(query);
-    push_bucket(query, bucket, filter.order);
-    let (minimum, maximum) = block_window(filter);
-    if let Some(minimum) = minimum {
-        query.push(" AND ne.block_number >= ").push_bind(minimum);
-    }
-    if let Some(maximum) = maximum {
-        query.push(" AND ne.block_number <= ").push_bind(maximum);
-    }
-    if let Some(keyset) = keyset {
-        push_history_cursor_block_bound(query, filter, keyset);
-    }
-    if let Some(identity) = identity {
-        query.push(" AND ne.event_identity = ").push_bind(identity);
-    }
-    query.push(" ORDER BY ");
-    push_history_order_terms(query, filter.order);
-    query.push(" OFFSET 0) ne");
+    // Red-run stub: the previous statement on both paths.
+    let _ = (read, filter, keyset, bucket, identity, fence, push_key);
+    query.push("normalized_events ne");
 }
