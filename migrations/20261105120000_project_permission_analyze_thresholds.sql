@@ -6,10 +6,9 @@
 -- inputs change, and no redo is required.
 --
 -- Lock class: ALTER TABLE ... SET for these two storage parameters takes SHARE UPDATE EXCLUSIVE
--- on the table, which blocks neither reads nor writes. It conflicts only with VACUUM, ANALYZE,
--- CREATE INDEX CONCURRENTLY and other schema changes on the table. A lock_timeout of 5 seconds
--- bounds the wait behind one of those, so a busy table fails this schema-migration instead of
--- holding it. The previous lock_timeout is put back before the block returns. Applied again, it
+-- on the table, which blocks neither reads nor writes. It waits behind a VACUUM, an ANALYZE, an
+-- index build or another schema change on the table. A lock_timeout of 5 seconds per statement
+-- bounds that wait, so a busy table fails this schema-migration instead of holding it. The previous lock_timeout is put back before the block returns. Applied again, it
 -- sets the same values.
 --
 -- An empty schema-migration database has no phase baseline yet, so this schema-migration is a

@@ -5710,9 +5710,9 @@ returns. There is no setting and no metric for the refresh. A stop drops a runni
 leaves the table due, and the next process starts its counts again.
 
 A stop that arrives while a refresh is waiting skips it. The batch's progress is already
-recorded, but the run is reported as stopped, not complete, so the Project phase stays `running`
-until the next start settles it. After the last batch of a `phase-runner redo` the command
-reports the redo as incomplete. Rerun it, as for the `normalized_events` refresh.
+recorded, but the run is reported as stopped, not complete. The Project phase stays `running`
+until the next start settles it. A redo's batches leave nothing due, so a `phase-runner redo` is
+not affected.
 
 This does not catch a small change to a table. After the first refresh, a new kind of row that
 is a small share of the table is below the runner's count, and it can be below autovacuum's
@@ -5720,8 +5720,8 @@ default too. Schema-migration `20261105120000_project_permission_analyze_thresho
 autovacuum's threshold for that case on the three small tables the ENSv2 registry permission
 reads join: `project_account_approval`, `project_ens_v2_entry_owner` and
 `project_ens_v2_registry_parent`. They now analyze after changes to 2% of their rows plus 20. It
-takes SHARE UPDATE EXCLUSIVE, so it blocks no read and no write. It waits at most 5 seconds
-behind a `VACUUM`, an `ANALYZE` or an index build on the table, then fails, and can be run again.
+takes SHARE UPDATE EXCLUSIVE, so it blocks no read and no write. It waits at most 5 seconds per
+table behind a `VACUUM`, an `ANALYZE` or an index build, then fails, and can be run again.
 A table a fresh `phase-runner init-schema` creates has the same parameters.
 
 Neither content hash rotates. `apps/phase-runner`, the baseline and the schema-migration are

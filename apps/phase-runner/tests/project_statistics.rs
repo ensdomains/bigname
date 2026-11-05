@@ -10,7 +10,7 @@ mod support;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -25,7 +25,7 @@ use phase_runner::{
         AfterProgress, AfterProgressFuture, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext,
         PhaseFuture, PhaseName, PhaseResume, PhaseSet, RunMode,
     },
-    project_phase::ProjectPhase,
+    project_phase::{FamilySettings, ProjectPhase},
     runner::PhaseRunner,
     state::PhaseStore,
 };
@@ -40,6 +40,8 @@ const RUNNER_CHAIN: &str = "project-statistics-runner";
 const OTHER_CHAIN: &str = "base-mainnet";
 const REBUILT_TO: i64 = 1;
 const HEAD: i64 = 40;
+/// The top of the seed's lineage, which the runner reads as the readable head.
+const RUNNER_HEAD: i64 = 300;
 const TABLES: [&str; 7] = [
     "project_grant",
     "project_account_approval",
@@ -293,6 +295,7 @@ struct StopOnCompleteBatch {
     inner: Arc<ProjectPhase>,
     stop: CancellationToken,
     completed: AtomicBool,
+    batches: AtomicUsize,
 }
 
 impl Phase for StopOnCompleteBatch {
@@ -302,6 +305,7 @@ impl Phase for StopOnCompleteBatch {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
+            self.batches.fetch_add(1, Ordering::SeqCst);
             let outcome = self.inner.run_batch(context).await?;
             if matches!(outcome, PhaseBatchOutcome::Complete(_)) {
                 self.completed.store(true, Ordering::SeqCst);
@@ -335,8 +339,8 @@ fn runner_chain() -> phase_runner::error::RunnerResult<ChainConfig> {
     )
 }
 
-/// Ingest and Interpret completed through the head, the heads published there, and Project
-/// completed at the rebuilt block, where the family marker stands.
+/// Ingest and Interpret completed through the top of the lineage, the heads published there, and
+/// Project completed at the rebuilt block, where the family marker stands.
 async fn ready_for_the_runner(pool: &PgPool) -> Result<()> {
     PhaseStore::new(pool.clone())
         .initialize_chain(RUNNER_CHAIN)
@@ -346,8 +350,8 @@ async fn ready_for_the_runner(pool: &PgPool) -> Result<()> {
          VALUES ($1, $2, $3)",
     )
     .bind(RUNNER_CHAIN)
-    .bind(block_hash(HEAD))
-    .bind(HEAD)
+    .bind(block_hash(RUNNER_HEAD))
+    .bind(RUNNER_HEAD)
     .execute(pool)
     .await?;
     sqlx::query(
@@ -365,8 +369,8 @@ async fn ready_for_the_runner(pool: &PgPool) -> Result<()> {
          WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project')",
     )
     .bind(RUNNER_CHAIN)
-    .bind(HEAD)
-    .bind(block_hash(HEAD))
+    .bind(RUNNER_HEAD)
+    .bind(block_hash(RUNNER_HEAD))
     .bind(REBUILT_TO)
     .bind(block_hash(REBUILT_TO))
     .bind(INTERPRETER_CONTENT_HASH)
@@ -381,9 +385,9 @@ async fn ready_for_the_runner(pool: &PgPool) -> Result<()> {
          ) VALUES ($1, 'source', 'test', 'new_signature_range', 0, $2, $3, $3, $4)",
     )
     .bind(RUNNER_CHAIN)
-    .bind(HEAD + 1)
-    .bind(HEAD)
-    .bind(block_hash(HEAD))
+    .bind(RUNNER_HEAD + 1)
+    .bind(RUNNER_HEAD)
+    .bind(block_hash(RUNNER_HEAD))
     .execute(pool)
     .await?;
     Ok(())
@@ -400,11 +404,18 @@ async fn a_stop_after_a_completed_batch_with_a_refresh_due_leaves_the_phase_runn
     let scratch = seeded_on("project_statistics_runner_stop", RUNNER_CHAIN).await?;
     ready_for_the_runner(scratch.pool()).await?;
     let stop = CancellationToken::new();
-    let inner = Arc::new(ProjectPhase::new(scratch.pool().clone()));
+    // One batch reaches the head, so the batch that writes the tables is the one that completes.
+    let inner = Arc::new(
+        ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
+            max_blocks_per_run: 512,
+            ..FamilySettings::default()
+        }),
+    );
     let project = Arc::new(StopOnCompleteBatch {
         inner: Arc::clone(&inner),
         stop: stop.clone(),
         completed: AtomicBool::new(false),
+        batches: AtomicUsize::new(0),
     });
     let runner = PhaseRunner::new(
         scratch.runner(),
@@ -429,8 +440,8 @@ async fn a_stop_after_a_completed_batch_with_a_refresh_due_leaves_the_phase_runn
     .context("the chain run did not stop within two minutes")??;
 
     ensure!(
-        project.completed.load(Ordering::SeqCst),
-        "the Project batch completed"
+        project.batches.load(Ordering::SeqCst) == 1 && project.completed.load(Ordering::SeqCst),
+        "one Project batch ran and completed"
     );
     let (status, current): (String, Option<i64>) = sqlx::query_as(
         "SELECT phase_status, current_block_number FROM chain_phase_state
@@ -440,7 +451,7 @@ async fn a_stop_after_a_completed_batch_with_a_refresh_due_leaves_the_phase_runn
     .fetch_one(scratch.pool())
     .await?;
     ensure!(
-        current == Some(HEAD),
+        current == Some(RUNNER_HEAD),
         "the completed batch's progress is recorded: {current:?}"
     );
     ensure!(
