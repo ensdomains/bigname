@@ -67,6 +67,9 @@ fn json_logging_requested_from(value: Option<&str>) -> bool {
     })
 }
 
+/// A line that cannot be written is dropped. The library's default report of the failure is an
+/// `eprintln!`, which panics when stderr has failed too, and that panic would drop the request
+/// being served, or end the process during start-up, over a lost log line.
 pub(super) fn init_tracing(service: &'static str) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -75,12 +78,14 @@ pub(super) fn init_tracing(service: &'static str) {
             .with_env_filter(env_filter)
             .json()
             .with_target(false)
+            .log_internal_errors(false)
             .init();
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .compact()
             .with_target(false)
+            .log_internal_errors(false)
             .init();
     }
 

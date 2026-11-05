@@ -43,3 +43,8 @@ axum.workspace = true
 bigname-adapters.workspace = true
 bigname-domain.workspace = true
 bigname-test-support.workspace = true
+
+[[test]]
+name = "log_write_failure"
+path = "tests/log_write_failure.rs"
+harness = false

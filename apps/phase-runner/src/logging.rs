@@ -23,17 +23,22 @@ pub fn json_requested_from(value: Option<&str>) -> bool {
     })
 }
 
+/// A line that cannot be written is dropped. The library's default report of the failure is an
+/// `eprintln!`, which panics when stderr has failed too, and that panic would end the process with
+/// the phase left unfinished, or stop a chain as "panicked", over a lost log line.
 pub fn init() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     if json_requested() {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .json()
+            .log_internal_errors(false)
             .init();
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .compact()
+            .log_internal_errors(false)
             .init();
     }
 }
