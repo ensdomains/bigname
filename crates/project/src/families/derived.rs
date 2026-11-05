@@ -436,7 +436,31 @@ const RECORD_ID_INSERT: &str = "/* project:families.derived.record_id_insert */
 /// Refresh the derived rows of the keys a block touched after the family marker's block `after`,
 /// and count the name summaries it wrote and journalled like a family table's. `sweeps` adds the
 /// names the summaries and the lookup names compose again beyond the touched ones.
-pub(super) async fn refresh_block(
+///
+/// Boxed by a plain function, so a block's future holds a pointer to the refresh rather than its
+/// state, and the refresh's future is built in a frame that is gone before it runs. An
+/// unoptimised build keeps a slot for each future an async function awaits, and a temporary copy
+/// of it, in the frame that polls it. The refresh's state would otherwise sit in every caller's
+/// future and widen each caller's frame on the way down to the refresh's deepest query.
+pub(super) fn refresh_block<'a>(
+    transaction: &'a mut Transaction<'_, Postgres>,
+    chain_id: &'a str,
+    block: &'a input::BlockHeader,
+    (after, sweeps): (i64, Sweeps),
+    composition: &'a marker::Composition,
+    stats: &'a mut BlockStats,
+) -> std::pin::Pin<Box<impl Future<Output = Result<()>>>> {
+    Box::pin(refresh_block_inner(
+        transaction,
+        chain_id,
+        block,
+        (after, sweeps),
+        composition,
+        stats,
+    ))
+}
+
+async fn refresh_block_inner(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,
@@ -473,51 +497,62 @@ pub(super) async fn refresh_block(
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
     stats.undo_rows += undo_rows;
     super::lookup::refresh(transaction, chain_id, block, composition, stats).await?;
-    // Last: a child's listing row reads its name summary, which every step above can rewrite. The
-    // child listing's work list and the other chains' preimage observations serve the address
-    // listing too, which heals from them before the child listing advances the watermarks.
-    // Boxed, so the block's future does not carry the refreshes' state on the caller's stack.
-    let observed = children::observe(transaction, chain_id).await?;
-    let work = children::work(
+    // Last: a child's listing row reads its name summary, which every step above can rewrite.
+    listings(
         transaction,
         chain_id,
         block,
-        after,
-        (&summary.names, &summary.raw_name_swept),
+        (after, composition),
+        (&touched.names, &summary.names, &summary.raw_name_swept),
+        stats,
     )
-    .await?;
-    let publication = marker::publication(chain_id, block, composition)?;
-    let address = Box::pin(address_listing::refresh(
-        transaction,
-        &publication,
-        block,
-        address_listing::Work {
-            after,
-            touched: &touched.names,
-            children: &work.0,
-            parents: &work.1,
-            labels: &observed.labels,
-        },
-    ))
-    .await?;
-    if address.rows > 0 {
-        *stats.rows.entry(ADDRESS_LISTING.name).or_default() += address.rows;
-    }
-    stats.undo_rows += address.undo_rows;
-    let listing = Box::pin(children::refresh(
-        transaction,
-        chain_id,
-        block,
-        work,
-        &observed,
-    ))
-    .await?;
-    if listing.rows > 0 {
-        *stats.rows.entry(CHILD_LISTING.name).or_default() += listing.rows;
-    }
-    if listing.watermark_rows > 0 {
-        *stats.rows.entry(CHILD_PREIMAGE_WATERMARK.name).or_default() += listing.watermark_rows;
-    }
-    stats.undo_rows += listing.undo_rows;
-    Ok(())
+    .await
+}
+
+/// The address listing and child listing refreshes of `refresh_block`. The child listing's work
+/// list and the other chains' preimage observations serve the address listing too, which heals
+/// from them before the child listing advances the watermarks.
+///
+/// Boxed by a plain function, as `refresh_block` is: the block's refresh holds a pointer for this
+/// step, and keeps neither the step's futures nor the locals they share in its state or frame.
+fn listings<'a>(
+    transaction: &'a mut Transaction<'_, Postgres>,
+    chain_id: &'a str,
+    block: &'a input::BlockHeader,
+    (after, composition): (i64, &'a marker::Composition),
+    (touched, names, raw_name_swept): (&'a [String], &'a [String], &'a [String]),
+    stats: &'a mut BlockStats,
+) -> std::pin::Pin<Box<impl Future<Output = Result<()>>>> {
+    Box::pin(async move {
+        let observed = children::observe(transaction, chain_id).await?;
+        let work =
+            children::work(transaction, chain_id, block, after, (names, raw_name_swept)).await?;
+        let publication = marker::publication(chain_id, block, composition)?;
+        let address = address_listing::refresh(
+            transaction,
+            &publication,
+            block,
+            address_listing::Work {
+                after,
+                touched,
+                children: &work.0,
+                parents: &work.1,
+                labels: &observed.labels,
+            },
+        )
+        .await?;
+        if address.rows > 0 {
+            *stats.rows.entry(ADDRESS_LISTING.name).or_default() += address.rows;
+        }
+        stats.undo_rows += address.undo_rows;
+        let listing = children::refresh(transaction, chain_id, block, work, &observed).await?;
+        if listing.rows > 0 {
+            *stats.rows.entry(CHILD_LISTING.name).or_default() += listing.rows;
+        }
+        if listing.watermark_rows > 0 {
+            *stats.rows.entry(CHILD_PREIMAGE_WATERMARK.name).or_default() += listing.watermark_rows;
+        }
+        stats.undo_rows += listing.undo_rows;
+        Ok(())
+    })
 }
