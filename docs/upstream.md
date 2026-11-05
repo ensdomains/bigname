@@ -284,7 +284,25 @@ migration correlation or path changes.
 > `expires_at: null` and `expires_at_reason: released`, `ens_v1.expires_at: null`, no owner,
 > manager or registrant, and a `lapsed_registration` naming its holder before the claim and the
 > claim's block time (see [Graveyard-held names](api-v1.md#graveyard-held-names)). A subname the
-> Graveyard cleared is served the same way. See [projections](projections.md).
+> Graveyard cleared is served the same way. The hold carries while the Graveyard controls the
+> record, directly or as the wrapped token's holder. Any other controller, even inside one
+> transaction, ends it. Three limits follow from what the indexed events show:
+> - The adapter records no transfer of a wrapped token whose NameWrapper authority a registry
+>   write ended. When a later registry write naming the NameWrapper makes such a stale token
+>   live again on chain (`_isWrapped` reads the registry owner), its holder's control is not
+>   visible, and a name the Graveyard then clears has no lapsed holder.
+> - `unwrapETH2LD` with the NameWrapper as the controller burns the wrapped token and writes the
+>   record to the owner it already has, so no event shows the wrap ending. The token's last
+>   holder still reads as controlling the name, so a name the Graveyard then claims names a
+>   lapsed holder although no one controlled it.
+> - The NameWrapper's address is known from the name's own wraps. A name never wrapped whose
+>   record is written to the NameWrapper reads that address as an ordinary owner, and it is the
+>   lapsed holder of a subname the Graveyard then clears.
+>
+> See [projections](projections.md).
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L396 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1080 @ ens_v1@91c966f)
 > **Since**: `2026-09-29`; widened `2026-11-05`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
