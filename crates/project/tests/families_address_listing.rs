@@ -448,6 +448,120 @@ async fn an_observed_label_respells_its_holders() -> Result<()> {
     fixture.cleanup().await
 }
 
+/// Interpret filling `name`'s raw bytes in place from an observation of the whole name at
+/// `block`, as it does for a surface it already holds: the raw bytes name that observation as
+/// their witness, so a publication below `block` still reads the surface without them.
+async fn fill_raw_bytes_at(
+    fixture: &Fixture,
+    logical_name_id: &str,
+    name: &str,
+    block: i64,
+) -> Result<()> {
+    let witness = fixture
+        .write(
+            block,
+            0,
+            "PreimageObserved",
+            "ens_v2_registry_l1",
+            Some(logical_name_id),
+            None,
+            json!({"source_event": "NameRegistered", "raw_name": name}),
+            REGISTRY,
+        )
+        .await?;
+    let identity: String = sqlx::query_scalar(
+        "SELECT event_identity FROM normalized_events WHERE normalized_event_id = $1",
+    )
+    .bind(witness)
+    .fetch_one(&fixture.pool)
+    .await?;
+    let spelled = bigname_domain::normalization::normalize_name(name)?;
+    sqlx::query(
+        "UPDATE name_surfaces SET raw_name = $2, raw_labels = $3, dns_encoded_name = $4,
+             preimage_event_identity = $5
+         WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .bind(name)
+    .bind(spelled.normalized_labels)
+    .bind(spelled.dns_encoded_name)
+    .bind(identity)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+// Row 25e: a publication below the block whose observation filled a name's raw bytes composes the
+// name without them, so the stored name spells each label its chain-observed preimage spells and
+// leaves the others as `[labelhash]`, listing exactly those as unhealed, though the surface
+// already holds the raw bytes. At the observation's block the name is stored whole.
+#[tokio::test]
+async fn a_name_whose_raw_bytes_arrive_later_spells_its_known_labels() -> Result<()> {
+    let fixture = Fixture::new("families_address_listing_late_raw", 8).await?;
+    let tld = labelhash("box");
+    let held = unspelled(&fixture, "w.box", 1).await?;
+    observe_label(&fixture, 1, "w").await?;
+    preimage(&fixture, &labelhash("w"), "w").await?;
+    fill_raw_bytes_at(&fixture, &held, "w.box", 6).await?;
+    fixture.apply(2, FamilyMode::Normal).await?;
+    let early = spelled(&fixture, &held).await?;
+    ensure!(
+        early == (format!("w.{}", placeholder(&tld)), vec![tld.clone()]),
+        "below the observation the stored name spells its known label: {early:?}"
+    );
+    let parent: Option<String> = sqlx::query_scalar(
+        "SELECT parent_normalized_name FROM project_address_listing
+         WHERE chain_id = $1 AND address = $2 AND logical_name_id = $3",
+    )
+    .bind(CHAIN)
+    .bind(OWNER)
+    .bind(&held)
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        parent == Some(placeholder(&tld)),
+        "the parent key: {parent:?}"
+    );
+    fixture.apply(6, FamilyMode::Normal).await?;
+    let whole = spelled(&fixture, &held).await?;
+    ensure!(
+        whole == ("w.box".to_owned(), Vec::new()),
+        "at the observation the stored name is whole: {whole:?}"
+    );
+    fixture.assert_rebuild_equal(6).await?;
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
+    fixture.cleanup().await
+}
+
+// Row 25f: an undo below the block whose observation filled a name's raw bytes restores the row
+// the undone block healed to `[labelhash]`, and spells it again from the kept preimage, as a
+// publication at the restored block reads the surface without the raw bytes.
+#[tokio::test]
+async fn an_undo_below_later_raw_bytes_heals_the_restored_name() -> Result<()> {
+    let fixture = Fixture::new("families_address_listing_late_raw_undo", 8).await?;
+    let (v, tld) = (labelhash("v"), labelhash("box"));
+    let held = unspelled(&fixture, "v.box", 1).await?;
+    fixture.apply(2, FamilyMode::Normal).await?;
+    observe_label(&fixture, 3, "v").await?;
+    preimage(&fixture, &v, "v").await?;
+    fixture.apply(3, FamilyMode::Normal).await?;
+    let healed = spelled(&fixture, &held).await?;
+    ensure!(healed == (format!("v.{}", placeholder(&tld)), vec![tld]));
+    fill_raw_bytes_at(&fixture, &held, "v.box", 6).await?;
+    let undone = families::undo_to(&fixture.pool, CHAIN, 2).await?;
+    ensure!(undone == 1, "undid {undone} blocks");
+    let restored = spelled(&fixture, &held).await?;
+    ensure!(
+        restored == healed,
+        "the undo spells the restored name from the kept preimage: {restored:?}"
+    );
+    fixture.assert_address_listing(CHAIN).await?;
+    fixture.cleanup().await
+}
+
 // Row 25c: an imported preimage is not chain data: the stored name keeps the placeholder, no
 // block journals a row for it, and the route serves the imported spelling at read (the oracle
 // allows exactly that difference).
