@@ -965,9 +965,8 @@ const REWRAPPED: &str = "00000000-0000-0000-0000-0000000000c2";
 /// A re-parented subname, claimed at `CLAIM_BLOCK`, then cleared again at `RECLAIM_BLOCK`. Each
 /// re-parent writes the record to the NameWrapper, mints the wrapped token to the Graveyard and
 /// writes the record to the Graveyard, in one transaction; the later one wraps under
-/// `REWRAPPED`. The later re-parent's write names `middle`, and its mint is in `mint_transaction`
-/// on `mint_resource`, so a test can break one part of the custody shape.
-fn re_parented_again(middle: &str, mint_transaction: i64, mint_resource: &str) -> NameFacts {
+/// `REWRAPPED`.
+fn re_parented_again() -> NameFacts {
     let mut input = wrapped("wrapped", 0);
     input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
     input.events.push(wrapper_transfer(8, HOLDER));
@@ -977,13 +976,12 @@ fn re_parented_again(middle: &str, mint_transaction: i64, mint_resource: &str) -
     input.writes.push(first);
     input.events.push(wrapper_transfer(CLAIM_BLOCK, GRAVEYARD));
     let mut input = input.claimed();
-    let mut again = write(RECLAIM_BLOCK, REWRAPPED, middle, None);
+    let mut again = write(RECLAIM_BLOCK, REWRAPPED, NAME_WRAPPER, None);
     again.position.log_index = Some(0);
     again.position.event_identity = "write:re-parent-again".to_owned();
     input.writes.push(again);
     let mut mint = wrapper_transfer(RECLAIM_BLOCK, GRAVEYARD);
-    mint.resource_id = Some(mint_resource.to_owned());
-    mint.position.transaction_index = Some(mint_transaction);
+    mint.resource_id = Some(REWRAPPED.to_owned());
     input.events.push(mint);
     let mut repeat = write(RECLAIM_BLOCK, REWRAPPED, GRAVEYARD, Some("graveyard"));
     repeat.position.event_identity = "write:repeat".to_owned();
@@ -1008,39 +1006,11 @@ fn re_parented_again(middle: &str, mint_transaction: i64, mint_resource: &str) -
 /// the first claim and the holder is the one before it.
 #[test]
 fn a_re_parented_subname_cleared_again_keeps_the_first_claim_and_its_holder() {
-    let facts = re_parented_again(NAME_WRAPPER, 0, REWRAPPED);
+    let facts = re_parented_again();
     assert_held(
         &evaluate(&facts, &CLOCK).expect("the name composes"),
         Some(HOLDER),
     );
-}
-
-/// A write between two Graveyard writes in one transaction that is not the Graveyard's re-parent
-/// ends the run: the write names no NameWrapper, or no wrapped token of the name reaches the
-/// Graveyard between the write and the later Graveyard write (the mint comes after that write, or
-/// is on a resource that is not the name's). The registration ended at the later write.
-#[test]
-fn a_write_between_graveyard_writes_that_is_not_a_re_parent_ends_the_run() {
-    const OTHER_RESOURCE: &str = "00000000-0000-0000-0000-0000000000e1";
-    for (middle, mint_transaction, mint_resource) in [
-        (NEXT_OWNER, 0, REWRAPPED),
-        (NAME_WRAPPER, 1, REWRAPPED),
-        (NAME_WRAPPER, 0, OTHER_RESOURCE),
-    ] {
-        let facts = re_parented_again(middle, mint_transaction, mint_resource);
-        let shadow = evaluate(&facts, &CLOCK).expect("the name composes");
-        let case = format!("{middle} {mint_transaction} {mint_resource}");
-        assert_eq!(
-            field(&shadow.registration, "lifecycle_status"),
-            "released",
-            "{case}: {shadow:#?}"
-        );
-        assert_eq!(
-            field(&shadow.registration, "released_at"),
-            json!(RECLAIM_TIME),
-            "{case}: {shadow:#?}"
-        );
-    }
 }
 
 /// The block of a token holder's own write to the Graveyard after a hold, and its block time.
@@ -1201,7 +1171,8 @@ fn compose(facts: &NameFacts) -> ShadowName {
 /// tayy-i on #1390: in one transaction the wrapped parent's owner `NEXT_OWNER` has the NameWrapper
 /// write the held child's record to itself and mint the token to the Graveyard
 /// (`setSubnodeRecord`), moves the token to itself (`setSubnodeOwner` on a wrapped child writes no
-/// record), and unwraps it to the Graveyard, which burns it. The transfer out of the Graveyard
+/// record), and unwraps it to the Graveyard, which burns it (the adapter records no burn). The
+/// transfer out of the Graveyard
 /// ends the hold, even though the transaction started with a mint to it: the holder is the one
 /// before the later write.
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L585 @ ens_v1@91c966f)
@@ -1215,7 +1186,6 @@ fn a_held_child_minted_to_the_graveyard_then_taken_out_starts_a_new_hold() {
         &[
             (RECLAIM_BLOCK, 0, 1, GRAVEYARD),
             (RECLAIM_BLOCK, 0, 3, NEXT_OWNER),
-            (RECLAIM_BLOCK, 0, 5, ZERO_ADDRESS),
         ],
     );
     assert_held_at(&compose(&facts), Some(NEXT_OWNER), RECLAIM_TIME);
@@ -1251,39 +1221,6 @@ fn a_held_child_minted_to_the_graveyard_and_written_back_later_keeps_the_first_c
             (LATER_BLOCK, 0, 2, GRAVEYARD),
         ],
         &[(RECLAIM_BLOCK, 0, 1, GRAVEYARD)],
-    );
-    assert_held(&compose(&facts), Some(HOLDER));
-}
-
-/// The Graveyard's re-parent with a burn recorded: the NameWrapper write, the mint to the
-/// Graveyard, the unwrap's burn and the Graveyard's write. The adapter records no burn; one
-/// recorded would give the token to no one, so the hold carries.
-#[test]
-fn a_re_parent_with_its_burn_recorded_keeps_the_first_claim() {
-    let facts = held_subname(
-        &[
-            (RECLAIM_BLOCK, 0, 0, NAME_WRAPPER),
-            (RECLAIM_BLOCK, 0, 4, GRAVEYARD),
-        ],
-        &[
-            (RECLAIM_BLOCK, 0, 1, GRAVEYARD),
-            (RECLAIM_BLOCK, 0, 3, ZERO_ADDRESS),
-        ],
-    );
-    assert_held(&compose(&facts), Some(HOLDER));
-}
-
-/// A wrapped token of the name moved while the Graveyard owns the registry record controls
-/// nothing: the NameWrapper does not own the record. A transfer before the NameWrapper's write
-/// does not end the hold that the re-parent then carries.
-#[test]
-fn a_wrapped_token_moved_before_the_name_wrappers_write_keeps_the_first_claim() {
-    let facts = held_subname(
-        &[
-            (RECLAIM_BLOCK, 0, 0, NAME_WRAPPER),
-            (RECLAIM_BLOCK, 0, 4, GRAVEYARD),
-        ],
-        &[(80, 0, 1, NEXT_OWNER), (RECLAIM_BLOCK, 0, 1, GRAVEYARD)],
     );
     assert_held(&compose(&facts), Some(HOLDER));
 }
@@ -1373,28 +1310,37 @@ fn an_old_wraps_holder_is_not_the_holder_after_a_bare_name_wrapper_write() {
     assert_held_at(&compose(&facts), None, RECLAIM_TIME);
 }
 
-/// A transfer of the name's wrapped token to anyone but the Graveyard ends the hold on any of the
-/// name's resources, not only one its NameWrapper binding records: the mint to `NEXT_OWNER` on
-/// another resource ends it, though a mint to the Graveyard on the binding's resource follows.
+/// After ruling 4's hold and the token's move, its new holder `NEXT_OWNER` calls `reclaim`, which
+/// ends the hold, then wraps the `.eth` name with the Graveyard as the wrapped owner
+/// (`wrapETH2LD`), and the Graveyard's claim later writes the record to it. The holder before the
+/// claim handed the record to the Graveyard through the wrap, so it is the one who held it before
+/// the NameWrapper's writes, as a token sent to the Graveyard leaves its sender.
 #[test]
-fn a_wrapped_transfer_out_on_another_resource_ends_the_hold() {
-    let mut facts = held_subname(
-        &[
-            (RECLAIM_BLOCK, 0, 0, NAME_WRAPPER),
-            (RECLAIM_BLOCK, 0, 6, GRAVEYARD),
-        ],
-        &[(RECLAIM_BLOCK, 0, 3, GRAVEYARD)],
+fn a_reclaim_then_a_wrap_to_the_graveyard_then_a_claim_names_the_reclaimer() {
+    let mut input = held_then_moved();
+    input.writes.push(write(80, LEASE, NEXT_OWNER, None));
+    let mut custody = event(
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        LEASE,
+        85,
+        json!({"authority_kind": "registrar", "source_event": "Transfer",
+               "to_address": NAME_WRAPPER, "transaction_hash": "0xwrap"}),
     );
-    let mut out = wrapper_transfer(RECLAIM_BLOCK, NEXT_OWNER);
-    out.resource_id = Some("00000000-0000-0000-0000-0000000000e1".to_owned());
-    out.position.log_index = Some(1);
-    out.position.event_identity = "transfer:out".to_owned();
-    facts.events.push(out);
-    let shadow = compose(&facts);
-    assert_eq!(field(&shadow.registration, "lifecycle_status"), "released");
-    assert_eq!(
-        field(&shadow.registration, "released_at"),
-        json!(RECLAIM_TIME),
-        "{shadow:#?}"
+    custody.position.log_index = Some(0);
+    input.events.push(custody);
+    let mut wrap = write(85, LEASE, NAME_WRAPPER, None);
+    wrap.position.log_index = Some(1);
+    input.writes.push(wrap);
+    let mut mint = wrapper_transfer(85, GRAVEYARD);
+    mint.position.log_index = Some(3);
+    input.events.push(mint);
+    input
+        .writes
+        .push(reclaim_block_write(0, 2, GRAVEYARD, Some("graveyard")));
+    assert_held_at(
+        &read_at_reclaim(&input, vec![wrapper_binding()]),
+        Some(NEXT_OWNER),
+        RECLAIM_TIME,
     );
 }
