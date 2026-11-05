@@ -3,7 +3,7 @@
 //! 2017 registry while it holds no record for the node, but that owner can write nothing, and
 //! the BaseRegistrar never minted the token, so the name is free to register.
 //! (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29-L35 @ ens_v1@91c966f)
-//! (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L18 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L19 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L103 @ ens_v1@91c966f)
 use super::*;
 

@@ -2611,7 +2611,7 @@ fn no_registration() -> Value {
 /// serves no registration, its row stands on no binding and no address is related to it, through
 /// a later write of the record, an undo and both rebuilds. A renewal in the record's own block
 /// and a later one each make the same record a registration.
-/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L18 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L19 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L103 @ ens_v1@91c966f)
 #[tokio::test]
 async fn a_record_only_the_2017_registry_holds_is_no_registration() -> Result<()> {

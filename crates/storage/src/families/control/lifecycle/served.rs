@@ -377,8 +377,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     // A cleared ENSv1 registry record does not end the BaseRegistrar lease: an ownerless name
     // with an implied lease serves it and its holder as owner, with no authority kind, registry
     // owner or manager.
-    let ownerless_unleased = selection.ownerless_registry && authority.implied_lease.is_none();
-    let status = if ownerless_unleased {
+    let unleased = super::unleased::of(facts, &authority, &selected, &tagged, &mut trace)?;
+    let status = if unleased {
         json!("unregistered")
     } else {
         match selected_kind {
@@ -421,9 +421,9 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     // the trace records that difference under its own cause.
     let v2_release = selected_kind == Some("RegistrationReleased") && is_v2;
     let mut unreleased = None;
-    if selection.ownerless_registry {
+    if selection.ownerless_registry || unleased {
         // The registrant is a lease field: the token holder the lease's registrar rows record.
-        let fields: &[&str] = if ownerless_unleased {
+        let fields: &[&str] = if unleased {
             &["authority_kind", "authority_key", "registrant", "expiry"]
         } else {
             &["authority_kind", "authority_key"]
@@ -432,8 +432,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             registration.insert((*field).into(), Value::Null);
         }
     }
-    if ownerless_unleased {
-        // The ownerless-registry profile without a lease serves no registration to lapse.
+    if unleased {
+        // A name that serves no registration has none to lapse.
     } else if selection.released_tombstone {
         registration.insert("authority_kind".into(), Value::Null);
         registration.insert("authority_key".into(), Value::Null);
@@ -513,7 +513,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             registration.get("authority_kind").and_then(Value::as_str),
             Some("registrar" | "registry_only")
         );
-    let serves_control = !(ownerless_unleased || selection.released_tombstone || v2_release);
+    let serves_control = !(unleased || selection.released_tombstone || v2_release);
     let lease_control = selection.ownerless_registry && serves_control;
     // The ownerless profile's zero registry owner names nobody.
     let owner = served_owner(facts, folded, owner_required && serves_control)?

@@ -658,7 +658,13 @@ selected binding, its authority kind and the registry owner stay as they were. A
 binding records a lease with registrar rows, a name with no binding outside the
 ownerless-registry profile, a wrapper-selected name, a name selected under ENSv2 and any name
 other than a `.eth` second-level name have no implied lease. A migrated name never renewed is
-released by its lease's schedule like any other lapsed `.eth` name.
+released by its lease's schedule like any other lapsed `.eth` name. A `.eth` second-level name
+selected through a registry-only binding whose node only the 2017 registry recorded, with no
+`ens_v1_registrar_l1` row of the name and no live ENSv2 entry, was never registered: the row
+serves `unregistered` with no registration or control field, no `owner`, `manager` or
+`authority`, stands on no binding and relates no address, and
+`provenance.authority_selection.old_record_without_lease` records why. The name's subnames keep
+their own registry records.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
