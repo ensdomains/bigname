@@ -247,10 +247,10 @@ pub(super) fn push_exact_node_mirror_writes_for_test(
 /// (chain, namespace and the addressed-node expression), behind `OFFSET 0`.
 ///
 /// The planner never reads a partial index's expression statistics, so it estimates the node
-/// equality at the default selectivity, thousands of rows for any node. Unfenced, a custom plan
-/// with the bound's block as a literal then preferred to walk the chain's rows newest first on
-/// `normalized_events_chain_block_number_desc_idx` and stop at the first match for `LIMIT 1`. For
-/// a node whose pointer is old that walk reads most of the chain. Inside the fence there is no
+/// equality at the default selectivity, a fixed fraction of the table for any node. Unfenced, a
+/// custom plan with the bound's block as a literal then preferred to walk the chain's rows newest
+/// first on `normalized_events_chain_block_number_desc_idx` and stop at the first match for
+/// `LIMIT 1`. For a node whose pointer is old that walk reads most of the chain. Inside the fence there is no
 /// `LIMIT`, so the inner is planned for all its rows, which the exact-fit index serves. The
 /// readability filter, the bound, the order and the `LIMIT` stay outside and still apply every
 /// term, so the selected pointer is the unfenced statement's. The registrar-grant lookup in
@@ -325,7 +325,7 @@ fn push_mirror_writes<'a>(
     push_readable_surface(builder, "surface", published);
     // The ENSv1 registry's resolver for the node at the bound: its latest registry-side pointer,
     // clears included, so a cleared node falls through to its ancestors. The pointer rows are read
-    // behind `REGISTRY_POINTER_FENCE`.
+    // through `registry_pointer_rows`.
     builder.push(format!(
         "
             JOIN LATERAL (

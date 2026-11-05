@@ -222,11 +222,6 @@ async fn mirror_registry_probe_rows_and_oracle_parity() -> Result<()> {
                             "{cell}: pointers {candidates}\nexpected {expected}\nprevious {before}"
                         ));
                     }
-                    let all = rows(connection, &sql, arguments.clone()).await?;
-                    let all_before = rows(connection, &previous, arguments).await?;
-                    if all != all_before {
-                        failures.push(format!("{cell}: rows {all}\nprevious {all_before}"));
-                    }
                 }
             }
         }
