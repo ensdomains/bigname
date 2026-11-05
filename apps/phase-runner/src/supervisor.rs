@@ -89,8 +89,6 @@ async fn supervise_chain(
         let started = Instant::now();
         let error = match runner.run_chain(chain, cancellation.clone()).await {
             Err(error) if error.is_retryable() && !cancellation.is_cancelled() => error,
-            // Waiting for that lock is not required work, so a stop during it is a clean stop.
-            Err(error) if error.is_held_at_start_up() => return Ok(()),
             result => return result,
         };
         // An attempt that ran past the longest delay was not a tight failure loop.
