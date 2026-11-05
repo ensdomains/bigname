@@ -2148,3 +2148,20 @@ custody_rows! {
     a_wrapped_child_moved_by_its_parent_is_released_to_the_new_holder: a_wrapped_child_moved_by_its_parent_is_released_to_the_new_holder_serves, a_wrapped_child_moved_by_its_parent_is_released_to_the_new_holder_trace;
     a_subname_cleared_to_zero_names_no_holder: a_subname_cleared_to_zero_names_no_holder_serves, a_subname_cleared_to_zero_names_no_holder_trace;
 }
+
+/// A wrapped subname moved and unwrapped and never written to the Graveyard is not held. The
+/// pass over its custody events finds no claim, and the read skips the pass, since only a
+/// registry write sets the record and its latest one names an ordinary owner.
+#[test]
+fn a_name_never_written_to_the_graveyard_skips_the_pass_and_is_untouched() {
+    let facts = subname().handed_off_at(40).facts(&then(
+        &WRAP,
+        &[
+            Transfer(30, 0, 1, WRAPPED, NEXT_OWNER),
+            Write(40, 0, 1, MANAGER),
+        ],
+    ));
+    assert!(super::fold(&facts).is_some_and(|fold| fold.claim.is_none()));
+    assert!(super::claim(&facts).is_none());
+    assert_not_held(&evaluate(&facts, &CLOCK).expect("the name composes"));
+}

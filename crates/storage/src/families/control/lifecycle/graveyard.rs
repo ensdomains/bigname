@@ -20,7 +20,10 @@
 //! (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
 //! (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f)
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound,
+};
 
 use serde_json::{Map, Value, json};
 
@@ -36,9 +39,20 @@ use crate::families::control::{
 /// ENSv2 after the claim serves that registration instead. A migrated name's record is the
 /// Graveyard's from its migration, which `clear` never claims, so that write is no claim even
 /// where the name falls back to its ENSv1 arm.
+///
+/// Only a registry write sets the record, so the Graveyard holds it only when the node's latest
+/// registry write names it. Every other name skips the pass.
 fn claim(facts: &NameFacts) -> Option<Fold<'_>> {
     if facts.input.selection.authority_arm.as_deref() != Some("ens_v1") || facts.migration.is_some()
     {
+        return None;
+    }
+    let held = facts
+        .registry_node
+        .as_ref()
+        .and_then(|node| node.latest_transfer())
+        .is_some_and(OwnerEvent::graveyard_held);
+    if !held {
         return None;
     }
     fold(facts).filter(|fold| fold.claim.is_some())
@@ -387,11 +401,12 @@ fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
                             _ => None,
                         })
                         .filter(|(_, mint)| {
-                            !owner_logs.iter().any(|&(block, tx, log)| {
-                                (block, tx) == transaction(&write.position)
-                                    && log > write.position.log_index
-                                    && log < mint.position.log_index
-                            })
+                            let (from, to) = (place(&write.position), place(&mint.position));
+                            from >= to
+                                || owner_logs
+                                    .range((Bound::Excluded(from), Bound::Excluded(to)))
+                                    .next()
+                                    .is_none()
                         });
                     if let Some((at, mint)) = mint {
                         consumed = Some(at);
