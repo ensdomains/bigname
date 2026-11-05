@@ -2212,7 +2212,12 @@ pub async fn prove_normal_sepolia_http(
     let mut runner = OwnedProofProcess::spawn(command, "ops-normal-run")?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
     loop {
-        if let Err(error) = runner.ensure_running() {
+        let health = match runner.ensure_running() {
+            // A chain that stops leaves the runner up, so the stop's log line is the signal.
+            Ok(()) => require_no_stopped_chain(&runner.logs, &db.pool, "ethereum-sepolia").await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = health {
             let captured: Result<PathBuf> = async {
                 let snapshot = std::env::temp_dir().join(format!(
                     "bigname-e2e-failed-normal-{}.json",
@@ -2426,6 +2431,37 @@ pub async fn prove_normal_sepolia_http(
     Ok(())
 }
 
+/// What the phase runner logs when a chain stops on a terminal error. The runner stays up, so a
+/// harness that waits on a runner reads this line to fail fast.
+pub const CHAIN_STOPPED_LINE: &str = "chain supervisor stopped after a terminal error";
+
+/// Whether any of `logs` holds [`CHAIN_STOPPED_LINE`]. A phase row is also `failed` while a
+/// retryable error backs off, so only this line marks a chain that stopped. A log not yet
+/// written counts as clean.
+pub fn chain_stopped_in<P: AsRef<Path>>(logs: &[P]) -> bool {
+    logs.iter()
+        .any(|path| std::fs::read_to_string(path).is_ok_and(|log| log.contains(CHAIN_STOPPED_LINE)))
+}
+
+async fn require_no_stopped_chain(
+    logs: &(PathBuf, PathBuf),
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<()> {
+    if !chain_stopped_in(&[&logs.0, &logs.1]) {
+        return Ok(());
+    }
+    let failed: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, last_error FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_status = 'failed'
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await?;
+    bail!("a {chain_id} chain stopped on a terminal error; failed phases {failed:?}; logs {logs:?}")
+}
+
 async fn proof_tables(pool: &sqlx::PgPool) -> Result<Vec<(String, Vec<String>)>> {
     let names: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'bigname_phase' ORDER BY tablename",
@@ -2531,6 +2567,28 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     use super::*;
+
+    #[test]
+    fn chain_stopped_in_finds_the_line_in_either_log() {
+        let directory =
+            std::env::temp_dir().join(format!("bigname-e2e-chain-stopped-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let (stdout, stderr) = (directory.join("stdout"), directory.join("stderr"));
+        assert!(
+            !chain_stopped_in(&[&stdout, &stderr]),
+            "missing logs are clean"
+        );
+        std::fs::write(&stdout, "phase-runner metrics listener started\n").unwrap();
+        std::fs::write(&stderr, "").unwrap();
+        assert!(!chain_stopped_in(&[&stdout, &stderr]));
+        std::fs::write(
+            &stderr,
+            format!("ERROR phase_runner::supervisor: {CHAIN_STOPPED_LINE} chain_id=x\n"),
+        )
+        .unwrap();
+        assert!(chain_stopped_in(&[&stdout, &stderr]));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     #[test]
     fn timeout_configuration_requires_positive_integer_seconds() {
