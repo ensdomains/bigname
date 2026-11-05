@@ -25,13 +25,15 @@ pub(crate) fn listing_eligible(coverage: &Value, summary: &Value) -> bool {
 /// an ownership record for the node
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
-/// `None` for Basenames, an unresolved selection, or an ownerless registry row without a lease.
-/// An ownerless registry row with an implied lease keeps its arm's value: the cleared registry
-/// record does not end the lease.
+/// `None` for Basenames, an unresolved selection, an ownerless registry row without a lease, or a
+/// `.eth` second-level name only the 2017 registry recorded with no BaseRegistrar row. An ownerless
+/// registry row with an implied lease keeps its arm's value: the cleared registry record does not
+/// end the lease.
 pub(crate) fn public_authority(provenance: &Value) -> Option<&'static str> {
     let selection = provenance.get("authority_selection")?;
-    if selection.get("ownerless_registry") == Some(&Value::Bool(true))
-        && !lease_without_registry_owner(provenance)
+    if selection.get("old_record_without_lease") == Some(&Value::Bool(true))
+        || selection.get("ownerless_registry") == Some(&Value::Bool(true))
+            && !lease_without_registry_owner(provenance)
     {
         return None;
     }

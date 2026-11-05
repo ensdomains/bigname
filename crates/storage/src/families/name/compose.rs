@@ -364,6 +364,12 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
     if selection.ownerless_registry && shadow.trace.contains_key("implied_lease") {
         authority_selection["lease_without_registry_owner"] = json!(true);
     }
+    // A record with no registration stands on no binding, as the unleased ownerless profile does:
+    // token, registration and permission readers all start from the row's binding.
+    let never_registered = shadow.trace.contains_key("never_registered");
+    if never_registered {
+        authority_selection["old_record_without_lease"] = json!(true);
+    }
     provenance.insert("authority_selection".into(), authority_selection);
     provenance.insert(
         "read_reachability".into(),
@@ -390,7 +396,7 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
 
     let publication = parts.publication;
     let (surface_binding_id, resource_id, binding_kind) = match binding {
-        Some(binding) if !mismatch => (
+        Some(binding) if !mismatch && !never_registered => (
             uuid(Some(&binding.surface_binding_id))?,
             uuid(Some(&binding.resource_id))?,
             binding

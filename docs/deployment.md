@@ -6304,3 +6304,22 @@ catalogue window.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
+
+## `.eth` names with no registration
+
+A `.eth` second-level name only the 2017 registry recorded, of which bigname holds no
+BaseRegistrar row and no live ENSv2 entry, is served `unregistered` with no `owner`, `manager` or
+`authority`, and leaves the address names of the 2017 record's owner (see `status` and `authority`
+in the [naming dictionary](api-v1.md#naming-dictionary)).
+
+- The composition change is in `crates/storage/src/families`, so the build rotates the
+  [projection content hash](glossary.md#projection-content-hash) for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next release that redoes Project and shares that release's
+  Project redo.
+- It needs no schema-migration. The stored summaries and address rows re-derive in the redo.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo.
