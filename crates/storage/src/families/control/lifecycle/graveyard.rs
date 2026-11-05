@@ -27,7 +27,7 @@ use std::{
 
 use serde_json::{Map, Value, json};
 
-use super::{NameFacts, NamePlace};
+use super::{NameFacts, NamePlace, admission::StagedName, served::Tagged};
 use crate::families::control::{
     position::Position,
     registry::{OwnerEvent, ZERO_ADDRESS},
@@ -42,7 +42,7 @@ use crate::families::control::{
 ///
 /// Only a registry write sets the record, so the Graveyard holds it only when the node's latest
 /// registry write names it. Every other name skips the pass.
-fn claim(facts: &NameFacts) -> Option<Fold<'_>> {
+fn claim<'a>(facts: &'a NameFacts, tagged: &[Tagged<'a>]) -> Option<Fold<'a>> {
     if facts.input.selection.authority_arm.as_deref() != Some("ens_v1") || facts.migration.is_some()
     {
         return None;
@@ -55,13 +55,14 @@ fn claim(facts: &NameFacts) -> Option<Fold<'_>> {
     if !held {
         return None;
     }
-    fold(facts).filter(|fold| fold.claim.is_some())
+    fold(facts, tagged).filter(|fold| fold.claim.is_some())
 }
 
 /// Serve a Graveyard-held name's registration as ended, with the holder [`fold`] names as the
 /// lapsed owner.
-pub(super) fn apply(
-    facts: &NameFacts,
+pub(super) fn apply<'a>(
+    facts: &'a NameFacts,
+    tagged: &[Tagged<'a>],
     registration: &mut Map<String, Value>,
     control: &mut Map<String, Value>,
 ) {
@@ -69,7 +70,7 @@ pub(super) fn apply(
         claim: Some(write),
         holder,
         ..
-    }) = claim(facts)
+    }) = claim(facts, tagged)
     else {
         return;
     };
@@ -131,7 +132,7 @@ impl Custody<'_> {
 /// whose NameWrapper authority a registry write ended (adapters `wrapper/transfer.rs`,
 /// `state.rs` `transfer_v1_wrapper_owner`), and the BaseRegistrar adapter records no transfer to
 /// or from zero (adapters `registrar/token_transfer.rs`).
-fn custody_events(facts: &NameFacts) -> Option<Custodies<'_>> {
+fn custody_events<'a>(facts: &'a NameFacts, tagged: &[Tagged<'a>]) -> Option<Custodies<'a>> {
     let node = facts.registry_node.as_ref()?;
     let registry = node.latest_transfer()?.source_family.as_str();
     let mut wrappers = BTreeSet::new();
@@ -179,15 +180,14 @@ fn custody_events(facts: &NameFacts) -> Option<Custodies<'_>> {
     }));
     if facts.input.place == NamePlace::EthSecondLevel {
         events.extend(
-            facts
-                .events
+            tagged
                 .iter()
-                .filter(|event| {
-                    event.source_family == "ens_v1_registrar_l1"
-                        && lease_recipient(event).is_some()
-                        && super::staged_as_own(facts, event)
+                .filter(|tagged| {
+                    tagged.staged == StagedName::Ours
+                        && tagged.event.source_family == "ens_v1_registrar_l1"
+                        && lease_recipient(tagged.event).is_some()
                 })
-                .map(Custody::Lease),
+                .map(|tagged| Custody::Lease(tagged.event)),
         );
     }
     events.sort_by(|left, right| left.position().cmp(right.position()));
@@ -317,12 +317,12 @@ struct Fold<'a> {
 /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L228-L306 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
-fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
+fn fold<'a>(facts: &'a NameFacts, tagged: &[Tagged<'a>]) -> Option<Fold<'a>> {
     let Custodies {
         events,
         name_wrappers,
         owner_logs,
-    } = custody_events(facts)?;
+    } = custody_events(facts, tagged)?;
     let graveyard = events.iter().rev().find_map(|event| match event {
         Custody::Write(write) if write.graveyard_held() => write.owner_getter.as_deref(),
         _ => None,
@@ -475,7 +475,16 @@ fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
 /// write.
 #[cfg(test)]
 pub(super) fn trace(facts: &NameFacts) -> Vec<(Position, Option<String>)> {
-    fold(facts).map(|fold| fold.trace).unwrap_or_default()
+    fold(facts, &tagged(facts))
+        .map(|fold| fold.trace)
+        .unwrap_or_default()
+}
+
+/// The name's retained events with the names the staging passes give them, as the read tags
+/// them.
+#[cfg(test)]
+fn tagged(facts: &NameFacts) -> Vec<Tagged<'_>> {
+    super::served::tag(facts, &super::served::authority_of(facts))
 }
 
 #[cfg(test)]

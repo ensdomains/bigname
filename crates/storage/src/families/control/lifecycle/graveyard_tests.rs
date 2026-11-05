@@ -2161,7 +2161,8 @@ fn a_name_never_written_to_the_graveyard_skips_the_pass_and_is_untouched() {
             Write(40, 0, 1, MANAGER),
         ],
     ));
-    assert!(super::fold(&facts).is_some_and(|fold| fold.claim.is_none()));
-    assert!(super::claim(&facts).is_none());
+    let tagged = super::tagged(&facts);
+    assert!(super::fold(&facts, &tagged).is_some_and(|fold| fold.claim.is_none()));
+    assert!(super::claim(&facts, &tagged).is_none());
     assert_not_held(&evaluate(&facts, &CLOCK).expect("the name composes"));
 }
