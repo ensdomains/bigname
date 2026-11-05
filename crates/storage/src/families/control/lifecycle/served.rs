@@ -590,7 +590,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         );
     }
     super::canonical::apply(facts, &tagged, clock, &mut registration, &mut trace)?;
-    super::graveyard::apply(facts, registrant, &mut registration, &mut control);
+    super::graveyard::apply(facts, registrant, &trace, &mut registration, &mut control);
     released_control(&registration, &mut control, lease_control);
     Ok(ShadowName {
         registration,

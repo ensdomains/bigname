@@ -1345,15 +1345,17 @@ schedule. For a name on the `ens_v1` arm whose node's newest current-registry
 `lifecycle_status` and `status` `released`, a null expiry with `expires_at_reason` `released`,
 no grace deadline, no `ens_v1_expiry`, no registrant and no control owner, registry owner or
 expiry. Its `lapsed_registration` names the holder before the claim, with `released_at` the
-block time of that write and `release_kind` `expired`. The holder is the registrant the lease
-laterals found, before the NameWrapper expiry mask. A name with none takes the owner reported
-by its newest registry write before the claim's transaction. When that owner is the NameWrapper,
-it takes the recipient of the wrapped token's last NameWrapper transfer before the claim's
-transaction that is not zero, the Graveyard or the NameWrapper: a cleared wrapped subname's
-registry write ends the NameWrapper authority and selects a registry-only binding, whose
-laterals read no NameWrapper event. The rule needs only
-the registry write. The claim's sentinel `NameRegistered` stays the unretained historical
-cleanup row (`graveyard_cleanup`), never a lease. It applies to a claimed `.eth` second-level
+block time of that write and `release_kind` `expired`. The holder is the one as it stood just
+before the write, by position, so an earlier write of the claim's own transaction counts. It is
+the registrant the lease laterals found, before the NameWrapper expiry mask, when that was found
+before the write. Otherwise it is the BaseRegistrar token's last grant or transfer recipient
+before the write that is not zero or the Graveyard, unless the token is in the NameWrapper.
+Otherwise it is the owner reported by the newest registry write before it. When that owner is
+the NameWrapper, it is the recipient of the wrapped token's last NameWrapper transfer before the
+write that is not the Graveyard: a cleared wrapped subname's registry write ends the NameWrapper
+authority and selects a registry-only binding, whose laterals read no NameWrapper event. The
+release itself needs only the registry write. The claim's sentinel `NameRegistered` stays the
+unretained historical cleanup row (`graveyard_cleanup`), never a lease. It applies to a claimed `.eth` second-level
 name and to a cleared subname alike. A name on the `ens_v2` arm is not read by it: a label
 registered in ENSv2, before or after the claim, and a migrated name, whose ENSv1 record the
 migration hands to the Graveyard, are served by their ENSv2 registration. The stored name
