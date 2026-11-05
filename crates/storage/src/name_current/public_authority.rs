@@ -136,6 +136,11 @@ mod tests {
                        "ownerless_registry": true, "lease_without_registry_owner": true}),
                 Some("ens_v1"),
             ),
+            (
+                json!({"authority_arm": "ens_v1", "registry_generation": "old",
+                       "old_record_without_lease": true}),
+                None,
+            ),
         ] {
             assert_eq!(
                 name_current_public_authority(&json!({"authority_selection": selection})),

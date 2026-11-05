@@ -279,4 +279,6 @@ pub(crate) fn staged_as_own(facts: &NameFacts, event: &rows::LifecycleEvent) -> 
 #[cfg(test)]
 mod implied_lease_tests;
 #[cfg(test)]
+mod never_registered_tests;
+#[cfg(test)]
 mod place_tests;

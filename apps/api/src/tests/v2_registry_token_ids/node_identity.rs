@@ -7,6 +7,8 @@ use alloy_primitives::B256;
 
 #[path = "node_identity/dense_prefix.rs"]
 mod dense_prefix;
+#[path = "node_identity/never_registered.rs"]
+mod never_registered;
 
 mod events {
     use super::*;
@@ -258,35 +260,41 @@ async fn detail(database: &TestDatabase, labels: &[&[u8]]) -> Result<Value> {
         .clone())
 }
 
+/// The Mainnet registry and resolver manifests. The admission helper moves intake bounds to this
+/// fixture's block range. Project's resolver classifier reads declaration bounds from the
+/// manifest-sync payload as well.
+async fn admit_registry_and_resolvers(database: &TestDatabase) -> Result<(Value, Value)> {
+    let registry =
+        admit_family_from(database, "mainnet", CHAIN, "ens_v1_registry_l1", 2281).await?;
+    let mut resolvers =
+        admit_family_from(database, "mainnet", CHAIN, "ens_v1_resolver_l1", 2282).await?;
+    for contract in resolvers["contracts"].as_array_mut().unwrap() {
+        contract["start_block"] = json!(0);
+    }
+    sqlx::query("UPDATE manifest_versions SET manifest_payload=$2 WHERE manifest_id=$1")
+        .bind(2282_i64)
+        .bind(&resolvers)
+        .execute(&database.pool)
+        .await?;
+    seed_fixture_manifest_update(
+        &database.pool,
+        2282,
+        CHAIN,
+        "ens",
+        "ens_v1_resolver_l1",
+        &resolvers,
+    )
+    .await?;
+    Ok((registry, resolvers))
+}
+
 #[tokio::test]
 async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes() -> Result<()> {
     let mut expected = None;
     // One Interpret range, warm per-block continuation, and cold per-block restore.
     for shape in ["range", "warm", "cold"] {
         let database = TestDatabase::new_migrated().await?;
-        let registry =
-            admit_family_from(&database, "mainnet", CHAIN, "ens_v1_registry_l1", 2281).await?;
-        let mut resolvers =
-            admit_family_from(&database, "mainnet", CHAIN, "ens_v1_resolver_l1", 2282).await?;
-        // The admission helper moves intake bounds to this fixture's block range. Project's
-        // resolver classifier reads declaration bounds from the manifest-sync payload as well.
-        for contract in resolvers["contracts"].as_array_mut().unwrap() {
-            contract["start_block"] = json!(0);
-        }
-        sqlx::query("UPDATE manifest_versions SET manifest_payload=$2 WHERE manifest_id=$1")
-            .bind(2282_i64)
-            .bind(&resolvers)
-            .execute(&database.pool)
-            .await?;
-        seed_fixture_manifest_update(
-            &database.pool,
-            2282,
-            CHAIN,
-            "ens",
-            "ens_v1_resolver_l1",
-            &resolvers,
-        )
-        .await?;
+        let (registry, resolvers) = admit_registry_and_resolvers(&database).await?;
         let current = role_address(&registry, "registry");
         let old = role_address(&registry, "registry_old");
         let resolver = role_address(&resolvers, "public_resolver");

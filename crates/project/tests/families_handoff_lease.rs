@@ -2595,3 +2595,193 @@ async fn a_zero_registry_owner_serves_the_lease_holder() -> Result<()> {
     fixture.assert_rebuild_equal(5).await?;
     fixture.cleanup().await
 }
+
+/// What a name that serves no registration composes.
+fn no_registration() -> Value {
+    json!({"status": "unregistered", "lifecycle_status": "unregistered",
+           "control_status": "unregistered", "registered_at": Value::Null,
+           "expires_at": Value::Null, "resource_id": Value::Null,
+           "authority_kind": Value::Null, "registrant": Value::Null, "owner": Value::Null,
+           "registry_owner": Value::Null, "manager": Value::Null,
+           "summary_owner": Value::Null, "public_authority": Value::Null})
+}
+
+/// A name only the 2017 registry recorded has a registry record and no registration: the node
+/// never had a BaseRegistrar row, and its owner can write nothing in the current registry. It
+/// serves no registration, its row stands on no binding and no address is related to it, through
+/// a later write of the record, an undo and both rebuilds. A renewal in the record's own block
+/// and a later one each make the same record a registration.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L18 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L103 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_record_only_the_2017_registry_holds_is_no_registration() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_never_registered", 8).await?;
+    let never = surface(&fixture, "never.eth").await?;
+    let resource = handoff(&fixture, &never, 1, 1, true).await?;
+    owner_write(&fixture, &never, &resource, 4, 3, OTHER, true).await?;
+
+    let same_block = surface(&fixture, "sameblock.eth").await?;
+    let same_block_lease = uuid(0x1002);
+    handoff(&fixture, &same_block, 2, 1, true).await?;
+    let grant = json!(LEASE_EXPIRY);
+    renewal(
+        &fixture,
+        &same_block,
+        &same_block_lease,
+        1,
+        50,
+        grant.clone(),
+        true,
+    )
+    .await?;
+
+    let renewed = surface(&fixture, "renewed.eth").await?;
+    let renewed_lease = uuid(0x1003);
+    handoff(&fixture, &renewed, 3, 1, true).await?;
+    renewal(&fixture, &renewed, &renewed_lease, 3, 1, grant, true).await?;
+
+    fixture.assert_undo_restores(4).await?;
+    fixture.apply(6, FamilyMode::Normal).await?;
+    let row = load_family_name(&fixture.pool, &never)
+        .await?
+        .context("the name keeps its composed row")?;
+    ensure!(
+        row.surface_binding_id.is_none() && row.resource_id.is_none(),
+        "{row:?}"
+    );
+    check(&served(&fixture, &never).await?, no_registration())?;
+    for lease in [(&same_block, &same_block_lease), (&renewed, &renewed_lease)] {
+        check(
+            &served(&fixture, lease.0).await?,
+            json!({"status": "active", "resource_id": lease.1, "public_authority": "ens_v0",
+                   "owner": OWNER, "ens_v1_expiry": LEASE_EXPIRY.to_string()}),
+        )?;
+    }
+    let related = fixture.rows("project_address_name_index").await?;
+    ensure!(
+        !related
+            .iter()
+            .any(|row| row["logical_name_id"] == never.as_str()),
+        "{related:#?}"
+    );
+    fixture.assert_rebuild_equal(6).await?;
+    fixture.cleanup().await
+}
+
+/// A lease that lapsed under a record only the 2017 registry holds is a registration that ended,
+/// which is released with its holder, not a name that never had one.
+#[tokio::test]
+async fn a_lapsed_lease_under_a_2017_record_stays_released() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_old_lapsed", 8).await?;
+    let lapsed = block_time(4) - 90 * DAY - 1;
+    let name = surface(&fixture, "mijin.eth").await?;
+    let lease = uuid(0x1001);
+    handoff(&fixture, &name, 1, 1, true).await?;
+    renewal(&fixture, &name, &lease, 2, 1, json!(lapsed), true).await?;
+    transfer(&fixture, &name, &lease, 3, 1, HOLDER).await?;
+    release(&fixture, &name, &lease, 4, json!(lapsed), HOLDER).await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"status": "released", "lapsed_owner": HOLDER, "owner": Value::Null,
+               "manager": Value::Null}),
+    )?;
+    fixture.assert_rebuild_equal(5).await?;
+    fixture.cleanup().await
+}
+
+/// A registration directly in ENSv2 selects its own arm over a 2017 record, and a live
+/// reservation keeps the ENSv1 arm: both are allocations, so neither name loses one.
+#[tokio::test]
+async fn a_live_ens_v2_entry_over_a_2017_record_keeps_its_answer() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_old_with_entry", 8).await?;
+    declared_path::root_eth_entry(&fixture).await?;
+
+    let direct = surface(&fixture, "direct.eth").await?;
+    handoff(&fixture, &direct, 1, 1, true).await?;
+    let entry = uuid(0x2001);
+    fixture
+        .binding(&uuid(0x301), &direct, &entry, "ens_v2", 2, 10, None)
+        .await?;
+    fixture
+        .write(
+            2,
+            10,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            Some(&direct),
+            Some(&entry),
+            json!({"registry_contract_instance_id": GENERIC.instance, "token_id": "1",
+                   "status": "registered", "registrant": HOLDER, "owner": HOLDER,
+                   "expiry": RESERVED_EXPIRY}),
+            GENERIC.address,
+        )
+        .await?;
+
+    let held = surface(&fixture, "held.eth").await?;
+    handoff(&fixture, &held, 2, 1, true).await?;
+    reserved(&fixture, &held, &uuid(0x2002), 2, 20, RESERVED_EXPIRY).await?;
+
+    fixture.apply(3, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &direct).await?,
+        json!({"status": "active", "public_authority": "ens_v2", "owner": HOLDER,
+               "expires_at": RESERVED_EXPIRY}),
+    )?;
+    check(
+        &served(&fixture, &held).await?,
+        json!({"status": "active", "public_authority": "ens_v0", "owner": OWNER,
+               "expires_at": RESERVED_EXPIRY}),
+    )?;
+    fixture.assert_rebuild_equal(3).await?;
+    fixture.cleanup().await
+}
+
+/// A released ENSv2 entry over a 2017 record keeps the ENSv2 tombstone: the entry was a
+/// registration, and its release says when it ended.
+#[tokio::test]
+async fn a_released_ens_v2_entry_over_a_2017_record_keeps_its_tombstone() -> Result<()> {
+    let fixture = Fixture::new("families_handoff_lease_old_released_entry", 8).await?;
+    declared_path::root_eth_entry(&fixture).await?;
+    let name = surface(&fixture, "ended.eth").await?;
+    handoff(&fixture, &name, 1, 1, true).await?;
+    let entry = uuid(0x2001);
+    fixture
+        .binding(&uuid(0x301), &name, &entry, "ens_v2", 2, 10, Some(3))
+        .await?;
+    fixture
+        .write(
+            2,
+            10,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            Some(&name),
+            Some(&entry),
+            json!({"registry_contract_instance_id": GENERIC.instance, "token_id": "1",
+                   "status": "registered", "registrant": HOLDER, "owner": HOLDER,
+                   "expiry": RESERVED_EXPIRY}),
+            GENERIC.address,
+        )
+        .await?;
+    fixture
+        .write(
+            3,
+            10,
+            "RegistrationReleased",
+            "ens_v2_registry_l1",
+            Some(&name),
+            Some(&entry),
+            json!({"registry_contract_instance_id": GENERIC.instance, "token_id": "1",
+                   "source_event": "LabelUnregistered", "status": "released"}),
+            GENERIC.address,
+        )
+        .await?;
+    fixture.apply(4, FamilyMode::Normal).await?;
+    check(
+        &served(&fixture, &name).await?,
+        json!({"status": "released", "public_authority": "ens_v2", "owner": Value::Null,
+               "lapsed_owner": HOLDER}),
+    )?;
+    fixture.assert_rebuild_equal(4).await?;
+    fixture.cleanup().await
+}
