@@ -1346,11 +1346,12 @@ schedule. For a name on the `ens_v1` arm whose node's newest current-registry
 no grace deadline, no `ens_v1_expiry`, no registrant and no control owner, registry owner or
 expiry. Its `lapsed_registration` names the holder before the claim, with `released_at` the
 block time of that write and `release_kind` `expired`. The holder is the registrant the lease
-laterals found, before the NameWrapper expiry mask. A name with none takes the token holder its
-NameWrapper events name last before the claim's transaction, since a cleared wrapped subname's
-registry write ends the NameWrapper authority and selects a registry-only binding. A name with
-neither takes the owner reported by the newest earlier registry write, unless that is the
-NameWrapper. The rule needs only
+laterals found, before the NameWrapper expiry mask. A name with none takes the owner reported
+by its newest registry write before the claim's transaction. When that owner is the NameWrapper,
+it takes the recipient of the wrapped token's last NameWrapper transfer before the claim's
+transaction that is not zero, the Graveyard or the NameWrapper: a cleared wrapped subname's
+registry write ends the NameWrapper authority and selects a registry-only binding, whose
+laterals read no NameWrapper event. The rule needs only
 the registry write. The claim's sentinel `NameRegistered` stays the unretained historical
 cleanup row (`graveyard_cleanup`), never a lease. It applies to a claimed `.eth` second-level
 name and to a cleared subname alike. A name on the `ens_v2` arm is not read by it: a label

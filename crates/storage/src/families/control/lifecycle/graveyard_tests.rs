@@ -525,11 +525,12 @@ fn a_cleared_wrapped_subname_is_released() {
 /// a locked parent. In one transaction the Graveyard has the NameWrapper re-parent the token to
 /// it, which writes the registry record to the NameWrapper and moves the token to the Graveyard,
 /// then unwraps it to itself. Neither the Graveyard nor the NameWrapper is a holder. The holder
-/// is the one the wrapper events name before the claim's transaction: the wrap's.
+/// is the recipient of the NameWrapper's last transfer before the claim's transaction: the wrap's.
 #[test]
 fn a_re_parented_wrapped_subname_is_released_with_its_token_holder() {
     let mut input = wrapped("wrapped", 0);
     input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+    input.events.push(wrapper_transfer(8, HOLDER));
     input.events.push(event(
         "TokenControlTransferred",
         "ens_v1_wrapper_l1",
@@ -751,34 +752,96 @@ fn a_held_name_with_no_candidate_has_no_arm_and_is_untouched() {
     assert_same_registration(&claimed, &unclaimed);
 }
 
+/// A NameWrapper transfer of the wrapped token `WRAPPED` to `to`, the shape the NameWrapper's
+/// `NameWrapped` and transfers take (adapters `wrapper.rs`).
+fn wrapper_transfer(block: i64, to: &str) -> LifecycleEvent {
+    event(
+        "TokenControlTransferred",
+        "ens_v1_wrapper_l1",
+        WRAPPED,
+        block,
+        json!({"authority_kind": "wrapper", "source_event": "TransferSingle", "to_address": to}),
+    )
+}
+
+/// A wrapped subname whose NameWrapper binding closed at `closed`, with the registry-only
+/// binding a registry write naming someone other than the NameWrapper opened then at `block`
+/// (adapters `wrapper_custody.rs`, `keeps_authority`), and the registry's NameWrapper record
+/// until then. Selection picks the registry-only binding, as in production.
+fn handed_off(
+    block: i64,
+    opened: i64,
+    registry_only_flag: bool,
+    transfers: &[(i64, &str)],
+) -> Name {
+    let mut input = wrapped("wrapped", 0);
+    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+    input.events.push(wrapper_transfer(8, HOLDER));
+    for (at, to) in transfers {
+        input.events.push(wrapper_transfer(*at, to));
+    }
+    let mut registry_only = binding(
+        REGISTRY_ONLY,
+        block,
+        json!({"state_derived": true, "registry_only": registry_only_flag,
+               "predecessor_resource_id": WRAPPED,
+               "surface_bound_position": {"block_number": block, "transaction_index": 0,
+                                          "log_index": 2, "event_identity": "surface-bound"}}),
+    );
+    registry_only.active_from_seconds = Some(opened as f64);
+    input.binding = registry_only;
+    input
+}
+
+/// The composed reader's selection over the NameWrapper binding, closed at `closed`, and the
+/// registry-only binding.
+fn select_handed_off(input: Name, closed: i64) -> (Option<String>, ShadowName) {
+    let mut wrapper = wrapper_binding();
+    wrapper.active_from_seconds = Some(1_500_000_000.0);
+    wrapper.active_to_seconds = Some(closed as f64);
+    let mut facts = input.facts();
+    facts.candidates = vec![wrapper, facts.candidates[0].clone()];
+    selected(facts)
+}
+
 /// Row 11, handed off (Codex P2 on #1390): a wrapped subname whose token survives, cleared by the
 /// Graveyard's `setSubnodeRecord`. The write names the Graveyard, not the NameWrapper, so it ends
-/// the NameWrapper authority and opens a registry-only binding at the claim
-/// (adapters `wrapper_custody.rs`, `keeps_authority`), which selection picks, as in production.
-/// The lapsed owner is the token holder the wrapper events name before the claim, never the
-/// NameWrapper or the Graveyard. Each registry-only flag a handoff binding can carry.
+/// the NameWrapper authority and opens a registry-only binding at the claim. The lapsed owner is
+/// the recipient of the NameWrapper's last transfer before the claim, never the NameWrapper or
+/// the Graveyard: the wrap's, a later holder's, or, for a token its holder sent to the Graveyard
+/// before the claim, the sender's. Each registry-only flag a handoff binding can carry.
 #[test]
 fn a_cleared_wrapped_subname_handed_to_a_registry_only_binding_keeps_its_token_holder() {
-    for handoff in [true, false] {
-        let mut wrapper = wrapper_binding();
-        wrapper.active_from_seconds = Some(1_500_000_000.0);
-        wrapper.active_to_seconds = Some(CLAIM_TIME as f64);
-        let mut registry_only = binding(
-            REGISTRY_ONLY,
-            CLAIM_BLOCK,
-            json!({"state_derived": true, "registry_only": handoff,
-                   "predecessor_resource_id": WRAPPED,
-                   "surface_bound_position": {"block_number": CLAIM_BLOCK, "transaction_index": 0,
-                                              "log_index": 2, "event_identity": "surface-bound"}}),
-        );
-        registry_only.active_from_seconds = Some(CLAIM_TIME as f64);
-        let mut input = wrapped("wrapped", 0);
-        input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-        input.binding = registry_only;
-        let mut facts = input.claimed().facts();
-        facts.candidates = vec![wrapper, facts.candidates[0].clone()];
-        let (arm, shadow) = selected(facts);
-        assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {handoff}");
-        assert_held(&shadow, Some(HOLDER));
+    let cases: [(&[(i64, &str)], &str); 3] = [
+        (&[], HOLDER),
+        (&[(30, NEXT_OWNER)], NEXT_OWNER),
+        (&[(40, GRAVEYARD)], HOLDER),
+    ];
+    for flag in [true, false] {
+        for (transfers, holder) in cases {
+            let input = handed_off(CLAIM_BLOCK, CLAIM_TIME, flag, transfers).claimed();
+            let (arm, shadow) = select_handed_off(input, CLAIM_TIME);
+            assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {flag}");
+            assert_held(&shadow, Some(holder));
+        }
+    }
+}
+
+/// A wrapped subname unwrapped to `NEXT_OWNER` (or its record overwritten by the parent's
+/// `setSubnodeOwner`, which leaves the same facts), then cleared: the registry record was not the
+/// NameWrapper's when the Graveyard claimed it, so the holder is the owner its last registry write
+/// named, not the wrap's recipient.
+#[test]
+fn an_unwrapped_subname_cleared_later_keeps_its_registry_owner() {
+    const UNWRAP_BLOCK: i64 = 20;
+    const UNWRAP_TIME: i64 = 1_700_000_000;
+    for flag in [true, false] {
+        let mut input = handed_off(UNWRAP_BLOCK, UNWRAP_TIME, flag, &[]);
+        input
+            .writes
+            .push(write(UNWRAP_BLOCK, REGISTRY_ONLY, NEXT_OWNER, None));
+        let (arm, shadow) = select_handed_off(input.claimed(), UNWRAP_TIME);
+        assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {flag}");
+        assert_held(&shadow, Some(NEXT_OWNER));
     }
 }
