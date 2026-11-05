@@ -154,7 +154,7 @@ async fn check_plans(connection: &mut PgConnection) -> Result<()> {
             label: "respell keys",
             sql: address_listing_respell_sql(KEY_TARGET),
             arguments: chain_and_keys,
-            scans: &[("project_address_listing", "listing", &[KEY])],
+            scans: &[("project_address_listing", "listing", &[KEY, NAME_WORK])],
         },
         Check {
             label: "leads",

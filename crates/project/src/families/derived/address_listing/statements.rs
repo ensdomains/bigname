@@ -36,7 +36,8 @@ pub(super) const SCOPE: &str = "/* project:families.derived.address_listing_scop
 /// The names the block's lookup refresh composed (`lookup/work.rs`: the summary work list, the
 /// address fold and controller candidate keys, the named resource pointers, the resolution path
 /// work and the admission sweep) and the ids its index refresh touched, `$1`, that the summary
-/// refresh did not stage.
+/// refresh did not stage. No listing column reads the resolution path, so a staged name the
+/// resolution path refresh composes again keeps its staged rows.
 pub(super) const EXTRA: &str = "/* project:families.derived.address_listing_extra */
     SELECT DISTINCT extra.id
     FROM (SELECT work.logical_name_id AS id FROM pg_temp.bigname_lookup_name_work work
@@ -186,8 +187,10 @@ pub(super) const DELETE: &str = "/* project:families.derived.address_listing_del
 
 pub(super) const INSERT: &str = "/* project:families.derived.address_listing_insert */
     INSERT INTO project_address_listing
-    SELECT (jsonb_populate_record(NULL::project_address_listing, change.after_image)).*
+    SELECT written.*
     FROM pg_temp.bigname_address_listing_change change
+    CROSS JOIN LATERAL jsonb_populate_record(NULL::project_address_listing, change.after_image)
+        AS written
     WHERE change.after_image IS NOT NULL";
 
 /// The (address, resource) groups the changes touched, before and after, for the lead step.
