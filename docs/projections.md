@@ -1347,16 +1347,24 @@ no grace deadline, no `ens_v1_expiry`, no registrant and no control owner, regis
 expiry. Its `lapsed_registration` names the holder before the claim, with `released_at` the
 block time of that write and `release_kind` `expired`. The write is the first of the node's
 trailing run of Graveyard writes, since `clear` writes a subname of a name it holds again each time
-it runs. Only the Graveyard's repeated re-parent of a held subname keeps the run going: a write
-naming the NameWrapper between two Graveyard writes, followed by the later one in its own
-transaction, which also moves the name's wrapped token to the Graveyard. Any other write between
-them ends the run, such as a token holder's `reclaim` followed by its own write to the Graveyard
-in one transaction.
+it runs. Two Graveyard writes are one hold only when no one else controlled the record between
+them. The record's controller is its registry owner, or, while the NameWrapper owns it, the
+wrapped token's holder. So every write between them must name the name's NameWrapper, and from
+the first of those to the later Graveyard write every transfer of the name's wrapped token must
+go to the Graveyard, with at least one on a resource of its NameWrapper binding. That is the
+Graveyard's repeated re-parent of a held subname, in one transaction, or a parent or token holder
+wrapping the name to the Graveyard, across transactions. Any other write between them ends the
+hold, such as a token holder's `reclaim` or a parent's `setSubnodeOwner` naming anyone but the
+Graveyard, and so does any wrapped token transfer to anyone else, even one the same transaction
+reverses. The holder is then the one before the later write, and a NameWrapper's holder counts
+only from the NameWrapper's current run of registry writes. A BaseRegistrar token move writes no
+record and neither ends nor carries the hold.
 The holder is the one as it stood just before that write, by position, so an earlier write of the
 claim's own transaction counts. It is the registrant the lease laterals found, before
-the NameWrapper expiry mask, when that was found before the write and is not zero or the
-Graveyard. Otherwise it is the BaseRegistrar token's last grant or transfer recipient
-before the write that is not zero or the Graveyard, unless the token is in the NameWrapper.
+the NameWrapper expiry mask, when that was found before the write and is not zero, the
+Graveyard or the NameWrapper. Otherwise it is the BaseRegistrar token's last grant or transfer
+recipient before the write that is not zero or the Graveyard, unless the token is in the
+NameWrapper.
 Otherwise it is the owner reported by the newest registry write before it. When that owner is
 the NameWrapper, it is the recipient of the wrapped token's last NameWrapper transfer before the
 write that is not the Graveyard: a cleared wrapped subname's registry write ends the NameWrapper

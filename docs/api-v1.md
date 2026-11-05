@@ -2561,12 +2561,15 @@ Graveyard is served as an ended registration, whatever its lease or its schedule
 - `lapsed_registration.owner` is the name's holder as it stood just before the Graveyard's
   write: its lease's token holder, or the owner its registry record had, counting an earlier
   write in the same transaction. When that record was the NameWrapper's, it is the wrapped
-  token's holder. A token sent to the Graveyard before the write leaves its sender as the holder,
-  and a token moved after the write does not change it. `released_at` is the block time of the
+  token's holder: a NameWrapper that wrapped the name is never the holder. A token sent to the
+  Graveyard before the write leaves its sender as the holder, and a token moved after the write
+  does not change it. `released_at` is the block time of the
   write that gave the Graveyard the record. A later `clear` that writes it again changes neither.
-  A token holder's `reclaim` followed by its own write to the Graveyard, even in one transaction,
-  starts a new hold: the holder is that token holder, and `released_at` is that write's block
-  time. `release_kind` is `expired`.
+  Anyone else taking control of the record between two Graveyard writes starts a new hold, even
+  within one transaction: a token holder's `reclaim` or a parent's `setSubnodeOwner` naming anyone
+  but the Graveyard, or the wrapped token reaching anyone but the Graveyard. The holder is then
+  the one before the later write, and `released_at` is that write's block time. `release_kind`
+  is `expired`.
 
 `registered_at` and `registration_id` keep the registration that ended. A label later
 registered in ENSv2 serves that registration, as does a migrated name, whose ENSv1 record the

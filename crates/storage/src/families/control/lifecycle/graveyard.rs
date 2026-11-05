@@ -43,12 +43,9 @@ pub(super) fn claim(facts: &NameFacts) -> Option<&OwnerEvent> {
 /// The write that gave the Graveyard the node's record, when it still holds it: the first of the
 /// trailing run of current-registry owner writes naming it. `clear` writes a subname of a name it
 /// holds again each time it runs, for that subname or any name below it, and a holder's own write
-/// to the Graveyard can precede a clear. A repeated re-parent of a held subname writes the record
-/// to the NameWrapper and then to the Graveyard in one transaction ([`re_parent`]): that custody
-/// write between two Graveyard writes does not end the run. Any other write between them does,
-/// such as a token holder's `reclaim` followed by its own write to the Graveyard in one
-/// transaction. The registration ended at the first write of the run, and its holder is the one
-/// before that.
+/// to the Graveyard can precede a clear. Two Graveyard writes are one hold when the Graveyard
+/// controls the record without a break between them ([`carries`]): then the registration ended at
+/// the earlier one. The claim is the first write of the run, and its holder is the one before it.
 /// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
 /// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
 fn first_held(facts: &NameFacts) -> Option<&OwnerEvent> {
@@ -64,62 +61,86 @@ fn first_held(facts: &NameFacts) -> Option<&OwnerEvent> {
         .collect::<BTreeMap<_, _>>()
         .into_values()
         .collect();
-    let wrappers = name_wrappers(facts);
-    let mut first = None;
-    for (index, write) in writes.iter().enumerate().rev() {
-        if write.graveyard_held() {
-            first = Some(*write);
-            continue;
-        }
-        let custody = index
-            .checked_sub(1)
-            .is_some_and(|before| writes[before].graveyard_held())
-            && writes.get(index + 1).is_some_and(|next| {
-                next.graveyard_held() && re_parent(facts, &wrappers, write, next)
-            });
-        if !custody {
+    let mut claim = writes.len().checked_sub(1)?;
+    if !writes[claim].graveyard_held() {
+        return None;
+    }
+    while let Some(earlier) = (0..claim)
+        .rev()
+        .find(|index| writes[*index].graveyard_held())
+    {
+        if !carries(facts, &writes[earlier + 1..claim], writes[claim]) {
             break;
         }
+        claim = earlier;
     }
-    first
+    Some(writes[claim])
 }
 
-/// Whether `write`, followed in its own transaction by the Graveyard's write `next`, is the
-/// Graveyard's re-parent of a subname it holds under a locked parent: the NameWrapper's
-/// `setSubnodeRecord` with the Graveyard as owner writes the record to the NameWrapper and mints
-/// the wrapped token to the Graveyard, then `unwrap` writes the record to the Graveyard. So
-/// `write` names one of the name's NameWrappers, and that transaction moves the name's wrapped
-/// token to the Graveyard. A holder's own wrap and unwrap to the Graveyard in one transaction
-/// mints the token to the holder, and a `reclaim` names the token holder: neither is custody.
-/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596-L630 @ ens_v1@91c966f)
-fn re_parent(
-    facts: &NameFacts,
-    wrappers: &[&BindingCandidate],
-    write: &OwnerEvent,
-    next: &OwnerEvent,
-) -> bool {
-    let transaction = |position: &Position| (position.block_number, position.transaction_index);
-    let names = |address: Option<&str>, holder: &str| {
-        address.is_some_and(|address| address.eq_ignore_ascii_case(holder))
+/// Whether the Graveyard controlled the record without a break from its earlier write to its
+/// write `next`, given the registry writes `between` them. The invariant: a Graveyard hold carries
+/// across those writes only when no one else controlled the record in between. The record's
+/// controller is its registry owner, or, while the NameWrapper owns it, the wrapped token's
+/// holder. So the hold carries when every write between names one of the name's NameWrappers,
+/// and from the first of them to `next` every transfer of the name's wrapped token, on any of its
+/// resources, goes to the Graveyard, with at least one on a resource of its NameWrapper binding. Any write to anyone else (a `reclaim`,
+/// a parent's `setSubnodeOwner`) ends the hold, and so does any wrapped token transfer to anyone
+/// else, even one the same transaction reverses. The holder is then the one before `next`. A
+/// BaseRegistrar token move writes no record and controls nothing until a `reclaim` writes it, so
+/// it neither ends nor carries the hold.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L630 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L927-L948 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+fn carries(facts: &NameFacts, between: &[&OwnerEvent], next: &OwnerEvent) -> bool {
+    let Some(first) = between.first() else {
+        return true;
     };
-    let (Some(owner), Some(graveyard)) = (write.reported_owner(), next.owner_getter.as_deref())
-    else {
+    let Some(graveyard) = next.owner_getter.as_deref() else {
         return false;
     };
-    transaction(&write.position) == transaction(&next.position)
-        && wrappers
+    if !between.iter().all(|write| {
+        write
+            .reported_owner()
+            .is_some_and(|owner| name_wrapper(facts, &owner))
+    }) {
+        return false;
+    }
+    let wrappers = name_wrappers(facts);
+    let (from, to) = (place(&first.position), place(&next.position));
+    let mut to_graveyard = false;
+    let candidate = |event: &LifecycleEvent| {
+        wrappers
             .iter()
-            .any(|wrapper| names(wrapper.emitting_address.as_deref(), &owner))
-        && facts.events.iter().any(|event| {
-            event.source_family == "ens_v1_wrapper_l1"
-                && event.event_kind == "TokenControlTransferred"
-                && transaction(&event.position) == transaction(&write.position)
-                && wrappers.iter().any(|wrapper| {
-                    event.resource_id.as_deref() == Some(wrapper.resource_id.as_str())
-                })
-                && names(event.to_address.as_deref(), graveyard)
-        })
+            .any(|wrapper| event.resource_id.as_deref() == Some(wrapper.resource_id.as_str()))
+    };
+    for event in facts.events.iter().filter(|event| {
+        event.source_family == "ens_v1_wrapper_l1"
+            && event.event_kind == "TokenControlTransferred"
+            && (candidate(event)
+                || event.original_logical_name_id.as_deref()
+                    == Some(facts.input.logical_name_id.as_str()))
+            && (from..to).contains(&place(&event.position))
+    }) {
+        match event.to_address.as_deref() {
+            Some(holder) if holder.eq_ignore_ascii_case(graveyard) => {
+                to_graveyard |= candidate(event);
+            }
+            // The adapter records no burn; one recorded would give the token to no one.
+            Some(holder) if holder.eq_ignore_ascii_case(ZERO_ADDRESS) => {}
+            _ => return false,
+        }
+    }
+    to_graveyard
+}
+
+/// Whether `address` is one of the name's NameWrappers.
+fn name_wrapper(facts: &NameFacts, address: &str) -> bool {
+    name_wrappers(facts).iter().any(|wrapper| {
+        wrapper
+            .emitting_address
+            .as_deref()
+            .is_some_and(|emitter| emitter.eq_ignore_ascii_case(address))
+    })
 }
 
 /// The name's NameWrapper candidates that record their NameWrapper's address.
@@ -139,7 +160,10 @@ fn name_wrappers(facts: &NameFacts) -> Vec<&BindingCandidate> {
 /// found, before any mask, at `trace.registrant_position`. It is that holder when it was found
 /// before the write and is not zero or the Graveyard, which a wrapped subname's token reaches as
 /// it is cleared. A token moved after a holder's own write to the Graveyard (ruling 4) names a
-/// later holder, so the lease's token history before the write decides, then the registry's.
+/// later holder, so the lease's token history before the write decides, then the registry's. The
+/// NameWrapper is never the holder: a wrapped `.eth` name handed to a registry-only binding at
+/// the claim keeps its lease's transfer into the NameWrapper in the laterals, and its holder is
+/// the wrapped token's ([`prior_holder`]).
 pub(super) fn apply(
     facts: &NameFacts,
     registrant: Option<String>,
@@ -167,7 +191,10 @@ pub(super) fn apply(
         .is_none_or(|position| position < place(&write.position));
     let holder = registrant
         .filter(|holder| {
-            found_before && holder != ZERO_ADDRESS && Some(holder.as_str()) != graveyard
+            found_before
+                && holder != ZERO_ADDRESS
+                && Some(holder.as_str()) != graveyard
+                && !name_wrapper(facts, holder)
         })
         .or_else(|| lease_holder(facts, write, graveyard))
         .or_else(|| prior_holder(facts, write, graveyard));
@@ -219,14 +246,7 @@ fn lease_holder(facts: &NameFacts, claim: &OwnerEvent, graveyard: Option<&str>) 
         })
         .max_by(|left, right| left.position.cmp(&right.position))
         .and_then(recipient)?;
-    let name_wrapper = facts.candidates.iter().any(|candidate| {
-        candidate.authority_kind.as_deref() == Some("wrapper")
-            && candidate
-                .emitting_address
-                .as_deref()
-                .is_some_and(|wrapper| wrapper.eq_ignore_ascii_case(&holder))
-    });
-    (!name_wrapper).then_some(holder)
+    (!name_wrapper(facts, &holder)).then_some(holder)
 }
 
 /// The holder of a name with no other holder, from before the claim's write: the owner its
@@ -234,7 +254,7 @@ fn lease_holder(facts: &NameFacts, claim: &OwnerEvent, graveyard: Option<&str>) 
 /// NameWrapper, the name's registry record was wrapped until the claim, and the holder is the
 /// token holder its NameWrapper transfers name last ([`wrapped_holder`]).
 fn prior_holder(facts: &NameFacts, claim: &OwnerEvent, graveyard: Option<&str>) -> Option<String> {
-    let owner = facts
+    let mut writes: Vec<&OwnerEvent> = facts
         .registry_node
         .as_ref()
         .into_iter()
@@ -244,15 +264,30 @@ fn prior_holder(facts: &NameFacts, claim: &OwnerEvent, graveyard: Option<&str>) 
                 && event.source_family == "ens_v1_registry_l1"
                 && before(&event.position, claim)
         })
-        .max_by(|left, right| left.position.cmp(&right.position))
-        .and_then(OwnerEvent::reported_owner)
+        .collect();
+    writes.sort_by(|left, right| left.position.cmp(&right.position));
+    let owner = writes
+        .last()
+        .and_then(|write| write.reported_owner())
         .filter(|owner| owner != ZERO_ADDRESS)?;
-    let wrappers = name_wrappers(facts);
-    if wrappers
-        .iter()
-        .any(|wrapper| wrapper.emitting_address.as_deref() == Some(owner.as_str()))
-    {
-        return wrapped_holder(facts, claim, graveyard, &wrappers);
+    if name_wrapper(facts, &owner) {
+        let wrapped_since = writes
+            .iter()
+            .rev()
+            .take_while(|write| {
+                write
+                    .reported_owner()
+                    .is_some_and(|owner| name_wrapper(facts, &owner))
+            })
+            .last()
+            .map(|write| &write.position)?;
+        return wrapped_holder(
+            facts,
+            claim,
+            wrapped_since,
+            graveyard,
+            &name_wrappers(facts),
+        );
     }
     Some(owner)
 }
@@ -263,9 +298,13 @@ fn prior_holder(facts: &NameFacts, claim: &OwnerEvent, graveyard: Option<&str>) 
 /// the Graveyard, which ends the NameWrapper authority and selects a registry-only binding
 /// (adapters `wrapper_custody.rs`), whose registration laterals read no NameWrapper event. A
 /// re-parent moves the token to the Graveyard in the claim's own transaction, before its write.
+/// Only transfers from the transaction of `since`, the first of the NameWrapper's trailing run of
+/// registry writes before the claim, count: an earlier wrap's holder lost control when that wrap
+/// ended, and a later write to the NameWrapper with no wrap of its own revives no one's control.
 fn wrapped_holder(
     facts: &NameFacts,
     claim: &OwnerEvent,
+    since: &Position,
     graveyard: Option<&str>,
     wrappers: &[&BindingCandidate],
 ) -> Option<String> {
@@ -282,6 +321,10 @@ fn wrapped_holder(
                     event.resource_id.as_deref() == Some(wrapper.resource_id.as_str())
                 })
                 && before(&event.position, claim)
+                && (
+                    event.position.block_number,
+                    event.position.transaction_index,
+                ) >= (since.block_number, since.transaction_index)
                 && event.to_address.as_deref().is_some_and(|holder| {
                     !names(holder, Some(ZERO_ADDRESS))
                         && !names(holder, graveyard)
