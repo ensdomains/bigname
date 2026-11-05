@@ -263,11 +263,14 @@ migration correlation or path changes.
 > **Our rule / why**: See [storage semantics](storage.md). The adapter keeps its signed timestamp representation without failing an otherwise valid numeric lifecycle observation. The ENSv1 .eth controller-event decoder saturates the same `uint256` expiry word the same way, so a controller event that repeats an out-of-range expiry no longer fails interpretation of its log. Basenames controller events are unchanged: an out-of-range expiry there still fails.
 > **Since**: `2026-09-10`
 
-> **Registry records the admitted Graveyard holds are served with no owner** — the ENSv2
-> Graveyard claims a lapsed `.eth` name and clears a subname of a name it holds by making
-> itself the node's registry owner, so `owner(node)` returns the Graveyard.
+> **Registry records the admitted Graveyard holds are served released, with no owner** — the
+> ENSv2 Graveyard claims a lapsed `.eth` name and clears a subname of a name it holds by making
+> itself the node's registry owner, so `owner(node)` returns the Graveyard. A claim registers the
+> name to the Graveyard in the BaseRegistrar with a far-future expiry, so on chain the name has a
+> live registration.
 > **Upstream**: (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L20-L25 @ ens_v2_sepolia_20260916@366de741)
 > (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+> (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L157-L164 @ ens_v2_mainnet_20261002@4f47cbcc)
 > **Our rule / why**: maintainer decision (2026-09-29): the Graveyard is the burn address, so a
 > record it holds is burned. A current-registry owner write naming the Graveyard of the admitted
 > migration manifest, at or after its declared start, is served as no owner (null, not the zero
@@ -276,8 +279,13 @@ migration correlation or path changes.
 > NameWrapper token transfers of a subname wrapped without `PARENT_CANNOT_CONTROL`, whose token
 > outlives the clear. Superseded Sepolia Graveyards are not declared and are served as the chain
 > holds them. A live token sent to the Graveyard keeps its lease and is served as the chain holds
-> it. See [projections](projections.md).
-> **Since**: `2026-09-29`
+> it. Maintainer decision (2026-11-05): the Graveyard's registration is no holder's lease, so the
+> name's ENSv1 registration has ended. Such a name on the `ens_v1` arm is served `released` with
+> `expires_at: null` and `expires_at_reason: released`, `ens_v1.expires_at: null`, no owner,
+> manager or registrant, and a `lapsed_registration` naming its holder before the claim and the
+> claim's block time (see [Graveyard-held names](api-v1.md#graveyard-held-names)). A subname the
+> Graveyard cleared is served the same way. See [projections](projections.md).
+> **Since**: `2026-09-29`, widened `2026-11-05`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
 > `ERC1155Fuse._transfer` runs `_beforeTransfer`, which deletes the per-token

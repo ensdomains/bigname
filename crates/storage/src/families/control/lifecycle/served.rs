@@ -1,7 +1,6 @@
 //! The served registration and control values of one name, from its loaded facts. Each function
 //! derives one part of the composed registration or control block from the retained events;
-//! every "latest" is
-//! the latest under the facts' order, the canonical order in every read.
+//! every "latest" is the latest under the facts' order, the canonical order in every read.
 use std::collections::BTreeMap;
 
 use anyhow::Result;
@@ -591,6 +590,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         );
     }
     super::canonical::apply(facts, &tagged, clock, &mut registration, &mut trace)?;
+    super::graveyard::apply(facts, registrant, &mut registration, &mut control);
     released_control(&registration, &mut control, lease_control);
     Ok(ShadowName {
         registration,

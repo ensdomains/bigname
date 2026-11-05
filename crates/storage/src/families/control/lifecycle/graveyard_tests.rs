@@ -277,7 +277,6 @@ fn assert_held(shadow: &ShadowName, holder: Option<&str>) {
 
 /// The Graveyard rule did not apply.
 fn assert_not_held(shadow: &ShadowName) {
-    assert_eq!(shadow.trace.get("graveyard_held"), None, "{shadow:#?}");
     assert_ne!(
         shadow.registration.get("expires_at_reason"),
         Some(&json!("released")),

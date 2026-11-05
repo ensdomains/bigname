@@ -62,7 +62,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `created_at` | first observation of the name, as a decimal string of Unix seconds; served only for a name with a name row, so a registry child listed without one omits it | `created_at` (now defined and distinguished from `registered_at`) |
 | `status` | registration lifecycle: `active`, `expired`, `released`, or `unregistered`, evaluated at the publication timestamp independently of ownership, resolution and wrapping | replaces `registration_status` |
 | `ens_v1` | on name-shaped rows (name detail, resolver `bound_names`, lookup `profile=detail` and `profile=feed`, address names, subnames, registry labels, `GET /v1/names` and search): what only ENSv1 holds about the name, `{expires_at, resolver, wrapper_state?, wrapper_fuses?, wrapper_expires_at?, wrapper_expires_at_reason?}`. Present exactly while the name's `authority` is `ens_v1` or `ens_v0` and omitted otherwise, including on every `ens_v2` row; subname, registry-label, `GET /v1/names` and search rows follow the `authority` they carry, and lookup `profile=feed` records follow the `authority` of the detail record for the same name, which they do not carry | new in v2; replaces the earlier top-level `wrapper_state` and `wrapper_fuses` |
-| `ens_v1.expires_at` | the name's ENSv1 BaseRegistrar lease expiry as a decimal string of Unix seconds (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f), or `null` when the name has no lease, as for every name below a `.eth` second-level name, including a wrapped subname whose only expiry is its NameWrapper entry's. Before the [Universal Resolver cutover](glossary.md#universal-resolver-cutover) it equals the top-level `expires_at` of a `.eth` second-level name; from the cutover a name with a retained canonical ENSv2 entry serves that entry's expiry at the top level and keeps the lease date here (see [Expiry and grace](#expiry-and-grace)). A lease has no sentinel expiry, so there is no reason field: `null` only means no lease. Values are exact up to `9223372036854775807` (`i64::MAX`); a lease expiry above it is served as `"9223372036854775807"`. The admitted Sepolia testnet premigration registrar takes a caller-chosen registration duration, so such a lease is reachable there (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L161-L165 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L214-L217 @ ens_v2_sepolia_20260916@366de741). There is no grace field: below `9223372036854775807` the lease's grace deadline is `ens_v1.expires_at` plus 90 days (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f). A saturated `"9223372036854775807"` no longer carries the lease's own expiry, so its grace deadline cannot be recovered from it. Premigration's 62-day continuity bonus makes that deadline equal the top-level `grace_ends_at` when the name is reserved (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741), but the alignment is not guaranteed: a reservation can be extended without the BaseRegistrar, for example by the admitted BatchRegistrar, and then the two deadlines differ (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L66-L70 @ ens_v2_sepolia_20260916@366de741) | new in v2 |
+| `ens_v1.expires_at` | the name's ENSv1 BaseRegistrar lease expiry as a decimal string of Unix seconds (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f), or `null` when the name has no lease, as for every name below a `.eth` second-level name, including a wrapped subname whose only expiry is its NameWrapper entry's. Before the [Universal Resolver cutover](glossary.md#universal-resolver-cutover) it equals the top-level `expires_at` of a `.eth` second-level name; from the cutover a name with a retained canonical ENSv2 entry serves that entry's expiry at the top level and keeps the lease date here (see [Expiry and grace](#expiry-and-grace)). A lease has no sentinel expiry, so there is no reason field: `null` means no lease, or a name the admitted Graveyard holds, whose far-future registration to the Graveyard is no holder's lease (see [lapsed registration](#lapsed-registration)). Values are exact up to `9223372036854775807` (`i64::MAX`); a lease expiry above it is served as `"9223372036854775807"`. The admitted Sepolia testnet premigration registrar takes a caller-chosen registration duration, so such a lease is reachable there (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L161-L165 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L214-L217 @ ens_v2_sepolia_20260916@366de741). There is no grace field: below `9223372036854775807` the lease's grace deadline is `ens_v1.expires_at` plus 90 days (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f). A saturated `"9223372036854775807"` no longer carries the lease's own expiry, so its grace deadline cannot be recovered from it. Premigration's 62-day continuity bonus makes that deadline equal the top-level `grace_ends_at` when the name is reserved (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741), but the alignment is not guaranteed: a reservation can be extended without the BaseRegistrar, for example by the admitted BatchRegistrar, and then the two deadlines differ (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L66-L70 @ ens_v2_sepolia_20260916@366de741) | new in v2 |
 | `ens_v1.resolver` | the ENSv1 registry's resolver pointer for the name's node, a [`ContractRef`](#contractref) `{chain_id, address}`. It is what `ENSRegistry.resolver(node)` returns (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f). It is `null` when the pointer is zero, or when bigname observed no pointer write for the node, such as a node whose resolver was set before the indexed history begins and never changed since. See [Known divergences](upstream.md#ensv1-registry-resolver-pointer-without-an-observed-write). It is a registry fact, like `ens_v1.expires_at`, and is reported whatever the name resolves through. The top-level `resolver` and `records` say how the name resolves, and they can withhold the resolver, as for a `.eth` name with no live ENSv2 entry after the [Universal Resolver cutover](glossary.md#universal-resolver-cutover). For a name whose `authority` is `ens_v1` or `ens_v0` they read through this pointer, so `resolver` equals `ens_v1.resolver` whenever both are present ([projections](projections.md#an-ensv1-name-serves-the-resolver-its-registry-record-holds)). Name detail and the records route also check this at request time, as a backstop for rows composed before that rule: when such a name is not withheld and its stored resolver names another one, they read `resolver` and its records through this pointer. When its latest observed pointer write cleared the pointer and it is a `.eth` name, a `source=auto` records read answers its keys `not_found` from the index without asking the chain (see [`GET /v1/names/{name}/records`](api-v1-routes.md#ensv1-registry-clear-on-an-auto-read)). A pointer to an address no resolver manifest declares serves that address with its `resolver_not_declared` inventory (see [`GET /v1/names/{name}`](api-v1-routes.md#get-v1namesname)). A pointer to an address with no classification row keeps the composed answer. The address need not be a resolver bigname admits. A migrated name carries no `ens_v1` object. On chain the unwrapped and the unlocked wrapped ENSv1→ENSv2 migrations clear the pointer (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L112-L117 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2_sepolia_20261001@07e55a05), and so does the locked migration of a name without `CANNOT_SET_RESOLVER` burned (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L137-L138 @ ens_v2_sepolia_20261001@07e55a05). Only a locked name with that fuse burned keeps it (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L139-L144 @ ens_v2_sepolia_20261001@07e55a05) | new in v2 |
 | `wrapper_state` | inside `ens_v1`: `wrapped`, `emancipated`, `locked`, `lapsed`, `unwrapped`, or `unknown`. The first three are backed entry/fuse states; `lapsed` means an emancipated/locked entry has lost its holder at wrapper expiry, `unwrapped` requires proven unwrap or registry custody, and `unknown` means required wrapping evidence is incomplete. Permission rows and wrapper restrictions use backed states only. Omitted without ENSv1 context or where a child has no composed name. | raw NameWrapper fuse bitmap |
 | `wrapper_fuses` | inside `ens_v1`, and on permission rows and wrapper `restrictions`: typed summary of the current [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); present inside `ens_v1` only with the backed states `wrapped`, `emancipated`, or `locked`, never with `lapsed`, `unwrapped`, or `unknown`. Permission rows carry both backed state and fuses or neither; an existing wrapper restriction requires both | raw NameWrapper fuse bitmap |
@@ -2465,8 +2465,9 @@ included. On a chain that is not cut over it costs one.
 ### Lapsed registration
 
 A name carries `lapsed_registration` when its control registration has ended: an ENSv1 lease that lapsed
-past its grace, or an ENSv2 registration released by `RegistryPathExpired` or
-`LabelUnregistered`. The block does not depend on the lifecycle `status`. A lease that lapsed
+past its grace, an ENSv2 registration released by `RegistryPathExpired` or
+`LabelUnregistered`, or an ENSv1 registration the admitted Graveyard ended by taking its
+registry record (see [Graveyard-held names](#graveyard-held-names)). The block does not depend on the lifecycle `status`. A lease that lapsed
 under a live ownerless ENSv2 reservation carries it while the row is `active` or `expired`. An ENSv1 lease whose registry record the release leaves in place
 carries it too: the name keeps that record as its registry custody, with no `owner` or
 `manager`, and the block names the lease's last holder. Other release causes, such as a
@@ -2474,8 +2475,8 @@ registration displaced during token regeneration, carry no block and do not ente
 `relation=former_owner`. A parent token pointed away from an ENSv2 registry releases the
 registry's names the same way and carries no block. A parent-claim move alone never
 releases, see [ENSv2 name path](#ensv2-name-path).
-Only those two kinds of registration lapse: a subname with no registrar lease,
-wrapped or not, never carries the block. An ENSv1 lease inside its own registrar grace keeps its current holder.
+Only those kinds of registration lapse: a subname with no registrar lease,
+wrapped or not, never carries the block unless the Graveyard cleared it. An ENSv1 lease inside its own registrar grace keeps its current holder.
 ENSv2 control ends at expiry even while the canonical registration is `expired`.
 The block identifies the holder when the registration ended. It is separate
 so that nobody reads it as current state:
@@ -2506,7 +2507,8 @@ by the latest grant, transfer or release on its registry entry. `held_through`
 is `registrar` or `wrapper`, the contract the lapsed lease was held through, or
 `registry` for an ENSv2 registration, and is omitted for any other value; the top-level `authority` field is a different
 thing and names the `ens_v0`, `ens_v1` or `ens_v2` side. `released_at` is the time of the
-block at which Bigname recorded the release. That is the first block whose
+block at which Bigname recorded the release. For a name the Graveyard holds it is the block of the
+Graveyard's registry write. Otherwise it is the first block whose
 timestamp is after the lease's own expiry plus the 90-day grace period for an ENSv1 lease, so it is always
 later than that expiry plus 90 days and never equal to it. The lease's own expiry is
 `expires_at`, except when an ownerless ENSv2 reservation continues the lease: then it is
@@ -2535,6 +2537,36 @@ so the name serves no current `owner` and no `owner` relation until a
 renewal through the NameWrapper restores it.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+
+### Graveyard-held names
+
+After the ENSv2 launch the Graveyard is the only ENSv1 `.eth` controller left besides the
+renewal bridge, and anyone may call its `clear`. For a `.eth` second-level name whose lease is
+past its expiry and its 90-day grace period, it registers the name to itself through the
+BaseRegistrar with a far-future expiry. That burns the lapsed token and makes the Graveyard the
+node's registry owner. For a subname of a name it holds, it takes the subname's registry
+record. The Graveyard never transfers what it holds, and no ENSv1 controller can register the
+name again. The label is free to register in ENSv2.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L98-L102 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f)
+
+A name with `authority` `ens_v1` whose newest current-registry write names the admitted
+Graveyard is served as an ended registration, whatever its lease or its schedule says:
+
+- `status` is `released`, and there is no new status value;
+- `expires_at` is `null` with `expires_at_reason: released`, and `grace_ends_at` is `null`;
+- `ens_v1.expires_at` is `null`: the Graveyard's far-future expiry is not a holder's lease;
+- there is no `owner` or `manager`;
+- `lapsed_registration.owner` is the name's holder before the claim, its lease's holder, or for
+  a name with no lease the owner its registry record had. `released_at` is the block time of the
+  Graveyard's write, and `release_kind` is `expired`.
+
+`registered_at` and `registration_id` keep the registration that ended. A label later
+registered in ENSv2 serves that registration, as does a migrated name, whose ENSv1 record the
+migration hands to the Graveyard. A live token sent to the Graveyard writes no registry record
+and is served as the chain holds it. Subname lists, their `include_expired=false` fence and the
+expiry listing treat a Graveyard-held name as any other released name with no finite expiry.
 
 ### Registration identity of wrapped names
 

@@ -258,6 +258,7 @@ pub async fn load_name_facts_on(
         .collect();
     let nodes = load_registry_nodes_on(&mut *conn, chain_id, &node_keys).await?;
     // First current-registry record blocks date a lease no grant opened (`registration_start`).
+    // The admitted Graveyard's claim dates its release (`graveyard::apply`).
     let blocks: Vec<i64> = events
         .iter()
         .map(|event| event.position.block_number)
@@ -266,6 +267,11 @@ pub async fn load_name_facts_on(
                 .values()
                 .filter_map(|node| node.first_current_record_block),
         )
+        .chain(nodes.values().filter_map(|node| {
+            node.latest_transfer()
+                .filter(|write| write.graveyard_held())
+                .map(|write| write.position.block_number)
+        }))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

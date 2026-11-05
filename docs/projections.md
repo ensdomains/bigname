@@ -1338,6 +1338,26 @@ Graveyard as its `owner`, until it lapses.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L374 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L281-L303 @ ens_v1@91c966f)
 
+The Graveyard's record also ends the name's ENSv1 registration. The lifecycle composition
+(`crates/storage/src/families/control/lifecycle/graveyard.rs`) runs after the registration
+schedule. For a name on the `ens_v1` arm whose node's newest current-registry
+`AuthorityTransferred` carries `owner_getter_reason` `graveyard`, it serves
+`lifecycle_status` and `status` `released`, a null expiry with `expires_at_reason` `released`,
+no grace deadline, no `ens_v1_expiry`, no registrant and no control owner, registry owner or
+expiry. Its `lapsed_registration` names the holder before the claim, with `released_at` the
+block time of that write and `release_kind` `expired`. The holder is the registrant the lease
+laterals found, before the NameWrapper expiry mask. A name with none takes the owner reported
+by the newest earlier registry write, unless the NameWrapper is selected. The rule needs only
+the registry write. The claim's sentinel `NameRegistered` stays the unretained historical
+cleanup row (`graveyard_cleanup`), never a lease. It applies to a claimed `.eth` second-level
+name and to a cleared subname alike. A name on the `ens_v2` arm is not read by it: a label
+registered in ENSv2, before or after the claim, and a migrated name, whose ENSv1 record the
+migration hands to the Graveyard, are served by their ENSv2 registration. The stored name
+summary takes `registration_status` `released` and no finite expiry from the composed row, so
+subname lists, their expiry fence and the expiry listing need no rule of their own.
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
+
 An `active` ENSv1 or Basenames registration whose authority is its registrar lease or its
 registry record always serves a registry owner, because the registry answers `owner(node)` for
 every node. The test is the registration's status and authority kind; it does not look at a
