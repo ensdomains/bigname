@@ -5502,7 +5502,7 @@ When a build fails:
 
 - A build or drop that fails stops the chain with an error that names the index and the
   cause. The runner does not retry it in the process: another chain's Project entry stops
-  with the same error instead of building again. The process stays up until it is stopped.
+  with the same error instead of building again. The runner stays up until it is stopped.
 - Each start drops the invalid leftover and builds it again, so fix the cause and then restart
   the runner. A cause that persists stops the chain again with the same error.
 - A name held by another relation is refused and never dropped.

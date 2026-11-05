@@ -19,7 +19,7 @@ groups:
           severity: page
         annotations:
           threshold: "An RPC endpoint reports a mismatched chain on any scrape within 10 minutes."
-          meaning: "The named source's RPC endpoint now serves a different chain than configured; that chain stopped, and a restart refuses to start until the endpoint is fixed. A refusal at start-up exits before a scrape sees this, and BignamePhaseRunnerDown and the refusal log catch it."
+          meaning: "The named source's RPC endpoint now serves a different chain than configured, so that chain stopped, and a restart refuses to start until the endpoint is fixed. A refusal at start-up exits before a scrape sees this, and BignamePhaseRunnerDown and the refusal log catch it."
 
       - alert: BignameUniversalResolverUnadmitted
         expr: |

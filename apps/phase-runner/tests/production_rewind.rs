@@ -233,16 +233,15 @@ fn require_heads(snapshot: &Value, latest: i64) -> Result<()> {
     Ok(())
 }
 
-async fn require_no_failed_phase(pool: &sqlx::PgPool) -> Result<()> {
-    let failed: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT phase_name, last_error FROM bigname_phase.chain_phase_state
-         WHERE chain_id = $1 AND phase_status = 'failed'
-         ORDER BY phase_name LIMIT 1",
-    )
-    .bind(CHAIN)
-    .fetch_optional(pool)
-    .await?;
-    ensure!(failed.is_none(), "{CHAIN} has a failed phase: {failed:?}");
+/// A phase row is also `failed` while a retryable error backs off, so only the supervisor's line
+/// marks a chain that stopped.
+fn require_no_stopped_chain(child: &OwnedChild) -> Result<()> {
+    let log = fs::read_to_string(&child.log)?;
+    ensure!(
+        !log.contains("chain supervisor stopped after a terminal error"),
+        "a {CHAIN} chain stopped on a terminal error; log {:?}",
+        child.log
+    );
     Ok(())
 }
 
@@ -314,7 +313,7 @@ async fn scenario(fixture: &mut Fixture) -> Result<()> {
         fixture.children[normal].wait().await?.success(),
         "normal setup did not exit cleanly"
     );
-    require_no_failed_phase(fixture.database.pool()).await?;
+    require_no_stopped_chain(&fixture.children[normal])?;
     fixture.rpc.disarm();
     no_writer_sessions(fixture.database.pool(), &fixture.reader_role).await?;
     let setup = snapshot(fixture.database.pool(), &fixture.directory, "setup.json").await?;
@@ -456,8 +455,8 @@ async fn scenario(fixture: &mut Fixture) -> Result<()> {
             fixture.children[downstream].running()?,
             "ordinary downstream run exited before processing suffix"
         );
-        // A chain that stops leaves the runner up, so its failed row is the signal.
-        require_no_failed_phase(fixture.database.pool()).await?;
+        // A chain that stops leaves the runner up, so the stop's log line is the signal.
+        require_no_stopped_chain(&fixture.children[downstream])?;
         ensure!(
             Instant::now() < until,
             "ordinary downstream processing did not finish"
@@ -469,7 +468,7 @@ async fn scenario(fixture: &mut Fixture) -> Result<()> {
         fixture.children[downstream].wait().await?.success(),
         "downstream run did not stop cleanly"
     );
-    require_no_failed_phase(fixture.database.pool()).await?;
+    require_no_stopped_chain(&fixture.children[downstream])?;
     no_writer_sessions(fixture.database.pool(), &fixture.reader_role).await?;
     let resolved = snapshot(
         fixture.database.pool(),

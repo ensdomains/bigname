@@ -2213,8 +2213,8 @@ pub async fn prove_normal_sepolia_http(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
     loop {
         let health = match runner.ensure_running() {
-            // A chain that stops leaves the runner up, so its failed row is the signal.
-            Ok(()) => require_no_failed_phase(&db.pool, "ethereum-sepolia").await,
+            // A chain that stops leaves the runner up, so the stop's log line is the signal.
+            Ok(()) => require_no_stopped_chain(&runner.logs, &db.pool, "ethereum-sepolia").await,
             Err(error) => Err(error),
         };
         if let Err(error) = health {
@@ -2431,19 +2431,29 @@ pub async fn prove_normal_sepolia_http(
     Ok(())
 }
 
-async fn require_no_failed_phase(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
-    let failed: Option<(String, Option<String>)> = sqlx::query_as(
+/// A phase row is also `failed` while a retryable error backs off, so only the supervisor's line
+/// marks a chain that stopped.
+async fn require_no_stopped_chain(
+    logs: &(PathBuf, PathBuf),
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<()> {
+    let stopped = [&logs.0, &logs.1].into_iter().any(|path| {
+        std::fs::read_to_string(path)
+            .is_ok_and(|log| log.contains("chain supervisor stopped after a terminal error"))
+    });
+    if !stopped {
+        return Ok(());
+    }
+    let failed: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT phase_name, last_error FROM chain_phase_state
          WHERE chain_id = $1 AND phase_status = 'failed'
-         ORDER BY phase_name LIMIT 1",
+         ORDER BY phase_name",
     )
     .bind(chain_id)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
-    if let Some((phase, last_error)) = failed {
-        bail!("{chain_id} phase {phase} failed: {last_error:?}");
-    }
-    Ok(())
+    bail!("a {chain_id} chain stopped on a terminal error; failed phases {failed:?}; logs {logs:?}")
 }
 
 async fn proof_tables(pool: &sqlx::PgPool) -> Result<Vec<(String, Vec<String>)>> {

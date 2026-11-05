@@ -115,7 +115,6 @@ impl PhaseRunner {
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
         chain.require_intake_sources()?;
-        self.record_loop_progress(&chain.chain_id);
         // Recovery settles phases a previous run left `running`, and `initialize_chain`
         // writes the rows it settles. Callers restart a chain with an already-cancelled
         // token precisely to run this cleanup, so it must not be skipped or abandoned
@@ -134,6 +133,8 @@ impl PhaseRunner {
         )
         .await
         .map_err(held_start_up_lock_is_retryable)?;
+        // Recorded after recovery, so a chain retrying a start-up failure ages its loop heartbeat.
+        self.record_loop_progress(&chain.chain_id);
         if cancellation.is_cancelled() {
             return Ok(());
         }
@@ -198,12 +199,10 @@ impl PhaseRunner {
     }
 }
 
-/// A phase lock held at start-up is usually the previous process's session, which PostgreSQL has
-/// not reaped yet, so the supervisor retries it. A lock held once the chain is running belongs to
-/// a concurrent redo or runner and stays a stop.
+/// A lock held once the chain is running belongs to a concurrent redo or runner and stays a stop.
 fn held_start_up_lock_is_retryable(error: RunnerError) -> RunnerError {
     if error.kind() == ErrorKind::LockHeld {
-        RunnerError::transient(format!("phase lock held at start-up: {error}"))
+        error.held_at_start_up()
     } else {
         error
     }

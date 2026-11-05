@@ -175,7 +175,7 @@ build or wait can also raise the heartbeat-stale alert.
   the runner.
 - A build or drop that fails stops the chain with an error naming the index and the cause. It is
   not retried in the process: another chain's Project entry stops with the same error instead of
-  building again. The process stays up until it is stopped. Each start drops the invalid
+  building again. The runner stays up until it is stopped. Each start drops the invalid
   leftover and builds it again, so fix the cause and then restart the runner. A cause that
   persists, such as a login that does not own the table, stops the chain again with the same
   error.

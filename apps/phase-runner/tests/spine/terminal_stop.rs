@@ -424,7 +424,7 @@ async fn a_phase_lock_held_at_start_up_is_retried() -> Result<()> {
     held.release().await?;
     let report = run.finish().await?;
 
-    assert_completed_after_a_retry(&report, &logs, "phase lock held at start-up");
+    assert_completed_after_a_retry(&report, &logs, "error_kind=LockHeld");
     scratch.cleanup().await
 }
 
