@@ -5,12 +5,61 @@ binaries. `./scripts/dev-up` starts the API and, when
 `BIGNAME_PHASE_RUNNER_CHAINS` is configured, the phase runner against the
 `bigname_phase` namespace in the same PostgreSQL database.
 
+## Prerequisites
+
+Install these tools first. Where a file pins a version, use that version.
+Homebrew does not link `rustup` or `libpq` onto `PATH`, so add their `bin`
+directories yourself.
+
+For the local stack:
+
+- `rustup`, for every Rust build. `rust-toolchain.toml` pins the toolchain,
+  clippy and rustfmt, and the first `cargo` command in the repository installs
+  them. Install it with `brew install rustup` or `apt-get install rustup`.
+- Docker with the Compose plugin, for the local database and
+  `./scripts/test-db`. Install Docker Desktop, or Docker Engine with the
+  `docker-compose-plugin` package.
+- `python3`, for the Python scripts in `scripts/`, including `scripts/sync-refs`.
+  `scripts/check-upstream-rotation` and `scripts/benchmark-gate` need 3.11 or
+  later. Install it with `brew install python` or `apt-get install python3`.
+
+For tests and checks:
+
+- `cargo-nextest`, for the `cargo nextest` commands under
+  [Database-backed tests](#database-backed-tests). Install it with
+  `cargo install cargo-nextest --locked --version <version>`, using the version
+  `.github/workflows/ci.yml` pins.
+- ripgrep, for `scripts/check-query-ownership`. Install it with
+  `brew install ripgrep` or `apt-get install ripgrep`.
+- Foundry, both `anvil` and `forge`, for the end-to-end tests
+  ([`tests/e2e/README.md`](../tests/e2e/README.md#prerequisites)). Install it
+  with its `foundryup` installer: `foundryup --install <version>`, using
+  `FOUNDRY_VERSION` from `.github/workflows/ci.yml`.
+- `psql`, for `scripts/check-schema` against a server named by
+  `BIGNAME_TEST_DATABASE_URL`. Without `psql` the script runs it from a Docker
+  container. The default test container needs no host `psql`. Install it with
+  `brew install libpq` or `apt-get install postgresql-client`.
+
+For less common work:
+
+- `sqlx-cli`, to apply schema-migrations to a retained database. The
+  [production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+  holds the procedure. Install it with
+  `cargo install sqlx-cli --no-default-features --features rustls,postgres`.
+- `promtool`, for the Prometheus rule step in the `static` CI job, which pins
+  the version. It ships with Prometheus, so `brew install prometheus` provides
+  it.
+- `node`, for `node --test scripts/tests/site.test.mjs` in the `site` CI job.
+  Install it with `brew install node` or `apt-get install nodejs`.
+
 ## Bootstrap
 
-1. Copy `.env.example` to `.env` and apply any local overrides.
-2. Run `docker compose up -d --wait` so PostgreSQL passes its healthcheck before
+1. Run `scripts/sync-refs` to fetch the
+   [pinned upstream copies](#pinned-upstream-copies).
+2. Copy `.env.example` to `.env` and apply any local overrides.
+3. Run `docker compose up -d --wait` so PostgreSQL passes its healthcheck before
    phase initialization.
-3. Export the local environment and initialize the phase schema once, before
+4. Export the local environment and initialize the phase schema once, before
    starting either the API or the phase runner:
 
    ```sh
@@ -19,11 +68,11 @@ binaries. `./scripts/dev-up` starts the API and, when
    set +a
    cargo phase init-schema
    ```
-4. For indexing, configure the phase runner and provision the separate
+5. For indexing, configure the phase runner and provision the separate
    SELECT-only verification login described in
    [`deployment.md`](deployment.md#phase-runner-configuration). The sample
    configuration leaves indexing disabled and starts only the API.
-5. Run `./scripts/dev-up`.
+6. Run `./scripts/dev-up`.
 
 This bootstrap assumes a disposable fresh local database volume. For a retained
 local volume, follow the production schema-migration order before phase-schema
@@ -47,6 +96,79 @@ projections and verifies provider answers without database writes. The
 checked-in SQLx schema-migration history remains append-only, but the deleted
 worker schema-migration command is no longer a runtime entrypoint; deployment
 automation applies reviewed versioned schema-migrations at the planned boundary.
+
+### Pinned upstream copies
+
+`scripts/sync-refs` clones the upstream repositories pinned in
+`.refs/MANIFEST.toml` into `.refs/`. It needs network access to GitHub.
+`.refs/` is gitignored, so each clone and each git worktree needs its own sync.
+[`.refs/README.md`](../.refs/README.md) describes the other modes.
+
+The API and the phase runner run without the copies. These need them:
+
+- Unit tests that compare checked-in data with upstream sources and deployment
+  artifacts. Examples are `role_tables_cover_each_pinned_upstream_constant` in
+  `crates/adapters/src/schema_v2/protocol/permissions.rs` and the tests in
+  `crates/manifests/src/lib/official_mainnet_tests.rs`. The default
+  `./scripts/test-db` run includes them.
+- The end-to-end tests in [`tests/e2e`](../tests/e2e/README.md#prerequisites).
+
+In CI, `test (core)`, `build (e2e phase-runner)`, the `test (e2e shard)` jobs,
+`test (API container shutdown)` and `artifacts-and-smoke` sync the copies. The
+`static` job runs without them.
+
+### Database memory on a laptop
+
+The PostgreSQL memory defaults in `docker-compose.yml` are sized for indexing on
+a large host. To lower them on a laptop, uncomment these lines in `.env` and
+adjust the values:
+
+```sh
+POSTGRES_SHM_SIZE=1gb
+POSTGRES_SHARED_BUFFERS=1GB
+POSTGRES_EFFECTIVE_CACHE_SIZE=4GB
+```
+
+- `POSTGRES_SHM_SIZE` sets the size of the container's `/dev/shm`.
+- `POSTGRES_SHARED_BUFFERS` sets PostgreSQL's shared buffer cache. Keep it well
+  under the memory Docker can use.
+- `POSTGRES_EFFECTIVE_CACHE_SIZE` reserves no memory. It tells the query planner
+  how much page cache to assume.
+
+Keep the units as written, because PostgreSQL rejects a lowercase `gb`.
+
+Docker Compose reads `.env` from the repository root, so the variables need no
+export. Run `docker compose up -d --wait` to recreate the container with the new
+values. The data volume stays.
+
+## Checks before a pull request
+
+The `static` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+holds the full list of static checks. These commands mirror its main steps. They
+need no database and no pinned upstream copies:
+
+```sh
+cargo fmt --check
+cargo fmt --manifest-path tests/e2e/Cargo.toml -- --check
+cargo clippy --keep-going --workspace --all-targets \
+  --features bigname-adapters/test-activation,bigname-storage/test-support \
+  --exclude bigname-adapters --no-deps -- -D warnings
+cargo clippy --manifest-path tests/e2e/Cargo.toml --locked --all-targets -- -D warnings
+scripts/generate-openapi --check
+./scripts/check-rust-file-size --base-ref origin/main
+./scripts/check-migration-versions
+./scripts/check-query-ownership
+```
+
+- The first clippy command leaves out `bigname-adapters`. That crate has its own
+  step, "cargo clippy (adapter warning-class baseline)", with a list of allowed
+  lints. Copy that command from the job.
+- `--base-ref` applies the allowance check a pull request gets. Fetch
+  `origin/main` first.
+- `tests/e2e` is a separate workspace, so `--manifest-path` names it.
+- At the repository root, plain `cargo build`, `cargo check`, `cargo clippy` and
+  `cargo test` cover only the default members, `apps/api` and
+  `apps/phase-runner`. Pass `--workspace` to cover every crate.
 
 ## CI after a merge
 
@@ -154,14 +276,20 @@ test stopped, before a limit ends it:
   prints when the job ends, names every lock wait longer than one second with
   the sessions that hold the lock.
 
-## Bootstrap migration hygiene
+## Schema-migration history
 
-During bootstrap, bigname has no active deployments or shared production
-databases that must preserve data across every intermediate schema. Before the
-first stateful deployment, collapse checked-in history into a small baseline
-migration set and re-audit any destructive transition. Until that explicit
-operation, checked-in migrations are immutable history even when their Rust
-writer has been removed.
+bigname's public deployments are [live](production.md), and each database
+records every applied schema-migration and its checksum in `_sqlx_migrations`.
+Do not squash the history in `migrations/` into a smaller baseline.
+
+Checked-in schema-migrations are append-only, immutable history, even when their
+Rust writer has been removed. Changing an applied file makes `sqlx migrate run`
+[refuse the deploy](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary),
+so add a new versioned file instead. The
+[schema-migration rules](storage.md#schema-migration-rules) apply to every file.
+
+A destructive transition runs against the retained data of those deployments,
+so audit it before it ships.
 
 ## Stage B phase runner
 
