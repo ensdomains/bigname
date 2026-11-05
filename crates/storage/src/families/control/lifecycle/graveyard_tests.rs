@@ -4,17 +4,23 @@
 //! lapsed owner. A name the Graveyard does not hold composes as it did. Each input class is one
 //! test. A claim is only reachable for a lease past its expiry and grace, so the classes below
 //! are the only claim inputs (`Graveyard.sol` `_clear`, BaseRegistrar `available`).
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use serde_json::{Map, Value, json};
 
 use super::super::{
     AuthoritySelection, Clock, NameFacts, NameInput, NamePlace, ShadowName, evaluate,
 };
-use crate::families::control::{
-    position::Position,
-    registry::{OwnerEvent, RegistryNode, ZERO_ADDRESS},
-    rows::{BindingCandidate, LifecycleEvent, WrapperRow},
+use crate::families::{
+    control::{
+        position::Position,
+        registry::{OwnerEvent, RegistryNode, ZERO_ADDRESS},
+        rows::{BindingCandidate, LifecycleEvent, WrapperRow},
+    },
+    name::selection::select,
 };
 
 const NAME: &str = "ens:0x01";
@@ -199,13 +205,18 @@ impl Name {
     }
 
     fn read(&self) -> ShadowName {
+        evaluate(&self.facts(), &CLOCK).expect("the name composes")
+    }
+
+    /// The name's facts, with the input selection of its one binding on its arm.
+    fn facts(&self) -> NameFacts {
         let selection = AuthoritySelection {
             authority_arm: Some(self.arm.to_owned()),
             surface_binding_id: Some(self.binding.surface_binding_id.clone()),
             resource_id: Some(self.binding.resource_id.clone()),
             ..AuthoritySelection::default()
         };
-        let facts = NameFacts {
+        NameFacts {
             input: NameInput {
                 logical_name_id: NAME.to_owned(),
                 namehash: "0x01".to_owned(),
@@ -237,9 +248,26 @@ impl Name {
             resolution_cutover: false,
             ens_v2_root: None,
             grace_registries: Arc::new(Vec::new()),
-        };
-        evaluate(&facts, &CLOCK).expect("the name composes")
+        }
     }
+}
+
+/// The composed reader's path: select the authority from the candidates and history alone
+/// (`name/selection.rs`), then compose. Returns the selected arm and the composition.
+fn selected(mut facts: NameFacts) -> (Option<String>, ShadowName) {
+    facts.input.selection = AuthoritySelection::default();
+    let readable: BTreeSet<String> = facts
+        .candidates
+        .iter()
+        .map(|candidate| candidate.resource_id.clone())
+        .collect();
+    let decided = select(&facts, &CLOCK, None, None, &readable).expect("the name selects");
+    facts.input.selection = decided.selection;
+    let arm = facts.input.selection.authority_arm.clone();
+    (
+        arm,
+        evaluate(&facts, &CLOCK).expect("the selected name composes"),
+    )
 }
 
 fn field(map: &Map<String, Value>, key: &str) -> Value {
@@ -626,4 +654,99 @@ fn an_undeclared_graveyard_write_is_an_ordinary_owner() {
     assert_not_held(&shadow);
     assert_eq!(field(&shadow.registration, "lifecycle_status"), "active");
     assert_eq!(field(&shadow.control, "owner"), GRAVEYARD);
+}
+
+/// Ruling 4: a live holder's `setOwner` of the registry record to the Graveyard, not a claim.
+/// `clear` cannot claim a live lease, so the write is the holder's own. The record is the
+/// Graveyard's, which never transfers it, and the name is served released, with the lease's
+/// holder as the lapsed owner, until a newer registry write (the token holder's `reclaim`).
+#[test]
+fn a_set_owner_to_the_graveyard_by_a_live_holder_not_a_claim_serves_released() {
+    let input = || Name::new(registrar_binding(), vec![lease_grant(8, LIVE_EXPIRY)]);
+    let unclaimed = input().read();
+    assert_eq!(field(&unclaimed.registration, "lifecycle_status"), "active");
+    assert_held(&input().claimed().read(), Some(HOLDER));
+    let mut reclaimed = input().claimed();
+    reclaimed
+        .writes
+        .push(write(CLAIM_BLOCK + 1, LEASE, HOLDER, None));
+    assert_not_held(&reclaimed.read());
+    assert_eq!(
+        field(&reclaimed.read().registration, "lifecycle_status"),
+        "active"
+    );
+}
+
+/// A claim the rule did not reach: the registration fields it writes are as the unclaimed name's.
+fn assert_same_registration(claimed: &ShadowName, unclaimed: &ShadowName) {
+    assert_not_held(claimed);
+    for key in [
+        "status",
+        "lifecycle_status",
+        "expiry",
+        "expires_at_reason",
+        "released_at",
+        "lapsed_registration",
+    ] {
+        assert_eq!(
+            field(&claimed.registration, key),
+            field(&unclaimed.registration, key),
+            "{key}: {claimed:#?}"
+        );
+    }
+}
+
+/// The registry-only binding of `registry_only`, open from before the clock: the binding the
+/// composed reader selects.
+fn open_registry_only() -> BindingCandidate {
+    let mut candidate = registry_only(HANDOFF);
+    candidate.active_from_seconds = Some(1_500_000_000.0);
+    candidate
+}
+
+/// R4 row A: a Graveyard-held name whose one candidate is an open ENSv1 binding, with no other
+/// authority. Selection gives it the ENSv1 arm, so the rule serves it released.
+#[test]
+fn a_held_name_with_one_open_ens_v1_candidate_is_selected_and_released() {
+    let input = || Name::new(open_registry_only(), Vec::new());
+    let (arm, unclaimed) = selected(input().facts());
+    assert_eq!(arm.as_deref(), Some("ens_v1"));
+    assert_eq!(field(&unclaimed.registration, "lifecycle_status"), "active");
+    let (arm, claimed) = selected(input().claimed().facts());
+    assert_eq!(arm.as_deref(), Some("ens_v1"));
+    assert_held(&claimed, Some(HOLDER));
+}
+
+/// R4 row A', the staging summary's reading of the two names: an ENSv1 candidate whose binding
+/// is not open at the clock, and no arm from history. Selection gives no arm, so the rule does
+/// not reach the name and the claim changes nothing.
+#[test]
+fn a_held_name_whose_one_candidate_is_not_open_has_no_arm_and_is_untouched() {
+    let input = || Name::new(registry_only(HANDOFF), Vec::new());
+    let (arm, unclaimed) = selected(input().facts());
+    assert!(arm.is_none(), "{arm:?}");
+    let (arm, claimed) = selected(input().claimed().facts());
+    assert!(arm.is_none(), "{arm:?}");
+    assert_same_registration(&claimed, &unclaimed);
+}
+
+/// R4 row B: a Graveyard-held name with no candidate. Selection gives no arm, so the rule does
+/// not reach the name and the claim changes nothing.
+#[test]
+fn a_held_name_with_no_candidate_has_no_arm_and_is_untouched() {
+    let without_candidates = |name: Name| {
+        let mut facts = name.facts();
+        facts.candidates.clear();
+        facts
+    };
+    let (arm, unclaimed) = selected(without_candidates(Name::new(
+        registry_only(HANDOFF),
+        Vec::new(),
+    )));
+    assert!(arm.is_none(), "{arm:?}");
+    let (arm, claimed) = selected(without_candidates(
+        Name::new(registry_only(HANDOFF), Vec::new()).claimed(),
+    ));
+    assert!(arm.is_none(), "{arm:?}");
+    assert_same_registration(&claimed, &unclaimed);
 }
