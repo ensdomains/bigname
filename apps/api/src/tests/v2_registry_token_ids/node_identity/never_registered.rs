@@ -95,7 +95,7 @@ fn assert_no_registration(record: &Value) {
     }
 }
 
-/// Row 1: an unknown label, on the name route, and left out of the expiry listing.
+/// An unknown label, on the name route, and left out of the expiry listing.
 #[tokio::test]
 async fn a_never_registered_name_serves_no_registration() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -113,7 +113,7 @@ async fn a_never_registered_name_serves_no_registration() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 2: label bytes change the spelling and nothing else.
+/// Label bytes change the spelling and nothing else.
 #[tokio::test]
 async fn a_known_label_changes_only_the_spelling_of_a_never_registered_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -127,7 +127,7 @@ async fn a_known_label_changes_only_the_spelling_of_a_never_registered_name() ->
     database.cleanup().await
 }
 
-/// Row 3: lookup serves the same answer on both profiles.
+/// Lookup serves the same answer on both profiles.
 #[tokio::test]
 async fn lookup_serves_a_never_registered_name_as_unregistered() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -149,7 +149,7 @@ async fn lookup_serves_a_never_registered_name_as_unregistered() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 4: the record's owner is not listed, as an owner, a manager or a former owner.
+/// The record's owner is not listed, as an owner, a manager or a former owner.
 #[tokio::test]
 async fn a_never_registered_name_is_not_listed_under_its_record_owner() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -171,7 +171,7 @@ async fn a_never_registered_name_is_not_listed_under_its_record_owner() -> Resul
     database.cleanup().await
 }
 
-/// Row 5: the search row carries neither the owner nor the authority.
+/// The search row carries neither the owner nor the authority.
 #[tokio::test]
 async fn a_never_registered_search_row_names_no_owner_or_authority() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -190,7 +190,7 @@ async fn a_never_registered_search_row_names_no_owner_or_authority() -> Result<(
     database.cleanup().await
 }
 
-/// Row 7: the parent's registry children stay listed with the authority of their own node.
+/// The parent's registry children stay listed with the authority of their own node.
 #[tokio::test]
 async fn the_children_of_a_never_registered_name_stay_listed() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -214,7 +214,7 @@ async fn the_children_of_a_never_registered_name_stay_listed() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 8: a name below it is a registry child, whose record's owner owns it in the only registry
+/// A name below it is a registry child, whose record's owner owns it in the only registry
 /// that has it.
 #[tokio::test]
 async fn a_subname_of_a_never_registered_name_keeps_its_record_owner() -> Result<()> {
@@ -239,7 +239,7 @@ async fn a_subname_of_a_never_registered_name_keeps_its_record_owner() -> Result
     database.cleanup().await
 }
 
-/// Row 16: the ownerless profile without a lease, which the class serves verbatim.
+/// An ownerless name without a lease is unregistered too.
 #[tokio::test]
 async fn an_unleased_ownerless_name_is_unregistered() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -248,7 +248,8 @@ async fn an_unleased_ownerless_name_is_unregistered() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 16's parity: the two names serialize alike, but for what names them.
+/// A name only the 2017 registry recorded and an ownerless name without a lease serialize
+/// alike, but for what names them.
 #[tokio::test]
 async fn a_never_registered_name_serves_the_shape_of_an_unleased_ownerless_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -267,7 +268,7 @@ async fn a_never_registered_name_serves_the_shape_of_an_unleased_ownerless_name(
     database.cleanup().await
 }
 
-/// Row 19: an `at=` read composes the same answer, before and after an unrelated block.
+/// An `at=` read composes the same answer, before and after an unrelated block.
 #[tokio::test]
 async fn an_at_read_of_a_never_registered_name_is_unregistered() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -295,7 +296,7 @@ async fn an_at_read_of_a_never_registered_name_is_unregistered() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 22: the `authority` filter's SQL agrees with the served value, on the owner relations and
+/// The `authority` filter's SQL agrees with the served value, on the owner relations and
 /// on the resolution relation, which reads the resolver's records and not the name's owner.
 #[tokio::test]
 async fn the_authority_filter_leaves_out_a_never_registered_name() -> Result<()> {

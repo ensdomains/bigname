@@ -2657,13 +2657,37 @@ async fn a_record_only_the_2017_registry_holds_is_no_registration() -> Result<()
                    "owner": OWNER, "ens_v1_expiry": LEASE_EXPIRY.to_string()}),
         )?;
     }
-    let related = fixture.rows("project_address_name_index").await?;
-    ensure!(
-        !related
-            .iter()
-            .any(|row| row["logical_name_id"] == never.as_str()),
-        "{related:#?}"
-    );
+    // The address index keeps every address the name's events named. The served page drops
+    // them, as it drops a released name's.
+    for address in [OWNER, OTHER] {
+        let page = load_family_address_names_capped_page(
+            &fixture.pool,
+            &AddressNamesPageRequest {
+                address,
+                namespace: None,
+                relations: None,
+                dedupe_by: AddressNamesCurrentDedupe::Resource,
+                q: None,
+                authority: None,
+                is_migrated: None,
+                parent: None,
+                sort: AddressNamesCurrentSort::Name,
+                order: AddressNamesCurrentOrder::Asc,
+                cursor: None,
+                page_size: 50,
+            },
+            true,
+        )
+        .await?;
+        ensure!(
+            !page
+                .entries
+                .iter()
+                .any(|entry| entry.logical_name_id == never),
+            "{address}: {:?}",
+            page.entries
+        );
+    }
     fixture.assert_rebuild_equal(6).await?;
     fixture.cleanup().await
 }
