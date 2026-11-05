@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS bigname_phase.project_address_listing (
     listed boolean NOT NULL,
     former_owner boolean NOT NULL,
     registry_child boolean NOT NULL,
-    registry_parent_logical_name_id text,
+    registry_parent_logical_name_id text COLLATE "C",
     registration_lead boolean NOT NULL,
     public_authority text,
     migrated boolean NOT NULL,
