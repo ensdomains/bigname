@@ -379,7 +379,7 @@ jobs:
       # line and no result line.
       - name: cargo test
         if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/')
-        timeout-minutes: 30
+        timeout-minutes: 20
         run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support ${{ matrix.test_args }}
 
       - name: Report stalled test databases
