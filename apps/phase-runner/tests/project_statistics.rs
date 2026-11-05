@@ -1,14 +1,15 @@
 //! The planner statistics of the tables the permission reads join, refreshed between Project
-//! batches. The fixture is the rebuild seed: a one-block rebuild, which analyzes no family table
-//! this file reads, then a batch of a new `ProjectPhase` that writes the rest of the names, the
-//! way a restarted process follows the head. Autovacuum is off on these tables, so only the code
-//! under test moves their statistics. `pg_class.reltuples` is -1 on a table never analyzed.
+//! batches. The fixture is the rebuild seed without its closing `ANALYZE`: a one-block rebuild,
+//! which analyzes no family table this file reads, then a batch of a new `ProjectPhase` that
+//! writes the rest of the names, the way a restarted process follows the head. Autovacuum is off
+//! on these tables, so only the code under test moves their statistics. `pg_class.reltuples` is
+//! -1 on a table never analyzed.
 #[allow(dead_code)]
 mod support;
 
 use std::{sync::Arc, time::Duration};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use phase_runner::{
     heads::{BlockMarker, HeadMarkers},
     phase::{AfterProgress, Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
@@ -33,13 +34,13 @@ const TABLES: [&str; 7] = [
 
 async fn seeded(prefix: &str) -> Result<ScratchDatabase> {
     let scratch = ScratchDatabase::create(prefix).await?;
-    sqlx::raw_sql(
-        &include_str!("../../../crates/project/tests/rebuild_performance/seed.sql")
-            .replace("__NAMES__", "40")
-            .replace("__CHAIN__", CHAIN),
-    )
-    .execute(scratch.pool())
-    .await?;
+    let seed = include_str!("../../../crates/project/tests/rebuild_performance/seed.sql")
+        .replace("__NAMES__", "40")
+        .replace("__CHAIN__", CHAIN);
+    let seed = seed
+        .strip_suffix("ANALYZE;\n")
+        .context("the seed ends with an ANALYZE of the whole database")?;
+    sqlx::raw_sql(seed).execute(scratch.pool()).await?;
     for table in TABLES {
         sqlx::query(&format!(
             "ALTER TABLE {table} SET (autovacuum_enabled = false)"

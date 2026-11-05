@@ -7,7 +7,7 @@ WITH namespaces AS (
     SELECT oid, nspname FROM pg_namespace
     WHERE nspname IN (current_setting('bigname.removal_schema'), current_setting('bigname.fresh_schema'))
 ), objects AS (
-    SELECT namespace.nspname, concat_ws('|', 'relation', relation.relname, relation.relkind) AS object
+    SELECT namespace.nspname, concat_ws('|', 'relation', relation.relname, relation.relkind, relation.reloptions::text) AS object
     FROM namespaces namespace JOIN pg_class relation ON relation.relnamespace=namespace.oid
     WHERE relation.relkind IN ('r','p','S')
     UNION ALL

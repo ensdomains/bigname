@@ -542,6 +542,7 @@ transfer_node_index_migration="$ROOT/migrations/20261102130000_normalized_events
 registry_roles_index_migration="$ROOT/migrations/20261102140000_normalized_events_registry_roles_index.sql"
 resolver_link_order_index_migration="$ROOT/migrations/20261103130000_project_resolver_link_order_index.sql"
 parent_key_index_migration="$ROOT/migrations/20261104120000_name_surfaces_project_parent_key_index.sql"
+analyze_thresholds_migration="$ROOT/migrations/20261105120000_project_permission_analyze_thresholds.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.
@@ -855,6 +856,8 @@ check_served_projection_removal() {
             # The parent key index: the identity file has no pre-7c copy, so both shapes hold
             # it from the baseline.
             emit_phase_migration "$parent_key_index_migration" baseline-first
+            # The analyze thresholds: absent from the pre-7c shape, present in the baseline.
+            emit_phase_migration "$analyze_thresholds_migration" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -1015,7 +1018,8 @@ for migration_file in \
     "$transfer_node_index_migration" \
     "$registry_roles_index_migration" \
     "$resolver_link_order_index_migration" \
-    "$parent_key_index_migration"
+    "$parent_key_index_migration" \
+    "$analyze_thresholds_migration"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done

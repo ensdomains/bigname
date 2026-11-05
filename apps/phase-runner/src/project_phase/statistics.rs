@@ -95,8 +95,8 @@ impl Schedule {
     }
 
     /// Called with each batch's committed rows. A redo's writes are not counted: Project analyzes
-    /// a rebuild itself, and a stop that finds a refresh waiting would report the finished redo
-    /// as incomplete. The first normal batch that writes a table after it makes the refresh due.
+    /// a rebuild itself, and a stop that finds a refresh waiting after a redo's last batch would
+    /// report the finished redo as incomplete.
     pub(super) fn record(&self, mode: &RunMode, rows: &BTreeMap<&'static str, u64>) {
         if !matches!(mode, RunMode::Normal) {
             return;

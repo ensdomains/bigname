@@ -5689,8 +5689,8 @@ reads join: `project_grant`, `project_account_approval`, `project_ens_v2_entry_o
 - It refreshes a table after the first normal batch of the process that writes it.
 - It refreshes it again each time the writes since the last refresh reach the table's row count
   at that refresh, and at least 1,000.
-- A redo's writes do not count. Project analyzes a rebuild itself, and the first normal batch
-  after the redo that writes a table refreshes it.
+- A redo's writes do not count, because Project analyzes a rebuild itself. A process that has not
+  refreshed a table yet refreshes it after the first normal batch that writes it.
 
 The counts are per table, across chains, and kept in memory. A table no batch writes is not
 refreshed. So a table a restore left without statistics stays that way until its first write,
