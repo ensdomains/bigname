@@ -262,14 +262,6 @@ async fn filtered_count(
     u64::try_from(count).context("negative child count")
 }
 
-pub(super) fn count_query<'a>(
-    parent_logical_name_id: &'a str,
-    filter: &ChildrenCurrentPageFilter<'a>,
-    registry: Option<RegistryLabels<'a>>,
-) -> QueryBuilder<'a, Postgres> {
-    capped_count_query(parent_logical_name_id, filter, registry, None)
-}
-
 /// The filtered count, over at most `total_limit` of the parent's rows when it is given.
 pub(super) fn capped_count_query<'a>(
     parent_logical_name_id: &'a str,

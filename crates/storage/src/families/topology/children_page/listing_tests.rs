@@ -6,7 +6,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
 use sqlx::{PgConnection, raw_sql};
 
-use super::super::listing_page::{count_query, page_query};
+use super::super::listing_page::{capped_count_query, page_query};
 use super::{
     listing_support::{checked_page, compose_listing},
     performance_tests::{CHAIN, CHILDREN, PARENT, install},
@@ -337,7 +337,7 @@ async fn a_filtered_total_counts_the_name_index_only() -> Result<()> {
         raw_sql("SET enable_seqscan = off")
             .execute(&mut *conn)
             .await?;
-        let query = count_query(PARENT, &fenced, None);
+        let query = capped_count_query(PARENT, &fenced, None, None);
         raw_sql(&format!("PREPARE fenced (text, text) AS {}", query.sql()))
             .execute(&mut *conn)
             .await?;

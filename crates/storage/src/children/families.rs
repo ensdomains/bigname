@@ -117,8 +117,8 @@ const SERVING_PARENT: &str = "/* storage:children.registry_serving_parent */
 
 /// The labels-route total of `registry_address` at the current family publication of
 /// `chain_id`: its labels under its representative pointing name ([`SERVING_PARENT`]) in that
-/// same snapshot, or zero when no name points at it, and `None` when the registry holds more
-/// than `cap` registrations under that name ([`count_registry_labels`]). The name is resolved
+/// same snapshot, or zero when no name points at it, and `None` when those labels are more than
+/// `cap` ([`count_registry_labels`]). The name is resolved
 /// here, not passed in, so the count never anchors to a name read from an earlier publication.
 pub(super) async fn registry_count_current(
     db: ReadDb<'_>,
