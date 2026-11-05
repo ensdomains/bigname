@@ -525,7 +525,8 @@ fn a_cleared_wrapped_subname_is_released() {
 /// a locked parent. In one transaction the Graveyard has the NameWrapper re-parent the token to
 /// it, which writes the registry record to the NameWrapper and moves the token to the Graveyard,
 /// then unwraps it to itself. Neither the Graveyard nor the NameWrapper is a holder. The holder
-/// is the recipient of the NameWrapper's last transfer before the claim's transaction: the wrap's.
+/// is the recipient of the NameWrapper's last transfer before the claim's write that is not the
+/// Graveyard: the wrap's.
 #[test]
 fn a_re_parented_wrapped_subname_is_released_with_its_token_holder() {
     let mut input = wrapped("wrapped", 0);
@@ -876,4 +877,47 @@ fn a_record_set_earlier_in_the_claims_transaction_names_the_holder() {
     set_owner.position.event_identity = "write:set-owner".to_owned();
     input.writes.push(set_owner);
     assert_held(&input.claimed().read(), Some(NEXT_OWNER));
+}
+
+/// `clear` writes a subname of a name it holds again each time it runs, for that subname or any
+/// name below it (`Graveyard.sol` `_clear`, the owned-parent branch). The registration ended at
+/// the first Graveyard write: `released_at` is its block time and the lapsed owner is the holder
+/// before it, never the Graveyard.
+#[test]
+fn a_repeated_graveyard_write_keeps_the_first_claim_and_its_holder() {
+    let mut input = Name::new(registry_only(HANDOFF), Vec::new()).claimed();
+    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+    input
+        .writes
+        .push(write(80, REGISTRY_ONLY, GRAVEYARD, Some("graveyard")));
+    assert_held(&input.read(), Some(HOLDER));
+}
+
+/// The production `.eth` claim: in the claim's transaction, before its registry write, the
+/// BaseRegistrar burns the lapsed token (a transfer to zero) and mints it to the Graveyard. Neither
+/// names a holder: the lapsed owner is the lease's holder before them.
+#[test]
+fn a_claimed_lease_burned_and_minted_to_the_graveyard_keeps_its_holder() {
+    let transfer = |log: i64, to: &str| {
+        let mut row = event(
+            "TokenControlTransferred",
+            "ens_v1_registrar_l1",
+            LEASE,
+            CLAIM_BLOCK,
+            json!({"authority_kind": "registrar", "source_event": "Transfer", "to_address": to}),
+        );
+        row.position.log_index = Some(log);
+        row.position.event_identity = format!("transfer:{log}");
+        row
+    };
+    let input = Name::new(
+        registrar_binding(),
+        vec![
+            lease_grant(8, LAPSED_EXPIRY),
+            lease_release(40, LAPSED_EXPIRY),
+            transfer(0, ZERO_ADDRESS),
+            transfer(1, GRAVEYARD),
+        ],
+    );
+    assert_held(&input.claimed().read(), Some(HOLDER));
 }
