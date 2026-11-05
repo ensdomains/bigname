@@ -321,9 +321,20 @@ fn push_event_rows<'a>(
     fence: bool,
     push_key: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
 ) {
-    // Red-run stub: the previous statement on both paths.
-    let _ = (read, filter, bucket, fence, push_key);
-    query.push("normalized_events ne");
+    if !fence {
+        query.push("normalized_events ne");
+        return;
+    }
+    query.push("(SELECT ne.* FROM normalized_events ne WHERE ne.consumer_visibility = 'activated'");
+    if read.canonical_only {
+        query.push(" AND ne.canonicality_state IN ('canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state)");
+    }
+    query.push(" AND ");
+    push_key(query);
+    push_bucket(query, bucket, filter.order);
+    query.push(" ORDER BY ");
+    push_history_order_terms(query, filter.order);
+    query.push(" OFFSET 0) ne");
 }
 
 fn push_probe_tail<'a>(
