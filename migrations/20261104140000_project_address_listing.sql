@@ -134,15 +134,18 @@ CREATE INDEX IF NOT EXISTS project_address_listing_created_idx
     WHERE listed;
 CREATE INDEX IF NOT EXISTS project_address_listing_q_idx
     ON bigname_phase.project_address_listing
-        (address, normalized_name, display_key, logical_name_id, resource_id)
+        (address, left(normalized_name, 100), display_key, logical_name_id, resource_id)
     WHERE listed;
 CREATE INDEX IF NOT EXISTS project_address_listing_parent_idx
     ON bigname_phase.project_address_listing
-        (address, parent_normalized_name, display_key, logical_name_id, resource_id)
+        (address, md5(parent_normalized_name), display_key, logical_name_id, resource_id)
     WHERE listed;
 CREATE INDEX IF NOT EXISTS project_address_listing_former_owner_idx
     ON bigname_phase.project_address_listing
-        (address, former_expires_key, namespace, normalized_name, namehash)
+        (address, former_expires_key, namespace,
+         (CASE WHEN octet_length(normalized_name) <= 2000 THEN normalized_name
+               ELSE left(normalized_name, 500) END),
+         namehash)
     WHERE former_owner;
 CREATE INDEX IF NOT EXISTS project_address_listing_name_work_idx
     ON bigname_phase.project_address_listing (chain_id, logical_name_id);
@@ -154,6 +157,12 @@ CREATE INDEX IF NOT EXISTS project_address_listing_registry_parent_idx
 CREATE INDEX IF NOT EXISTS project_address_listing_unhealed_idx
     ON bigname_phase.project_address_listing USING gin (unhealed_labelhashes)
     WHERE unhealed_labelhashes <> '{}';
+COMMENT ON INDEX bigname_phase.project_address_listing_q_idx IS
+    'This index serves the q prefix filter under the name sort. It keys the first 100 characters of normalized_name, so every key fits a btree row however long the name; a reader matches q on that cut as a range and checks the full normalized_name against the whole q, so a q longer than 100 characters filters inside the range of its first 100.';
+COMMENT ON INDEX bigname_phase.project_address_listing_parent_idx IS
+    'This index serves the parent filter under the name sort. It keys md5(parent_normalized_name), an equality key of bounded width, because the row carries no parent node and the route matches the parent as normalized text; a reader checks parent_normalized_name itself.';
+COMMENT ON INDEX bigname_phase.project_address_listing_former_owner_idx IS
+    'This index serves the former-owner page: expiry, namespace, name, namehash. The name key is normalized_name cut as display_key is cut, to its first 500 characters when it is longer than 2000 bytes, so every key fits a btree row. Two names with the same expiry and namespace whose cut keys are equal, which needs the same first 500 characters, order by namehash.';
 COMMENT ON TABLE bigname_phase.project_child_preimage_watermark IS
     'Project-owned watermarks of families F17 and F18: per chain and other chain, the highest block of the other chain, at or below its finalized (else safe) block, whose preimage observations the chain''s family step has read, so its stored child names and address listing names heal from labels first observed there. The family step advances it in its own block transaction and journals it for undo; a reset clears it, and a rebuild''s composition pass starts it again.';
 COMMENT ON COLUMN bigname_phase.project_child_preimage_watermark.chain_id IS
