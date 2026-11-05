@@ -10,9 +10,18 @@
 //! | S5 | Chain task panics | `run` waits for the stop, row stays `running` | `a_panicked_chain_stays_up_until_the_stop` |
 //! | S6 | One chain failed, then a stop overruns on another | Only the overrun is a stop-time failure | `a_stop_overrun_after_a_chain_failure_is_the_stop_time_failure` |
 //! | S9 | Scrape while staying up | `failed` status and the chain's loop series are served | `metrics_stay_served_after_a_terminal_stop` |
+//! | R1 | Database error in start-up `initialize_chain` | The chain runs again and completes | `a_start_up_initialize_blip_runs_the_chain_again` |
+//! | R2 | Database error in start-up stopped-phase recovery | The chain runs again and completes | `a_start_up_recovery_blip_runs_the_chain_again` |
+//! | R3 | Database error in a required-redo read after a Live cycle | The chain runs again and completes | `a_required_redo_read_blip_after_live_runs_the_chain_again` |
+//! | R4 | Phase lock held at start-up | Retried until the lock is free, then completes | `a_phase_lock_held_at_start_up_is_retried` |
+//! | R5 | Phase lock held by another session once the chain runs | The chain stops with `LockHeld`, no retry | `a_phase_lock_held_once_running_stops_the_chain` |
 //!
 //! Row S7 (`redo`), S8 (clean stop) and the exit mapping are in `src/main/tests.rs`. A stop during
 //! a required redo is row 9 of `redo_overtaken_by_reorg.rs`.
+//!
+//! The chain tasks are spawned, so a subscriber attached to one future would miss their log lines.
+//! These tests set a thread default instead. That relies on nextest running each test in its own
+//! process: under plain `cargo test`, another test thread can cache a callsite's interest first.
 
 use std::{
     io::{Read, Write},
@@ -20,13 +29,13 @@ use std::{
 };
 
 use phase_runner::runner::SupervisorReport;
-use tokio::task::JoinHandle;
+use tokio::{sync::Semaphore, task::JoinHandle};
 use tracing::subscriber::DefaultGuard;
-use tracing_subscriber::fmt::MakeWriter;
 
-use super::*;
+use super::{support::CapturedLogs, *};
 
 const CHAIN_STOPPED: &str = "chain supervisor stopped after a terminal error";
+const CHAIN_RETRIED: &str = "chain supervisor runs the chain again after a retryable error";
 /// A `run` that returned as soon as its chains ended has returned by then.
 const STAY_UP_WINDOW: Duration = Duration::from_millis(300);
 const STOP_DEADLINE: Duration = Duration::from_secs(10);
@@ -293,6 +302,252 @@ async fn metrics_stay_served_after_a_terminal_stop() -> Result<()> {
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn a_start_up_initialize_blip_runs_the_chain_again() -> Result<()> {
+    let chain_id = "retry-initialize-chain";
+    let scratch = ScratchDatabase::create("phase_runner_retry_initialize").await?;
+    let (runner, chain) = completing_chain(&scratch, chain_id, "retry-initialize").await?;
+    fail_once(
+        scratch.pool(),
+        "retry_initialize",
+        "BEFORE INSERT ON chain_phase_state FOR EACH ROW",
+        "true",
+    )
+    .await?;
+    let logs = CapturedLogs::default();
+    let _logging = logs.capture();
+
+    let report = SupervisedRun::start(runner, vec![chain])?.finish().await?;
+
+    assert_completed_after_a_retry(&report, &logs, "injected retry_initialize fault");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_start_up_recovery_blip_runs_the_chain_again() -> Result<()> {
+    let chain_id = "retry-recovery-chain";
+    let scratch = ScratchDatabase::create("phase_runner_retry_recovery").await?;
+    let (runner, chain) = completing_chain(&scratch, chain_id, "retry-recovery").await?;
+    // The first statement of stopped-phase recovery, which settles a stopped required Ingest redo.
+    fail_once(
+        scratch.pool(),
+        "retry_recovery",
+        "BEFORE UPDATE ON chain_phase_state FOR EACH STATEMENT",
+        "current_query() LIKE '%char_length($4)%'",
+    )
+    .await?;
+    let logs = CapturedLogs::default();
+    let _logging = logs.capture();
+
+    let report = SupervisedRun::start(runner, vec![chain])?.finish().await?;
+
+    assert_completed_after_a_retry(&report, &logs, "injected retry_recovery fault");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_required_redo_read_blip_after_live_runs_the_chain_again() -> Result<()> {
+    let chain_id = "retry-live-read-chain";
+    let scratch = ScratchDatabase::create("phase_runner_retry_live_read").await?;
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Semaphore::new(0));
+    let cycles = Arc::new(AtomicUsize::new(0));
+    let (runner, chain) = completing_chain(&scratch, chain_id, "retry-live-read").await?;
+    let runner = runner.with_after_required_redo_catch_up({
+        let (entered, resume, cycles) = (
+            Arc::clone(&entered),
+            Arc::clone(&resume),
+            Arc::clone(&cycles),
+        );
+        move || {
+            let (entered, resume, cycles) = (
+                Arc::clone(&entered),
+                Arc::clone(&resume),
+                Arc::clone(&cycles),
+            );
+            async move {
+                if cycles.fetch_add(1, Ordering::SeqCst) == 0 {
+                    entered.notify_one();
+                    let _permit = resume.acquire().await.expect("resume semaphore stays open");
+                }
+            }
+        }
+    });
+    let logs = CapturedLogs::default();
+    let _logging = logs.capture();
+    let run = SupervisedRun::start(runner, vec![chain])?;
+
+    // After the first Live cycle the next chain_phase_state read is the post-Live required Ingest
+    // redo read. Holding the table makes it wait, so it can be cancelled on the server.
+    entered.notified().await;
+    let mut holder = scratch.pool().begin().await?;
+    sqlx::query("LOCK TABLE chain_phase_state IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await?;
+    resume.add_permits(1);
+    let (pid, query) = waiting_query(scratch.pool()).await?;
+    assert!(
+        query.contains("redo_requested_from_block_number"),
+        "the first statement to wait was not the required-redo read: {query}"
+    );
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(pid)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert!(cancelled);
+    logs.wait_for(CHAIN_RETRIED, 1).await?;
+    holder.rollback().await?;
+    let report = run.finish().await?;
+
+    assert_completed_after_a_retry(&report, &logs, "canceling statement due to user request");
+    assert_eq!(cycles.load(Ordering::SeqCst), 2);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_phase_lock_held_at_start_up_is_retried() -> Result<()> {
+    let chain_id = "retry-held-lock-chain";
+    let scratch = ScratchDatabase::create("phase_runner_retry_held_lock").await?;
+    let (runner, chain) = completing_chain(&scratch, chain_id, "retry-held-lock").await?;
+    let held = PhaseLock::acquire(
+        scratch.writer_connect_options(),
+        chain_id,
+        PhaseName::Ingest,
+    )
+    .await?;
+    let logs = CapturedLogs::default();
+    let _logging = logs.capture();
+    let run = SupervisedRun::start(runner, vec![chain])?;
+
+    logs.wait_for(CHAIN_RETRIED, 2).await?;
+    assert!(!run.task.is_finished());
+    held.release().await?;
+    let report = run.finish().await?;
+
+    assert_completed_after_a_retry(&report, &logs, "phase lock held at start-up");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_phase_lock_held_once_running_stops_the_chain() -> Result<()> {
+    let chain_id = "held-lock-running-chain";
+    let scratch = ScratchDatabase::create("phase_runner_held_lock_running").await?;
+    let held = Arc::new(Mutex::new(None::<PhaseLock>));
+    let (runner, chain) = completing_chain(&scratch, chain_id, "held-lock-running").await?;
+    // After the first Live cycle the downstream work takes the Interpret lock again.
+    let runner = runner.with_after_required_redo_catch_up({
+        let (held, options) = (Arc::clone(&held), scratch.writer_connect_options());
+        move || {
+            let (held, options) = (Arc::clone(&held), options.clone());
+            async move {
+                let lock = PhaseLock::acquire(options, chain_id, PhaseName::Interpret)
+                    .await
+                    .expect("the Interpret lock is free between phases");
+                *held.lock().expect("held lock") = Some(lock);
+            }
+        }
+    });
+    let logs = CapturedLogs::default();
+    let _logging = logs.capture();
+    let run = SupervisedRun::start(runner, vec![chain])?;
+
+    logs.wait_for_stopped_chains(1).await?;
+    run.assert_stays_up().await;
+    let report = run.stop().await?;
+
+    assert_reported_before_the_stop(&report, &[chain_id]);
+    assert_eq!(report.stopped_chains[0].1.kind(), ErrorKind::LockHeld);
+    assert_eq!(logs.count(CHAIN_RETRIED), 0, "{}", logs.text());
+    let lock = held.lock().expect("held lock").take();
+    lock.expect("the hook took the lock").release().await?;
+    scratch.cleanup().await
+}
+
+/// A one-chain runner whose phases all complete, so its supervised run returns once the chain has
+/// passed one Live cycle.
+async fn completing_chain(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+    instance_id: &str,
+) -> Result<(PhaseRunner, ChainConfig)> {
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(3, format!("{chain_id}-block-3"))?,
+        safe: Some(BlockMarker::new(2, format!("{chain_id}-block-2"))?),
+        finalized: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+    };
+    let runner = runner(
+        scratch.runner(),
+        complete_phase_set(Some(heads)),
+        available_capacity(),
+        instance_id,
+    )?;
+    let mut chain = chain(chain_id)?;
+    chain.verify_before_live = true;
+    Ok((runner, chain))
+}
+
+/// Makes the first statement that fires `timing` and meets `condition` fail. The sequence is not
+/// transactional, so the failed statement's rollback does not rearm it. The nested `IF` keeps
+/// statements that miss `condition` from drawing on the sequence.
+async fn fail_once(pool: &sqlx::PgPool, name: &str, timing: &str, condition: &str) -> Result<()> {
+    let row = if timing.contains("FOR EACH ROW") {
+        "NEW"
+    } else {
+        "NULL"
+    };
+    sqlx::raw_sql(&format!(
+        "CREATE SEQUENCE {name}_calls;
+         CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $fault$
+         BEGIN
+             IF {condition} THEN
+                 IF nextval('{name}_calls') = 1 THEN
+                     RAISE EXCEPTION 'injected {name} fault';
+                 END IF;
+             END IF;
+             RETURN {row};
+         END
+         $fault$;
+         CREATE TRIGGER {name} {timing} EXECUTE FUNCTION {name}();"
+    ))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn waiting_query(pool: &sqlx::PgPool) -> Result<(i32, String)> {
+    tokio::time::timeout(STOP_DEADLINE, async {
+        loop {
+            let waiting: Option<(i32, String)> = sqlx::query_as(
+                "SELECT pid, query FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND backend_type = 'client backend' AND pid <> pg_backend_pid()
+                 LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await?;
+            if let Some(waiting) = waiting {
+                return Ok::<_, anyhow::Error>(waiting);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .context("no statement waited on the held table")?
+}
+
+fn assert_completed_after_a_retry(report: &SupervisorReport, logs: &CapturedLogs, cause: &str) {
+    assert_eq!(report, &SupervisorReport::default());
+    let text = logs.text();
+    let retry = text
+        .lines()
+        .find(|line| line.contains(CHAIN_RETRIED))
+        .unwrap_or_else(|| panic!("no retry was logged: {text}"));
+    assert!(retry.contains("attempt=1"), "{retry}");
+    assert!(retry.contains(cause), "{retry}");
+    assert_eq!(logs.count(CHAIN_STOPPED), 0, "{text}");
+}
+
 struct SupervisedRun {
     task: JoinHandle<RunnerResult<SupervisorReport>>,
     cancellation: CancellationToken,
@@ -331,6 +586,13 @@ impl SupervisedRun {
     async fn stop(self) -> Result<SupervisorReport> {
         self.cancellation.cancel();
         Ok(tokio::time::timeout(STOP_DEADLINE, self.task).await???)
+    }
+
+    /// Waits for a run whose chains all complete, with no stop.
+    async fn finish(self) -> Result<SupervisorReport> {
+        Ok(tokio::time::timeout(STOP_DEADLINE, self.task)
+            .await
+            .context("the run did not finish without a stop")???)
     }
 }
 
@@ -408,58 +670,39 @@ impl Phase for FailsOneChain {
 
 /// The supervisor's log, which is the only signal that it has recorded a chain's stop. A stop
 /// raised before that line would count the chain as a stop-time failure.
-#[derive(Clone, Default)]
-struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+trait SupervisorLog {
+    fn capture(&self) -> DefaultGuard;
+    fn count(&self, line: &str) -> usize;
+    async fn wait_for(&self, line: &str, count: usize) -> Result<()>;
+    async fn wait_for_stopped_chains(&self, count: usize) -> Result<()>;
+}
 
-struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
-
-impl CapturedLogs {
-    /// A `#[tokio::test]` runs every task on this thread, so a thread default sees them all.
+impl SupervisorLog for CapturedLogs {
     fn capture(&self) -> DefaultGuard {
         tracing::subscriber::set_default(
             tracing_subscriber::fmt()
                 .with_writer(self.clone())
                 .with_ansi(false)
-                .with_max_level(tracing::Level::ERROR)
+                .with_max_level(tracing::Level::WARN)
                 .finish(),
         )
     }
 
-    fn stopped_chains(&self) -> usize {
-        String::from_utf8_lossy(&self.0.lock().expect("captured log lock"))
-            .matches(CHAIN_STOPPED)
-            .count()
+    fn count(&self, line: &str) -> usize {
+        self.text().matches(line).count()
     }
 
-    async fn wait_for_stopped_chains(&self, count: usize) -> Result<()> {
+    async fn wait_for(&self, line: &str, count: usize) -> Result<()> {
         tokio::time::timeout(STOP_DEADLINE, async {
-            while self.stopped_chains() < count {
+            while self.count(line) < count {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .with_context(|| format!("the supervisor never recorded {count} stopped chains"))
-    }
-}
-
-impl<'a> MakeWriter<'a> for CapturedLogs {
-    type Writer = CapturedLogWriter;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        CapturedLogWriter(Arc::clone(&self.0))
-    }
-}
-
-impl Write for CapturedLogWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .expect("captured log lock")
-            .extend_from_slice(buffer);
-        Ok(buffer.len())
+        .with_context(|| format!("the log never had {count} lines of {line:?}"))
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+    async fn wait_for_stopped_chains(&self, count: usize) -> Result<()> {
+        self.wait_for(CHAIN_STOPPED, count).await
     }
 }
