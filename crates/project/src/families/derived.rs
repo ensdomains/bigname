@@ -446,7 +446,7 @@ pub(super) fn refresh_block<'a>(
     transaction: &'a mut Transaction<'_, Postgres>,
     chain_id: &'a str,
     block: &'a input::BlockHeader,
-    after_sweeps: (i64, Sweeps),
+    (after, sweeps): (i64, Sweeps),
     composition: &'a marker::Composition,
     stats: &'a mut BlockStats,
 ) -> std::pin::Pin<Box<impl Future<Output = Result<()>>>> {
@@ -454,7 +454,7 @@ pub(super) fn refresh_block<'a>(
         transaction,
         chain_id,
         block,
-        after_sweeps,
+        (after, sweeps),
         composition,
         stats,
     ))

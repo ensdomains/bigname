@@ -135,8 +135,8 @@ impl Fixture {
     /// every other index of `project_address_listing` is dropped (the primary key with its
     /// constraint) and sequential scans, bitmap scans and sorts are off, so the plan shows what
     /// the shape of `index` can answer, not which index the planner prefers for this small
-    /// fixture. Which index the planner chooses at realistic cardinality is the reader's plan
-    /// guard to prove.
+    /// fixture. Which index the planner chooses at realistic cardinality is for the plan guard
+    /// of the route that reads the table to prove.
     pub async fn ensure_index_serves(
         &self,
         read: &str,

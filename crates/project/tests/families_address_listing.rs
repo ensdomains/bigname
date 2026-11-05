@@ -238,7 +238,8 @@ async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<(
 // NewOwner gives the children relation a child, and its registrar lease indexes the holder for
 // the child's id, yet the address listing stores no row for it. The parent's surface appears at
 // block 12, so that block derives the parent's registry children whole, the path no
-// `registry_child_parents` read guards.
+// `registry_child_parents` read guards. The fixture writes every event in the `ens` namespace,
+// and both reads key on the source family, not the namespace.
 #[tokio::test]
 async fn a_basenames_registry_child_lists_no_row() -> Result<()> {
     let fixture = Fixture::new("families_address_listing_basenames_child", 20).await?;
