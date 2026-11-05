@@ -423,6 +423,7 @@ pub async fn run(
     session: &InputToken,
     options: &FamilyOptions,
 ) -> (FamilyOutcome, Option<crate::ProjectError>) {
+    bigname_storage::stack_probe::mark("families::run");
     let started = Instant::now();
     let mut outcome = FamilyOutcome {
         target: Some(target.clone()),

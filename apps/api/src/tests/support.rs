@@ -4015,6 +4015,7 @@ async fn publish_test_families(database: &TestDatabase, target: i64) -> Result<(
 
 /// Follow/rebuild the fixture's real canonical inputs; the family marker owns resume state.
 async fn publish_test_families_on(pool: &PgPool, chain: &str, target: i64) -> Result<()> {
+    bigname_storage::stack_probe::mark("api::publish_test_families_on");
     let hash: String = sqlx::query_scalar(
         "SELECT block_hash FROM chain_lineage WHERE chain_id = $1 AND block_number = $2
          AND canonicality_state IN ('canonical', 'safe', 'finalized')",

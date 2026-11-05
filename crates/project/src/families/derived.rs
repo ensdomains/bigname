@@ -26,6 +26,8 @@ pub(crate) use summary::{
 };
 #[cfg(test)]
 mod summary_plan_tests;
+#[cfg(test)]
+mod stack_probe;
 
 use sqlx::{Postgres, Transaction};
 
@@ -232,6 +234,7 @@ pub(crate) async fn refresh(
     touched: &Touched,
     composition: &super::marker::Composition,
 ) -> Result<summary::Refreshed> {
+    bigname_storage::stack_probe::mark("derived::refresh");
     if !touched.names.is_empty() {
         run(transaction, NAME_DELETE, chain_id, &touched.names, None).await?;
         run(transaction, NAME_INSERT, chain_id, &touched.names, None).await?;
@@ -468,6 +471,7 @@ async fn refresh_block_inner(
     composition: &marker::Composition,
     stats: &mut BlockStats,
 ) -> Result<()> {
+    bigname_storage::stack_probe::mark("derived::refresh_block");
     let root = composition.admission.as_ref();
     let root = root.map(|admission| admission.root_registry.as_str());
     super::resolution_paths::prepare(transaction, chain_id, block, after, root).await?;

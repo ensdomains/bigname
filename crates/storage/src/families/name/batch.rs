@@ -345,6 +345,7 @@ pub(super) async fn load_chain(
     shape: CoverageShape,
     with_heads: bool,
 ) -> Result<BTreeMap<String, Composed>> {
+    crate::stack_probe::mark("storage::load_chain");
     let chain_id = publication.chain_id.as_str();
     let clock = Clock {
         block_number: publication.block_number,

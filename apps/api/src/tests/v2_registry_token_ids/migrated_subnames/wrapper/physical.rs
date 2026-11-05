@@ -232,6 +232,7 @@ async fn physical_resource(database: &TestDatabase, registry: &str, label: &str)
 }
 
 async fn setup_native() -> Result<(TestDatabase, Address, BTreeMap<&'static str, Uuid>)> {
+    bigname_storage::stack_probe::mark("api::setup_native");
     let (database, resolver) = wrapped_setup().await?;
     let owner = HOLDER.parse()?;
     let w = REGISTRY.parse()?;
@@ -604,6 +605,7 @@ async fn migrated_subname_canonical_expiry_moves_the_registry_to_its_live_mount(
 }
 
 async fn canonical_expiry_moves_the_registry_to_its_live_mount() -> Result<()> {
+    bigname_storage::stack_probe::mark("api::test body");
     eprintln!(
         "TYR105 physical fingerprint {}",
         bigname_content_hash::INTERPRETER_CONTENT_HASH
@@ -770,3 +772,57 @@ async fn canonical_expiry_moves_the_registry_to_its_live_mount() -> Result<()> {
 
 #[path = "physical/classifier.rs"]
 mod classifier;
+
+/// Probe only, never merged: the sizes of the futures this test's body awaits.
+#[allow(unreachable_code, unused_variables, clippy::diverging_sub_expression)]
+#[test]
+fn stack_probe_api_future_sizes() {
+    fn output_size<R>(_: &impl FnOnce() -> R) -> usize {
+        std::mem::size_of::<R>()
+    }
+    macro_rules! size {
+        ($out:ident, $name:literal, $call:expr) => {{
+            let make = || $call;
+            $out.push(format!("FUTSIZE {:>8} {}", output_size(&make), $name));
+        }};
+    }
+    let mut out: Vec<String> = Vec::new();
+    size!(out, "test body", canonical_expiry_moves_the_registry_to_its_live_mount());
+    size!(out, "setup_native", setup_native());
+    size!(out, "seed_and_run_with", seed_and_run_with(unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!()));
+    size!(out, "empty_clock", empty_clock(unreachable!(), unreachable!(), unreachable!()));
+    size!(out, "publish", publish(unreachable!(), unreachable!()));
+    size!(out, "replay::families", replay::families(unreachable!()));
+    size!(out, "replay::assert_rebuild", replay::assert_rebuild(unreachable!(), unreachable!()));
+    size!(out, "assert_name_consumers", assert_name_consumers(unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!()));
+    size!(out, "families::apply", bigname_project::families::apply(unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!()));
+    size!(out, "families::undo_to", bigname_project::families::undo_to(unreachable!(), unreachable!(), unreachable!()));
+    panic!("STACK PROBE\n{}", out.join("\n"));
+}
+
+/// Probe only, never merged: the stack depth at each mark while this test's body runs on a
+/// 512 MiB thread.
+#[test]
+fn stack_probe_api_depths() {
+    let report = std::thread::Builder::new()
+        .stack_size(512 << 20)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let result = runtime.block_on(async {
+                bigname_storage::stack_probe::start();
+                Box::pin(canonical_expiry_moves_the_registry_to_its_live_mount()).await
+            });
+            format!(
+                "result {:?}\n{}",
+                result.map_err(|error| format!("{error:#}")),
+                bigname_storage::stack_probe::report()
+            )
+        })
+        .expect("thread")
+        .join()
+        .expect("join");
+    panic!("STACK DEPTH\n{report}");
+}

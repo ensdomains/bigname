@@ -352,6 +352,7 @@ pub(crate) async fn names_chunk(
     ids: &[(i64, String, Reach)],
     stats: &mut BlockStats,
 ) -> Result<()> {
+    bigname_storage::stack_probe::mark("compose::names_chunk");
     let reaching = |least: Reach| {
         ids.iter()
             .filter(|(_, _, reach)| *reach >= least)

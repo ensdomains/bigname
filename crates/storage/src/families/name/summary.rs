@@ -104,6 +104,7 @@ async fn compose_summaries(
     logical_name_ids: &[String],
     include_relations: bool,
 ) -> Result<NameSummaryPublication> {
+    crate::stack_probe::mark("storage::compose_summaries");
     if logical_name_ids.is_empty() {
         return Ok(NameSummaryPublication::default());
     }
@@ -307,6 +308,7 @@ pub async fn compose_address_listing(
     publication: &FamilyPublication,
     logical_name_ids: &[String],
 ) -> Result<crate::families::records::AddressListingRows> {
+    crate::stack_probe::mark("storage::compose_address_listing");
     if logical_name_ids.is_empty() {
         return Ok(Default::default());
     }

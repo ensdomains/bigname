@@ -37,6 +37,7 @@ pub(crate) async fn publication_relations(
     publication: &FamilyPublication,
     composed: &[&NameCurrentRow],
 ) -> Result<(Vec<CurrentHistoryRelation>, AddressListingRows)> {
+    crate::stack_probe::mark("storage::publication_relations");
     let clock = publication.timestamp_seconds();
     let inputs = ChainInputs::load(
         conn,
