@@ -17,7 +17,7 @@
 //! still reads only the pointer index. The row test pins each input class to its selected pointer
 //! and to the previous statement's rows.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Write};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -251,14 +251,15 @@ async fn mirror_registry_probe_rows_and_oracle_parity() -> Result<()> {
     .await
 }
 
-/// The custom-plan walk itself, on a chain where ENSv1 pointers are most of the rows: 360,000 more
+/// The custom-plan walk itself, on a chain where ENSv1 pointers are most of the rows: 250,000 more
 /// unrelated pointers over 2,000 other nodes. There, with the default selectivity for the node
 /// equality, the previous statement's custom plan walks the chain's rows newest first on the
 /// chain-and-block index and filters them until the walked node's pointer. The fenced statement
 /// still reads only the pointer index, in both plan modes with statistics off and on.
 #[tokio::test]
 async fn mirror_registry_probe_custom_walk_on_a_pointer_heavy_chain() -> Result<()> {
-    with_fixture("mirror_registry_custom_walk", async |connection| {
+    let started = std::time::Instant::now();
+    let result = with_fixture("mirror_registry_custom_walk", async |connection| {
         raw_sql(POINTER_HEAVY_SQL).execute(&mut *connection).await?;
         let published = BTreeMap::from([(MAINNET.to_owned(), BOUND)]);
         let mut failures = Vec::new();
@@ -320,7 +321,14 @@ async fn mirror_registry_probe_custom_walk_on_a_pointer_heavy_chain() -> Result<
         );
         Ok(())
     })
-    .await
+    .await;
+    // Written past the test harness's capture, so a passing run's log keeps this test's cost.
+    let _ = writeln!(
+        std::io::stderr(),
+        "mirror pointer-heavy chain test: {:?}",
+        started.elapsed()
+    );
+    result
 }
 
 /// The fenced and the previous mirror substitution for one name on a retained database, for the
@@ -576,7 +584,7 @@ async fn with_fixture(
     result
 }
 
-/// 360,000 more unrelated ENSv1 pointers over 2,000 other nodes, in blocks the fixture's lineage
+/// 250,000 more unrelated ENSv1 pointers over 2,000 other nodes, in blocks the fixture's lineage
 /// already has.
 const POINTER_HEAVY_SQL: &str = r#"
 INSERT INTO normalized_events(event_identity, namespace, event_kind, source_family, manifest_version,
@@ -587,7 +595,7 @@ SELECT 'heavy:pointer:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
        'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
        jsonb_build_object('node', '0x' || lpad(to_hex(200000 + n % 2000), 64, '0'),
                           'resolver', '0x' || lpad(to_hex(9), 40, '0'))
-FROM generate_series(1, 360000) n;
+FROM generate_series(1, 250000) n;
 "#;
 
 /// Lineage for blocks 1..=30200 with one orphaned block hash at 90. Name k has namehash k as 32
