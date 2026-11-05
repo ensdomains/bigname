@@ -11,6 +11,10 @@ Install these tools first. Where a file pins a version, use that version.
 Homebrew does not link `rustup` or `libpq` onto `PATH`, so add their `bin`
 directories yourself.
 
+Run the `cargo install` commands from inside the repository, where
+`rust-toolchain.toml` selects the toolchain. Outside it they fail when `rustup`
+has no default toolchain.
+
 For the local stack:
 
 - `rustup`, for every Rust build. `rust-toolchain.toml` pins the toolchain,
@@ -56,7 +60,8 @@ For less common work:
 
 1. Run `scripts/sync-refs` to fetch the
    [pinned upstream copies](#pinned-upstream-copies).
-2. Copy `.env.example` to `.env` and apply any local overrides.
+2. Copy `.env.example` to `.env` and apply any local overrides. On a laptop,
+   lower the [PostgreSQL memory settings](#database-memory-on-a-laptop).
 3. Run `docker compose up -d --wait` so PostgreSQL passes its healthcheck before
    phase initialization.
 4. Export the local environment and initialize the phase schema once, before
@@ -77,6 +82,12 @@ For less common work:
 This bootstrap assumes a disposable fresh local database volume. For a retained
 local volume, follow the production schema-migration order before phase-schema
 initialization instead of treating the current baseline as an in-place upgrade.
+
+To keep an existing local database untouched, set `COMPOSE_PROJECT_NAME` in
+`.env` to a new name, such as `bigname-dev`. Docker Compose then creates a fresh
+volume under that name and leaves the old volume as it is. Both projects publish
+the same host port, so stop the other project's container first, or change
+`POSTGRES_PORT` and both database URLs in `.env`.
 
 The default compose stack provides PostgreSQL on `127.0.0.1:5432`. The phase
 runner puts its baseline in `bigname_phase` and connects with
@@ -225,12 +236,24 @@ Run DB-backed Rust tests through the isolated database harness:
 
 Do not run DB-backed tests directly unless `BIGNAME_DATABASE_URL` or
 `DATABASE_URL` already points at a reachable local PostgreSQL server. The
-harness starts or reuses `postgres:16-alpine` on `127.0.0.1:55432` with JIT off,
-exports both variables, and does not source `.env`. A container created before
-JIT was turned off keeps JIT on; remove it (`docker rm -f bigname-test-postgres`,
-or the name set in `BIGNAME_TEST_POSTGRES_CONTAINER`) so the harness recreates
-it, or the [Project](projections.md) suites, which build the served projections,
-spend most of their time compiling statements.
+harness starts or reuses `postgres:16-alpine` on `127.0.0.1:55432` with JIT off
+and `max_connections=300`, exports both variables, and does not source `.env`.
+
+The harness reuses an existing container unchanged, so a container created
+before the current settings lacks them:
+
+- Without JIT off, the [Project](projections.md) suites, which build the served
+  projections, spend most of their time compiling statements.
+- With the stock 100-connection ceiling, the end-to-end suite's parallel stacks
+  saturate PostgreSQL, which surfaces as pool-acquire timeouts in unrelated
+  tests.
+
+To see the settings a container was created with, run
+`docker inspect --format '{{.Config.Cmd}}' bigname-test-postgres`. A current
+container prints `[-c max_connections=300 -c jit=off]`. To get a fresh one,
+remove it with `docker rm -f bigname-test-postgres`, or the name set in
+`BIGNAME_TEST_POSTGRES_CONTAINER`. The next `./scripts/test-db` run creates it
+with the current settings.
 
 Pass a focused command after `--`:
 

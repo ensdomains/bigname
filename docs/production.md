@@ -2,8 +2,8 @@
 
 This page documents the public single-host deployment shape used for bigname.
 
-The current public API hostname is `sepolia.api.bigname.sh`, serving Sepolia.
-Mainnet follows at its own hostname once it is deployed.
+The public API hostnames are `api.bigname.sh`, serving Mainnet, and
+`sepolia.api.bigname.sh`, serving Sepolia.
 
 ## Public Edge
 
