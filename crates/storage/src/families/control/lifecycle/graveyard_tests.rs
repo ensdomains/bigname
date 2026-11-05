@@ -1251,6 +1251,37 @@ fn a_token_moved_without_reclaim_names_its_new_holder() -> Row {
     )
 }
 
+/// The holder transfers the token without `reclaim`. Its new holder wraps the name with the
+/// Graveyard as the wrapped owner (`wrapETH2LD` takes the token from its holder, the
+/// BaseRegistrar's `reclaim` writes the record to the NameWrapper and the wrapped token is
+/// minted), and the Graveyard claims it once lapsed. The wrap moved the token into custody, so
+/// the lease's holder is still the one who wrapped it.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246-L279 @ ens_v1@91c966f)
+fn a_token_moved_without_reclaim_then_wrapped_to_the_graveyard_names_its_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY).handed_off_at(60),
+        &[
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Lease(30, 0, 1, NEXT_OWNER),
+            Lease(40, 0, 0, NAME_WRAPPER),
+            Write(40, 0, 1, NAME_WRAPPER),
+            Mint(40, 0, 2, WRAPPED, GRAVEYARD),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (30, 0, 1, Some(HOLDER)),
+            (40, 0, 0, Some(HOLDER)),
+            (40, 0, 1, IN_GRAVEYARD),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        60,
+    )
+}
+
 /// The holder sets the registry owner to a manager and keeps the token. The token's holder is
 /// the lapsed holder.
 fn a_manager_set_record_names_the_token_holder() -> Row {
@@ -1898,6 +1929,7 @@ custody_rows! {
     a_record_set_in_the_claims_transaction_names_the_token_holder: a_record_set_in_the_claims_transaction_names_the_token_holder_serves, a_record_set_in_the_claims_transaction_names_the_token_holder_trace;
     a_token_sent_to_the_graveyard_then_claimed_keeps_its_holder: a_token_sent_to_the_graveyard_then_claimed_keeps_its_holder_serves, a_token_sent_to_the_graveyard_then_claimed_keeps_its_holder_trace;
     a_token_moved_without_reclaim_names_its_new_holder: a_token_moved_without_reclaim_names_its_new_holder_serves, a_token_moved_without_reclaim_names_its_new_holder_trace;
+    a_token_moved_without_reclaim_then_wrapped_to_the_graveyard_names_its_holder: a_token_moved_without_reclaim_then_wrapped_to_the_graveyard_names_its_holder_serves, a_token_moved_without_reclaim_then_wrapped_to_the_graveyard_names_its_holder_trace;
     a_manager_set_record_names_the_token_holder: a_manager_set_record_names_the_token_holder_serves, a_manager_set_record_names_the_token_holder_trace;
     a_wrapped_eth_name_transferred_is_released_to_its_new_wrapped_holder: a_wrapped_eth_name_transferred_is_released_to_its_new_wrapped_holder_serves, a_wrapped_eth_name_transferred_is_released_to_its_new_wrapped_holder_trace;
     a_wrapped_eth_name_unwrapped_is_released_to_the_unwrapper: a_wrapped_eth_name_unwrapped_is_released_to_the_unwrapper_serves, a_wrapped_eth_name_unwrapped_is_released_to_the_unwrapper_trace;
