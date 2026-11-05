@@ -521,13 +521,13 @@ fn a_cleared_wrapped_subname_is_released() {
     assert_held(&input.claimed().read(), Some(HOLDER));
 }
 
-/// Row 11, re-parented: a wrapped subname without `PARENT_CANNOT_CONTROL` under a locked parent.
-/// In one transaction the Graveyard has the NameWrapper re-parent the token to it, which writes
-/// the registry record to the NameWrapper and moves the token to the Graveyard, then unwraps it
-/// to itself. Neither the Graveyard nor the NameWrapper is a holder, and the token's holder before
-/// the move is not retained here, so the lapsed owner is unknown.
+/// Row 11, re-parented (ruling 3's case): a wrapped subname without `PARENT_CANNOT_CONTROL` under
+/// a locked parent. In one transaction the Graveyard has the NameWrapper re-parent the token to
+/// it, which writes the registry record to the NameWrapper and moves the token to the Graveyard,
+/// then unwraps it to itself. Neither the Graveyard nor the NameWrapper is a holder. The holder
+/// is the one the wrapper events name before the claim's transaction: the wrap's.
 #[test]
-fn a_re_parented_wrapped_subname_is_released_with_no_holder() {
+fn a_re_parented_wrapped_subname_is_released_with_its_token_holder() {
     let mut input = wrapped("wrapped", 0);
     input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
     input.events.push(event(
@@ -542,7 +542,7 @@ fn a_re_parented_wrapped_subname_is_released_with_no_holder() {
     re_parent.position.log_index = Some(0);
     re_parent.position.event_identity = "write:re-parent".to_owned();
     input.writes.push(re_parent);
-    assert_held(&input.claimed().read(), None);
+    assert_held(&input.claimed().read(), Some(HOLDER));
 }
 
 /// A live token sent to the Graveyard, later claimed: the Graveyard is not the lapsed holder, the
@@ -749,4 +749,36 @@ fn a_held_name_with_no_candidate_has_no_arm_and_is_untouched() {
     ));
     assert!(arm.is_none(), "{arm:?}");
     assert_same_registration(&claimed, &unclaimed);
+}
+
+/// Row 11, handed off (Codex P2 on #1390): a wrapped subname whose token survives, cleared by the
+/// Graveyard's `setSubnodeRecord`. The write names the Graveyard, not the NameWrapper, so it ends
+/// the NameWrapper authority and opens a registry-only binding at the claim
+/// (adapters `wrapper_custody.rs`, `keeps_authority`), which selection picks, as in production.
+/// The lapsed owner is the token holder the wrapper events name before the claim, never the
+/// NameWrapper or the Graveyard. Each registry-only flag a handoff binding can carry.
+#[test]
+fn a_cleared_wrapped_subname_handed_to_a_registry_only_binding_keeps_its_token_holder() {
+    for handoff in [true, false] {
+        let mut wrapper = wrapper_binding();
+        wrapper.active_from_seconds = Some(1_500_000_000.0);
+        wrapper.active_to_seconds = Some(CLAIM_TIME as f64);
+        let mut registry_only = binding(
+            REGISTRY_ONLY,
+            CLAIM_BLOCK,
+            json!({"state_derived": true, "registry_only": handoff,
+                   "predecessor_resource_id": WRAPPED,
+                   "surface_bound_position": {"block_number": CLAIM_BLOCK, "transaction_index": 0,
+                                              "log_index": 2, "event_identity": "surface-bound"}}),
+        );
+        registry_only.active_from_seconds = Some(CLAIM_TIME as f64);
+        let mut input = wrapped("wrapped", 0);
+        input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+        input.binding = registry_only;
+        let mut facts = input.claimed().facts();
+        facts.candidates = vec![wrapper, facts.candidates[0].clone()];
+        let (arm, shadow) = selected(facts);
+        assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {handoff}");
+        assert_held(&shadow, Some(HOLDER));
+    }
 }
