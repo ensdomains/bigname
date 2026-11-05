@@ -175,10 +175,10 @@ build or wait can also raise the heartbeat-stale alert.
   the runner.
 - A build or drop that fails stops the chain with an error naming the index and the cause. It is
   not retried in the process: another chain's Project entry stops with the same error instead of
-  building again. Once every chain has stopped the process exits non-zero. Under a restart
-  policy each start drops the invalid leftover and builds it again, so a cause that persists,
-  such as a login that does not own the table, shows as a restart loop with the same error each
-  time.
+  building again. The process stays up until it is stopped. Each start drops the invalid
+  leftover and builds it again, so fix the cause and then restart the runner. A cause that
+  persists, such as a login that does not own the table, stops the chain again with the same
+  error.
 - A stop during any of the rebuild's statements, a read held behind a lock included, cancels
   it on the server and releases the rebuild's lock. A stop while it waits for capacity issues
   no build.

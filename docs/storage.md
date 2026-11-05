@@ -1429,8 +1429,8 @@ backoff. Until the retry takes the lock again, the lock is free.
 A redo that starts in that gap wins. It settles the row and runs. While it
 runs, the supervisor's Live retry fails with `InvalidTransition`, which is not
 retried, so that chain's supervisor stops. Other chains keep running, and the
-process exits nonzero once every chain has stopped. Restart the supervisor
-after the redo finishes.
+process stays up until it is stopped. Restart the supervisor after the redo
+finishes.
 
 The lost attempt's head publication can still commit while that redo runs.
 When it replaces readable blocks, it stamps a required redo on Interpret,

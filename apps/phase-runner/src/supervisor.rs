@@ -44,6 +44,7 @@ pub(crate) async fn run(
 
     let mut report = SupervisorReport::default();
     while let Some(result) = supervisors.join_next_with_id().await {
+        let stop_requested = cancellation.is_cancelled();
         match result {
             Ok((task_id, Ok(()))) => {
                 let chain_id = take_chain_id(&mut chain_by_task, task_id);
@@ -51,18 +52,37 @@ pub(crate) async fn run(
             }
             Ok((task_id, Err(runner_error))) => {
                 let chain_id = take_chain_id(&mut chain_by_task, task_id);
-                record_terminal_error(&mut report, chain_id, runner_error);
+                record_terminal_error(&mut report, chain_id, runner_error, stop_requested);
             }
             Err(join_error) => {
                 let chain_id = take_chain_id(&mut chain_by_task, join_error.id());
                 let runner_error = RunnerError::data_integrity(format!(
                     "chain supervisor task panicked or was cancelled: {join_error}"
                 ));
-                record_terminal_error(&mut report, chain_id, runner_error);
+                record_terminal_error(&mut report, chain_id, runner_error, stop_requested);
             }
         }
     }
+    if !report.stopped_chains.is_empty() && !cancellation.is_cancelled() {
+        wait_for_the_stop(&report, &cancellation).await;
+    }
     Ok(report)
+}
+
+/// An exit here would leave the stopped chains' metrics unreadable, and a restart policy would
+/// replay each chain into the same stop.
+async fn wait_for_the_stop(report: &SupervisorReport, cancellation: &CancellationToken) {
+    let stopped_chains = report
+        .stopped_chains
+        .iter()
+        .map(|(chain_id, _)| chain_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    error!(
+        stopped_chains,
+        "no chain is running; the runner stays up serving its metrics until it is stopped"
+    );
+    cancellation.cancelled().await;
 }
 
 fn take_chain_id(chain_by_task: &mut BTreeMap<Id, String>, task_id: Id) -> String {
@@ -75,6 +95,7 @@ fn record_terminal_error(
     report: &mut SupervisorReport,
     chain_id: String,
     runner_error: RunnerError,
+    stop_requested: bool,
 ) {
     error!(
         chain_id,
@@ -83,4 +104,7 @@ fn record_terminal_error(
         "chain supervisor stopped after a terminal error"
     );
     report.stopped_chains.push((chain_id, runner_error));
+    if !stop_requested {
+        report.failed_before_stop += 1;
+    }
 }

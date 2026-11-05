@@ -19,7 +19,7 @@ groups:
           severity: page
         annotations:
           threshold: "An RPC endpoint reports a mismatched chain on any scrape within 10 minutes."
-          meaning: "The named source's RPC endpoint now serves a different chain than configured; that chain stopped, and a restart refuses to start until the endpoint is fixed. A single-chain runner usually exits before a scrape sees this; BignamePhaseRunnerDown and the refusal log catch it."
+          meaning: "The named source's RPC endpoint now serves a different chain than configured; that chain stopped, and a restart refuses to start until the endpoint is fixed. A refusal at start-up exits before a scrape sees this; BignamePhaseRunnerDown and the refusal log catch it."
 
       - alert: BignameUniversalResolverUnadmitted
         expr: |
@@ -180,6 +180,8 @@ groups:
               job="bigname-phase-runner"
             }
           )
+          unless on (job, instance, chain)
+          phase_runner_phase_status{job="bigname-phase-runner",status="failed"} == 1
         for: 2m
         labels:
           severity: page

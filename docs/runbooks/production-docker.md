@@ -403,9 +403,9 @@ before the first start. Then:
   then finds every index in place and logs no build line.
 - A build that fails stops the chain with an error naming the index and the cause. The
   runner does not retry it, and every other chain stops at its Project entry with the same
-  error. The runner exits non-zero once every chain has stopped.
-- Under the container's restart policy a failed build shows as a restart loop in the restart
-  count, and each start drops the invalid leftover and builds it again.
+  error. The runner stays up until it is stopped, and `BignamePhaseRunnerLoopStale` pages.
+- Fix the cause, then restart the runner. Each start drops the invalid leftover and builds it
+  again.
 - An API that starts while the indexes are dropped or being rebuilt refuses to start with
   `API walk index set check refused to start`, naming them. An API already serving keeps
   serving. To start one in that window on purpose, set `BIGNAME_API_WALK_INDEX_SET_CHECK=warn`
@@ -1405,7 +1405,9 @@ continue to report the stale or absent loop honestly.
 The phase runner handles SIGTERM, which is what `docker compose stop` sends and
 what `tini` forwards, so a stop is a clean stop rather than a kill. It observes
 the request at the next batch boundary: the batch already in flight finishes
-and commits, then the loop exits. Three cases exit nonzero on purpose. A stop that
+and commits, then the loop exits. A chain that stopped on a terminal error before
+the stop was requested does not change this: the stop exits 0, because the failure
+was already reported. Three cases exit nonzero on purpose. A stop that
 lands while a chain is working through automatically required redo cannot leave
 that redo looking finished, so the runner converts the cancellation into an
 error, the supervisor records the chain as stopped, and the process exits
@@ -1574,9 +1576,9 @@ an internal deployment with no public edge.
 
 ### Stop and escalate an interpreter mismatch
 
-Apply this play when the `interpret` phase crash-loops on an identity or
-derivation mismatch, or when one chain's Interpret state is `failed` with that
-error while another chain continues running.
+Apply this play when a chain's Interpret state is `failed` on an identity or
+derivation mismatch, whether or not another chain continues running. The runner
+stays up with that chain stopped.
 
 1. Record the exact image ID of the existing phase-runner container as
    `<recovery-image>`. Do not use the mutable `latest` tag. If the command
