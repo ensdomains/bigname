@@ -321,7 +321,7 @@ jobs:
               -p bigname-manifests
               -p bigname-adapters
               -p bigname-test-support
-            test_args: "-- history::paging::tests::resolver_arm_equivalence_tests::"
+            test_args: "-- history::paging::tests::no_such_module_tyr503_probe::"
             postgres_initdb_args: "--set=jit=off --set=log_lock_waits=on"
     services:
       postgres:
