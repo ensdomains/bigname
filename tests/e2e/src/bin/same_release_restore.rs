@@ -682,6 +682,11 @@ async fn observe(
         )?;
         ensure!(Instant::now() < deadline, "healthy resting checkpoint deadline");
         if checked.is_ok() && previous {
+            // A stop logged during this iteration's reads would otherwise pass.
+            ensure!(
+                !chain_stopped_in(&writer_logs),
+                "writer stopped a chain on a terminal error during observation; logs {writer_logs:?}"
+            );
             return Ok(());
         }
         previous = checked.is_ok();

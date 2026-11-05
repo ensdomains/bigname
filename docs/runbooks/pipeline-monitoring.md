@@ -531,7 +531,7 @@ Some errors do not stop the chain. A database or RPC error outside a phase's
 own retry, such as one during start-up recovery, is one. A phase lock still
 held at start-up is another, usually the previous process's session before
 PostgreSQL reaps it. The runner runs that chain again with backoff and no
-limit. Each attempt logs this line at `WARN` with the attempt number and the
+limit. A stop while the chain waits for that lock is a clean stop and exits 0. Each attempt logs this line at `WARN` with the attempt number and the
 error:
 
 ```text

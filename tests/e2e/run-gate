@@ -60,9 +60,9 @@ shard_2_tests=(
 )
 
 shard_3_tests=(
-    "harness::pipeline::tests::chain_stopped_in_finds_the_line_in_either_log"
     "harness::db::tests::replace_database_rejects_missing_database_path"
     "harness::fault_proxy::tests::clean_eof_before_complete_request_is_a_client_disconnect"
+    "harness::pipeline::tests::chain_stopped_in_finds_the_line_in_either_log"
     "harness::responses::tests::pointer_rejects_missing_path"
     "scenarios::basenames_lifecycle::l2_zero_addr60_uses_stubbed_verified_transport"
     "scenarios::basenames_lifecycle::renew_release_and_premium_reregistration_rotate_lineage"
