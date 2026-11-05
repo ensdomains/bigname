@@ -3,22 +3,40 @@
 //! which analyzes no family table this file reads, then a batch of a new `ProjectPhase` that
 //! writes the rest of the names, the way a restarted process follows the head. Autovacuum is off
 //! on these tables, so only the code under test moves their statistics. `pg_class.reltuples` is
-//! -1 on a table never analyzed.
+//! -1 on a table never analyzed. The last test runs the same batch through the phase runner.
 #[allow(dead_code)]
 mod support;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use phase_runner::{
+    INTERPRETER_CONTENT_HASH, PROJECTION_CONTENT_HASH,
+    capacity::CapacityGuard,
+    config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     heads::{BlockMarker, HeadMarkers},
-    phase::{AfterProgress, Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
+    phase::{
+        AfterProgress, AfterProgressFuture, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext,
+        PhaseFuture, PhaseName, PhaseResume, PhaseSet, RunMode,
+    },
     project_phase::ProjectPhase,
+    runner::PhaseRunner,
+    state::PhaseStore,
 };
 use sqlx::PgPool;
 use support::ScratchDatabase;
+use tokio_util::sync::CancellationToken;
 
 const CHAIN: &str = "ethereum-sepolia";
+/// A chain the runner runs with a test source. The production chains require trusted
+/// verification sources.
+const RUNNER_CHAIN: &str = "project-statistics-runner";
 const OTHER_CHAIN: &str = "base-mainnet";
 const REBUILT_TO: i64 = 1;
 const HEAD: i64 = 40;
@@ -33,10 +51,14 @@ const TABLES: [&str; 7] = [
 ];
 
 async fn seeded(prefix: &str) -> Result<ScratchDatabase> {
+    seeded_on(prefix, CHAIN).await
+}
+
+async fn seeded_on(prefix: &str, chain: &str) -> Result<ScratchDatabase> {
     let scratch = ScratchDatabase::create(prefix).await?;
     let seed = include_str!("../../../crates/project/tests/rebuild_performance/seed.sql")
         .replace("__NAMES__", "40")
-        .replace("__CHAIN__", CHAIN);
+        .replace("__CHAIN__", chain);
     let seed = seed
         .strip_suffix("ANALYZE;\n")
         .context("the seed ends with an ANALYZE of the whole database")?;
@@ -49,15 +71,23 @@ async fn seeded(prefix: &str) -> Result<ScratchDatabase> {
         .await?;
     }
     ProjectPhase::new(scratch.pool().clone())
-        .run_batch(context(REBUILT_TO, None)?)
+        .run_batch(context_on(chain, REBUILT_TO, None)?)
         .await?;
     Ok(scratch)
 }
 
+fn block_hash(block: i64) -> String {
+    format!("0x{block:064x}")
+}
+
 fn context(target: i64, resume: Option<i64>) -> Result<PhaseContext> {
-    let marker = |block: i64| BlockMarker::new(block, format!("0x{block:064x}"));
+    context_on(CHAIN, target, resume)
+}
+
+fn context_on(chain: &str, target: i64, resume: Option<i64>) -> Result<PhaseContext> {
+    let marker = |block: i64| BlockMarker::new(block, block_hash(block));
     Ok(PhaseContext {
-        chain_id: CHAIN.to_owned(),
+        chain_id: chain.to_owned(),
         phase: PhaseName::Project,
         mode: RunMode::Normal,
         redo_attempt: None,
@@ -255,5 +285,177 @@ async fn a_stop_during_a_refresh_leaves_the_table_due() -> Result<()> {
     locks.rollback().await?;
     run_due_refreshes(&project).await?;
     ensure_refreshed(scratch.pool()).await?;
+    scratch.cleanup().await
+}
+
+/// Project, raising the stop once a batch completes, and passing the follow-up work on.
+struct StopOnCompleteBatch {
+    inner: Arc<ProjectPhase>,
+    stop: CancellationToken,
+    completed: AtomicBool,
+}
+
+impl Phase for StopOnCompleteBatch {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let outcome = self.inner.run_batch(context).await?;
+            if matches!(outcome, PhaseBatchOutcome::Complete(_)) {
+                self.completed.store(true, Ordering::SeqCst);
+                self.stop.cancel();
+            }
+            Ok(outcome)
+        })
+    }
+
+    fn after_progress_recorded(&self, chain_id: &str) -> AfterProgressFuture<'_> {
+        self.inner.after_progress_recorded(chain_id)
+    }
+
+    fn has_after_progress_work(&self, chain_id: &str) -> bool {
+        self.inner.has_after_progress_work(chain_id)
+    }
+}
+
+fn runner_chain() -> phase_runner::error::RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        RUNNER_CHAIN,
+        vec![SourceConfig::new(
+            RUNNER_CHAIN,
+            "source",
+            "test",
+            SeedBasis::NewSignatureRange,
+            0,
+            "http://source.invalid",
+        )?],
+        false,
+    )
+}
+
+/// Ingest and Interpret completed through the head, the heads published there, and Project
+/// completed at the rebuilt block, where the family marker stands.
+async fn ready_for_the_runner(pool: &PgPool) -> Result<()> {
+    PhaseStore::new(pool.clone())
+        .initialize_chain(RUNNER_CHAIN)
+        .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(RUNNER_CHAIN)
+    .bind(block_hash(HEAD))
+    .bind(HEAD)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed',
+             current_block_number = CASE phase_name WHEN 'project' THEN $4 ELSE $2 END,
+             current_block_hash = CASE phase_name WHEN 'project' THEN $5 ELSE $3 END,
+             target_block_number = CASE phase_name WHEN 'project' THEN $4 ELSE $2 END,
+             target_block_hash = CASE phase_name WHEN 'project' THEN $5 ELSE $3 END,
+             live_handoff_block_number = CASE WHEN phase_name = 'ingest' THEN $2 END,
+             live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $3 END,
+             input_content_hash = CASE phase_name WHEN 'project' THEN $7
+                 WHEN 'interpret' THEN $6 END,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project')",
+    )
+    .bind(RUNNER_CHAIN)
+    .bind(HEAD)
+    .bind(block_hash(HEAD))
+    .bind(REBUILT_TO)
+    .bind(block_hash(REBUILT_TO))
+    .bind(INTERPRETER_CONTENT_HASH)
+    .bind(PROJECTION_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO ingest_cursors (
+             chain_id, source_key, source_kind, seed_basis, start_block_number,
+             next_block_number, target_block_number, last_processed_block_number,
+             last_processed_block_hash
+         ) VALUES ($1, 'source', 'test', 'new_signature_range', 0, $2, $3, $3, $4)",
+    )
+    .bind(RUNNER_CHAIN)
+    .bind(HEAD + 1)
+    .bind(HEAD)
+    .bind(block_hash(HEAD))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// A stop that arrives once a normal Project batch has completed, while a refresh is due. The
+// runner records the batch's progress, then its after-batch check sees the waiting refresh and
+// the stop, abandons both and reports the run cancelled. So the batch is not reported complete
+// and the phase stays running until the next start, the same as for Interpret's refresh. With
+// nothing waiting the same stop would let the phase complete.
+#[tokio::test]
+async fn a_stop_after_a_completed_batch_with_a_refresh_due_leaves_the_phase_running() -> Result<()>
+{
+    let scratch = seeded_on("project_statistics_runner_stop", RUNNER_CHAIN).await?;
+    ready_for_the_runner(scratch.pool()).await?;
+    let stop = CancellationToken::new();
+    let inner = Arc::new(ProjectPhase::new(scratch.pool().clone()));
+    let project = Arc::new(StopOnCompleteBatch {
+        inner: Arc::clone(&inner),
+        stop: stop.clone(),
+        completed: AtomicBool::new(false),
+    });
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_and_project(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+            project.clone(),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        "project-statistics-runner",
+        TimingConfig {
+            initial_backoff: Duration::from_millis(1),
+            maximum_backoff: Duration::from_millis(4),
+            live_poll_interval: Duration::from_millis(1),
+        },
+    )?;
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        runner.run_chain(&runner_chain()?, stop.clone()),
+    )
+    .await
+    .context("the chain run did not stop within two minutes")??;
+
+    ensure!(
+        project.completed.load(Ordering::SeqCst),
+        "the Project batch completed"
+    );
+    let (status, current): (String, Option<i64>) = sqlx::query_as(
+        "SELECT phase_status, current_block_number FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(RUNNER_CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    ensure!(
+        current == Some(HEAD),
+        "the completed batch's progress is recorded: {current:?}"
+    );
+    ensure!(
+        status == "running",
+        "the run is reported cancelled, so the phase stays running: {status}"
+    );
+    ensure!(
+        inner.has_after_progress_work(RUNNER_CHAIN),
+        "the refresh is still due for the next start"
+    );
+    let analyzed: i64 = sqlx::query_scalar(
+        "SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass('project_grant')",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    ensure!(analyzed == -1, "no refresh ran: {analyzed}");
     scratch.cleanup().await
 }
