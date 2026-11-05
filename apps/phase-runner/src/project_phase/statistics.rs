@@ -98,7 +98,16 @@ impl Schedule {
     /// a rebuild itself, and a stop that finds a refresh waiting would report the finished redo
     /// as incomplete. The first normal batch that writes a table after it makes the refresh due.
     pub(super) fn record(&self, mode: &RunMode, rows: &BTreeMap<&'static str, u64>) {
-        let _ = (mode, rows);
+        if !matches!(mode, RunMode::Normal) {
+            return;
+        }
+        let mut tables = self.tables();
+        for table in TABLES {
+            if let Some(&written) = rows.get(table).filter(|written| **written > 0) {
+                let table = tables.entry(table).or_default();
+                table.written = table.written.saturating_add(written);
+            }
+        }
     }
 
     /// The first table due and its count of writes, for `settle` once it has run.
