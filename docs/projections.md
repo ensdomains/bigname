@@ -1351,14 +1351,16 @@ it runs. Two Graveyard writes are one hold only when no one else controlled the 
 them. The record's controller is its registry owner, or, while the NameWrapper owns it, the
 wrapped token's holder. So every write between them must name the name's NameWrapper, and from
 the first of those to the later Graveyard write every transfer of the name's wrapped token must
-go to the Graveyard, with at least one on a resource of its NameWrapper binding. That is the
-Graveyard's repeated re-parent of a held subname, in one transaction, or a parent or token holder
-wrapping the name to the Graveyard, across transactions. Any other write between them ends the
-hold, such as a token holder's `reclaim` or a parent's `setSubnodeOwner` naming anyone but the
-Graveyard, and so does any wrapped token transfer to anyone else, even one the same transaction
-reverses. The holder is then the one before the later write, and a NameWrapper's holder counts
-only from the NameWrapper's current run of registry writes. A BaseRegistrar token move writes no
-record and neither ends nor carries the hold.
+go to the Graveyard, with at least one. That is the Graveyard's repeated re-parent of a held
+subname, in one transaction, or a parent or token holder wrapping the name to the Graveyard,
+across transactions. Any other write between them ends the hold, such as a token holder's
+`reclaim` or a parent's `setSubnodeOwner` naming anyone but the Graveyard, and so does any
+wrapped token transfer to anyone else, even one the same transaction reverses. The holder is then the one before the later write, and a NameWrapper's holder counts
+only from the NameWrapper's current run of registry writes. When that run wrapped the token to
+the Graveyard and moved it nowhere else, the holder is whoever handed it over: the lease's last
+holder outside the NameWrapper, else the registry owner before the run. A bare registry write to
+the NameWrapper wraps nothing and names no holder. A BaseRegistrar token move writes no record
+and neither ends nor carries the hold.
 The holder is the one as it stood just before that write, by position, so an earlier write of the
 claim's own transaction counts. It is the registrant the lease laterals found, before
 the NameWrapper expiry mask, when that was found before the write and is not zero, the
