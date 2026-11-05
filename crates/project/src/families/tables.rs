@@ -74,6 +74,7 @@ tables! {
         ["chain_id", "parent_logical_name_id", "registry_address"];
     CHILD_PREIMAGE_WATERMARK = "project_child_preimage_watermark"
         ["chain_id", "source_chain_id"];
+    ADDRESS_LISTING = "project_address_listing" ["chain_id", "address", "logical_name_id"];
     HISTORY_ANCHOR = "project_address_history_anchor"
         ["chain_id", "address", "anchor_kind", "anchor_id"];
     HISTORY_SOURCE = "project_history_source"
@@ -97,7 +98,7 @@ pub(crate) const DERIVED: [&str; 5] = [
 
 /// The tables a rebuild's composition pass writes: the composed families and the address indexes.
 /// They grow from empty during the pass, so the pass refreshes their planner statistics.
-pub(crate) const COMPOSED: [&str; 15] = [
+pub(crate) const COMPOSED: [&str; 16] = [
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
@@ -106,6 +107,7 @@ pub(crate) const COMPOSED: [&str; 15] = [
     "project_name_summary",
     "project_child_listing",
     "project_child_listing_count",
+    "project_address_listing",
     "project_address_history_anchor",
     "project_history_source",
     "project_history_source_edge",

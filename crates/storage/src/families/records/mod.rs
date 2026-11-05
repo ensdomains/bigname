@@ -8,6 +8,9 @@
 //! emission ordinal (docs/glossary.md#emission-ordinal) when both indexes are present, then the
 //! event identity as bytes, with a synthesised event's missing positions first; see
 //! `FamilyPosition`), never by the generated event id.
+mod address_listing;
+#[cfg(any(test, feature = "test-support"))]
+mod address_listing_parity;
 mod address_names;
 mod address_publication;
 mod address_relation_inputs;
@@ -40,6 +43,12 @@ pub(crate) mod serving;
 
 use sqlx::{Row, postgres::PgRow};
 
+pub use address_listing::{
+    ADDRESS_LISTING_COLUMNS, AddressListingRows, address_listing_respell_sql,
+    address_listing_statement,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use address_listing_parity::assert_address_listing_matches_the_route;
 pub use address_names::load_family_address_names_page;
 pub(crate) use address_names::{
     AddressComposer, ComposedName, address_name_candidates, compose_candidate_rows, includes_roles,

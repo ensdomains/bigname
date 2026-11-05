@@ -5,9 +5,15 @@
 //! them before an undo's restore and after a block's write covers both states.
 //!
 //! After a block's write the name summaries of the names it touched are composed again
-//! (`summary.rs`), then the child listing rows they move (`children.rs`); both are journalled, so
-//! an undo restores them with the other families. The undo then heals, at the restored block,
-//! the restored listing rows a kept label preimage spells further (`children.rs`).
+//! (`summary.rs`), then the address listing rows (`address_listing.rs`) and the child listing rows
+//! (`children.rs`) they move; all are journalled, so an undo restores them with the other
+//! families. The undo then heals, at the restored block, the restored listing rows a kept label
+//! preimage spells further (`address_listing.rs`, `children.rs`).
+mod address_listing;
+pub(crate) use address_listing::{
+    derive_heals as heal_address_listing, pass_chunk as address_listing_pass_chunk,
+    prepare as prepare_address_listing, stage as stage_address_listing,
+};
 mod children;
 pub(crate) use children::{
     derive as derive_child_listing, derive_heals as heal_child_listing,
@@ -26,7 +32,7 @@ use sqlx::{Postgres, Transaction};
 use super::{
     block::BlockStats,
     input, marker,
-    tables::{CHILD_LISTING, CHILD_PREIMAGE_WATERMARK, NAME_SUMMARY},
+    tables::{ADDRESS_LISTING, CHILD_LISTING, CHILD_PREIMAGE_WATERMARK, NAME_SUMMARY},
 };
 use crate::{ProjectError, Result};
 
@@ -444,6 +450,8 @@ pub(super) async fn refresh_block(
     super::lookup::prepare(transaction, chain_id, block, after, sweeps.admission).await?;
     let mut touched = touched(transaction, chain_id, block.number, Some(after)).await?;
     touched.sweeps = sweeps;
+    // The summary refresh stages the address listing rows of the names it composes.
+    address_listing::prepare(transaction).await?;
     let summary = refresh(transaction, chain_id, &touched, composition).await?;
     if summary.rows > 0 {
         stats.rows.insert(NAME_SUMMARY.name, summary.rows);
@@ -465,14 +473,43 @@ pub(super) async fn refresh_block(
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
     stats.undo_rows += undo_rows;
     super::lookup::refresh(transaction, chain_id, block, composition, stats).await?;
-    // Last: a child's listing row reads its name summary, which every step above can rewrite.
-    // Boxed, so the block's future does not carry the refresh's state on the caller's stack.
-    let listing = Box::pin(children::refresh(
+    // Last: a child's listing row reads its name summary, which every step above can rewrite. The
+    // child listing's work list and the other chains' preimage observations serve the address
+    // listing too, which heals from them before the child listing advances the watermarks.
+    // Boxed, so the block's future does not carry the refreshes' state on the caller's stack.
+    let observed = children::observe(transaction, chain_id).await?;
+    let work = children::work(
         transaction,
         chain_id,
         block,
         after,
         (&summary.names, &summary.raw_name_swept),
+    )
+    .await?;
+    let publication = marker::publication(chain_id, block, composition)?;
+    let address = Box::pin(address_listing::refresh(
+        transaction,
+        &publication,
+        block,
+        address_listing::Work {
+            after,
+            touched: &touched.names,
+            children: &work.0,
+            parents: &work.1,
+            labels: &observed.labels,
+        },
+    ))
+    .await?;
+    if address.rows > 0 {
+        *stats.rows.entry(ADDRESS_LISTING.name).or_default() += address.rows;
+    }
+    stats.undo_rows += address.undo_rows;
+    let listing = Box::pin(children::refresh(
+        transaction,
+        chain_id,
+        block,
+        work,
+        &observed,
     ))
     .await?;
     if listing.rows > 0 {

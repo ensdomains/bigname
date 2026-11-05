@@ -141,10 +141,11 @@ pub async fn assert_served(fixture: &Fixture, parent: &str) -> Result<()> {
 }
 
 /// `kept` and `now`, two `Fixture::exact` snapshots, agree on every family table but the child
-/// listing, which an undo derives again at the restored block.
+/// listing and the address listing, whose healed names an undo keeps: it derives them again at
+/// the restored block.
 pub fn ensure_equal_but_listing(kept: &[(String, String)], now: &[(String, String)]) -> Result<()> {
     for ((table, was), (_, is)) in kept.iter().zip(now) {
-        if table == "project_child_listing" {
+        if table == "project_child_listing" || table == "project_address_listing" {
             continue;
         }
         ensure!(was == is, "the undo left {table} as {is}, not {was}");

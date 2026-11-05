@@ -79,8 +79,8 @@ pub(crate) use list_keys::{
 pub(crate) use loaders::{MIGRATIONS_SQL, RESOURCE_POINTERS_SQL, RESOURCES_SQL, canonical_uuid};
 pub use resolution_path::PHYSICAL_POINTER_EVENT_SQL;
 pub use summary::{
-    NameSummaryPublication, compose_name_resolution_summaries, compose_name_summaries,
-    compose_name_summary_publication,
+    NameSummaryPublication, compose_address_listing, compose_name_resolution_summaries,
+    compose_name_summaries, compose_name_summary_publication,
 };
 
 pub use batch::{
