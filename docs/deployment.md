@@ -1449,6 +1449,8 @@ GRANT SELECT ON TABLE
     bigname_phase.project_ens_v2_registry_parent,
     bigname_phase.project_child_edge_candidate,
     bigname_phase.project_parent_subregistry,
+    bigname_phase.project_child_listing,
+    bigname_phase.project_child_listing_count,
     bigname_phase.project_reverse_tuple,
     bigname_phase.project_reverse_node_claim,
     bigname_phase.project_claim_normalization,
@@ -6261,8 +6263,16 @@ composition pass derives every parent's rows in a children stream after the name
   row in one statement and journals every changed row. Above 100,000 rows the runner logs a
   `WARN` naming the chain, block, parent and row count, so a large undo journal can be traced to
   its block.
-- The readers do not change in this build. The subname and label lists still compose children
-  at read.
+- The readers need `SELECT` on the listing and count tables. Before restarting an existing API
+  role, apply the grant below on the primary and let it replay on any serving standby. Fresh role
+  setup above already includes it. Startup preflight refuses an API role without it.
+
+  ```sql
+  GRANT SELECT ON bigname_phase.project_child_listing, bigname_phase.project_child_listing_count
+      TO bigname_api;
+  ```
+- The subname and label lists and their totals read the stored rows and counts instead of
+  composing children at read.
 - The children relation moves from the reader sources to the composition sources, and the
   family step is in `crates/project/src`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The

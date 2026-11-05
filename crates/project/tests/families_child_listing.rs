@@ -2,7 +2,7 @@
 //! every family test already checks the listing against the children relation composed at the
 //! published block, and the counts against the listing (`families_support/child_listing.rs`);
 //! these cases drive the inputs the work list keys on and check the rows, their journal, an
-//! undo and a rebuild, and today's read-time answer (`load_children_shadow_page`).
+//! undo and a rebuild, and the page the reader serves from them (`load_children_shadow_page`).
 mod families_support;
 
 use anyhow::{Result, ensure};

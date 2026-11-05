@@ -42,8 +42,8 @@ async fn child_totals_are_null_above_the_cap() -> Result<()> {
     .await?;
 
     // Rows S2 and S4: above the cap the total is null on every page, plain and narrowed, and the
-    // rows and continuations are those of the uncapped read. Row L1 at the API: registrations
-    // equal to the cap count exactly.
+    // rows and continuations are those of the uncapped read. Row L1 at the API: labels equal to
+    // the cap count exactly.
     crate::v2::with_child_count_cap(2, async {
         assert_eq!(read_family_pages(&database, subnames).await?, without_totals(&uncapped));
         assert_eq!(
@@ -57,8 +57,8 @@ async fn child_totals_are_null_above_the_cap() -> Result<()> {
     })
     .await?;
 
-    // Row L6: more registrations than the cap serve a present, null label count, and the other
-    // counts are those of the uncapped read.
+    // Row L6: more labels than the cap serve a present, null label count, and the other counts
+    // are those of the uncapped read.
     crate::v2::with_child_count_cap(1, async {
         let (status, page) = read_family_response(&database, &overview).await?;
         assert_eq!(status, StatusCode::OK, "{page:#}");
@@ -78,8 +78,8 @@ async fn child_totals_are_null_above_the_cap() -> Result<()> {
 }
 
 /// Row L5: without `include=counts` the overview serves no `counts.labels` and never reads the
-/// child relation, so it answers while that relation is unreadable; with `include=counts` it
-/// reads it.
+/// stored label counts, so it answers while they are unreadable; with `include=counts` it reads
+/// them.
 #[tokio::test]
 async fn registry_overview_reads_no_labels_without_counts() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -90,8 +90,8 @@ async fn registry_overview_reads_no_labels_without_counts() -> Result<()> {
     assert!(before["data"]["counts"].get("labels").is_none(), "{before:#}");
 
     sqlx::query(
-        "ALTER TABLE bigname_phase.project_child_edge_candidate
-         RENAME TO project_child_edge_candidate_hidden",
+        "ALTER TABLE bigname_phase.project_child_listing_count
+         RENAME TO project_child_listing_count_hidden",
     )
     .execute(&database.pool)
     .await?;
@@ -100,6 +100,6 @@ async fn registry_overview_reads_no_labels_without_counts() -> Result<()> {
     assert_eq!(after["data"], before["data"]);
     let (status, counted) =
         read_family_response(&database, &format!("{plain}?include=counts")).await?;
-    assert_ne!(status, StatusCode::OK, "the counted overview must read the child relation: {counted:#}");
+    assert_ne!(status, StatusCode::OK, "the counted overview must read the stored label counts: {counted:#}");
     database.cleanup().await
 }

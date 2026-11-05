@@ -9,6 +9,7 @@ mod children;
 mod children_page;
 mod collections;
 mod listing;
+mod listing_page;
 mod name_summary;
 mod name_topology;
 mod overview;
@@ -17,19 +18,21 @@ mod registry_children;
 mod shims;
 
 pub use children::ListingBlock;
+#[cfg(test)]
+pub(crate) use children_page::listing_support::compose_listing;
 pub use children_page::{
     FamilyChildRow, FamilyChildrenPage, count_children_shadow, load_children_shadow_page,
 };
-pub(crate) use children_page::{
-    RegistryLabels, count_registry_labels, counts as count_children_of_parents_on,
-    page as children_page_on, require_publication,
-};
+pub(crate) use children_page::{RegistryLabels, require_publication};
 pub use collections::{
     FamilyCollectionPage, load_resolver_links_shadow, load_resolver_roles_shadow,
 };
 pub use listing::{
     DISPLAY_KEY_BYTES, DISPLAY_KEY_CHARS, LISTING_COLUMNS, MISSING_TIMESTAMP, listing_rows,
     listing_statement,
+};
+pub(crate) use listing_page::{
+    count_registry_labels, counts as count_children_of_parents_on, page as children_page_on,
 };
 pub(crate) use name_topology::load_name_topology_on;
 pub use name_topology::load_name_topology_shadow;
