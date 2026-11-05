@@ -790,6 +790,54 @@ fn a_graveyard_cleanup_is_not_a_grant() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A cleanup the chain cannot emit: the BaseRegistrar registers only a name past its expiry and
+/// grace, so the Graveyard never claims a lease in grace
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f).
+/// The cleanup is recognised by its owner and sentinel expiry alone, not by the lease's timing, so
+/// even this one opens no lease and is classified as a cleanup.
+#[test]
+fn a_graveyard_cleanup_of_a_lease_in_grace_is_still_not_a_grant() -> anyhow::Result<()> {
+    // In grace at LAUNCH: past its expiry by 30 days.
+    let in_grace = u64::try_from(timestamp(LAUNCH) - 30 * DAY).expect("positive expiry");
+    let mut logs = Logs::default();
+    eth_root(&mut logs);
+    controller_mint(&mut logs, 2, 0, "known", HOLDER, in_grace);
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        token_transfer("known", HOLDER, ZERO_ADDRESS),
+    );
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        token_transfer("known", ZERO_ADDRESS, GRAVEYARD),
+    );
+    logs.push(LAUNCH, 0, REGISTRY, new_owner("known", GRAVEYARD));
+    logs.push(
+        LAUNCH,
+        0,
+        BASE_REGISTRAR,
+        numeric_registration("known", GRAVEYARD, GRAVEYARD_CLEANUP_EXPIRY),
+    );
+    let output = interpret_test_batch(with_migration(
+        &logs,
+        checked_in("ens_v1_registrar_l1", REGISTRAR_MANIFEST),
+        LAUNCH,
+    ))?;
+    let grants = at_block(of_kind(&output, "RegistrationGranted"), LAUNCH);
+    assert!(grants.is_empty(), "{grants:#?}");
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.source_family == "ens_v2_migration_l1"
+                && event.after_state["lifecycle_classification"] == "graveyard_cleanup"
+        }),
+        "the cleanup is classified as one"
+    );
+    Ok(())
+}
+
 const RENEWAL_BRIDGE: &str = "0x56c447f308f463a01121c41e72b0e7e7557fcb68";
 
 /// Row B-ii: after the ENSv2 activation a renewal through the ENSv1 renewal bridge emits the

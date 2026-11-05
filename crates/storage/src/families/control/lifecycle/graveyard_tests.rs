@@ -1,0 +1,558 @@
+//! A name whose newest current-registry write names the admitted Graveyard serves its ENSv1
+//! registration as ended: `released`, no expiry (`expires_at_reason: released`), no owner,
+//! manager or registrant, released at the claim's block, with its holder before the claim as the
+//! lapsed owner. A name the Graveyard does not hold composes as it did. Each input class is one
+//! test. A claim is only reachable for a lease past its expiry and grace, so the classes below
+//! are the only claim inputs (`Graveyard.sol` `_clear`, BaseRegistrar `available`).
+use std::{collections::BTreeMap, sync::Arc};
+
+use serde_json::{Map, Value, json};
+
+use super::super::{
+    AuthoritySelection, Clock, NameFacts, NameInput, NamePlace, ShadowName, evaluate,
+};
+use crate::families::control::{
+    position::Position,
+    registry::{OwnerEvent, RegistryNode, ZERO_ADDRESS},
+    rows::{BindingCandidate, LifecycleEvent, WrapperRow},
+};
+
+const NAME: &str = "ens:0x01";
+const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
+const NEXT_OWNER: &str = "0x00000000000000000000000000000000000000bb";
+const NAME_WRAPPER: &str = "0x00000000000000000000000000000000000000cc";
+const GRAVEYARD: &str = "0x00000000000000000000000000000000000000dd";
+const REGISTRY_ONLY: &str = "00000000-0000-0000-0000-0000000000a0";
+const LEASE: &str = "00000000-0000-0000-0000-0000000000b1";
+const WRAPPED: &str = "00000000-0000-0000-0000-0000000000c1";
+const ENS_V2: &str = "00000000-0000-0000-0000-0000000000d1";
+/// The first current-registry record.
+const HANDOFF: i64 = 5;
+/// The Graveyard's claim, and its block time.
+const CLAIM_BLOCK: i64 = 60;
+const CLAIM_TIME: i64 = 1_800_000_000;
+/// A lease expiry long past its 90-day grace at the clock.
+const LAPSED_EXPIRY: i64 = 1_600_000_000;
+/// The 2020 registrar migration's lease expiry.
+const MIGRATION_EXPIRY: i64 = 1_590_000_000;
+const LIVE_EXPIRY: i64 = 2_000_000_000;
+const CLOCK: Clock = Clock {
+    block_number: 100,
+    timestamp_seconds: 1_900_000_000,
+};
+
+fn event(kind: &str, family: &str, resource: &str, block: i64, extra: Value) -> LifecycleEvent {
+    let mut row = json!({
+        "state_kind": "resource",
+        "state_key": resource,
+        "block_number": block,
+        "transaction_index": 0,
+        "log_index": 1,
+        "event_identity": format!("{kind}:{family}:{block}"),
+        "event_kind": kind,
+        "original_logical_name_id": NAME,
+        "decoded_logical_name_id": NAME,
+        "resource_id": resource,
+        "source_family": family,
+    });
+    row.as_object_mut()
+        .expect("row is an object")
+        .extend(extra.as_object().expect("extra is an object").clone());
+    LifecycleEvent::from_row(&row).expect("lifecycle row decodes")
+}
+
+/// A BaseRegistrar lease of `HOLDER` until `expiry`, granted at `block`.
+fn lease_grant(block: i64, expiry: i64) -> LifecycleEvent {
+    event(
+        "RegistrationGranted",
+        "ens_v1_registrar_l1",
+        LEASE,
+        block,
+        json!({"authority_kind": "registrar", "source_event": "NameRegistered",
+               "registrant": HOLDER, "expiry": expiry, "expiry_seconds": expiry}),
+    )
+}
+
+/// The release Interpret records at the first block past the lease's grace.
+fn lease_release(block: i64, expiry: i64) -> LifecycleEvent {
+    event(
+        "RegistrationReleased",
+        "ens_v1_registrar_l1",
+        LEASE,
+        block,
+        json!({"authority_kind": "registrar", "source_event": "RegistrationReleased",
+               "before_registrant": HOLDER, "released_at": expiry + 7_776_001,
+               "expiry": expiry, "expiry_seconds": expiry}),
+    )
+}
+
+fn binding(resource: &str, block: i64, extra: Value) -> BindingCandidate {
+    let mut row = json!({
+        "surface_binding_id": format!("binding-{resource}"),
+        "logical_name_id": NAME,
+        "authority_arm": "ens_v1",
+        "resource_id": resource,
+        "block_number": block,
+        "transaction_index": 0,
+        "log_index": 0,
+        "registry_only": true,
+        "authority_kind": "registry_only",
+    });
+    row.as_object_mut()
+        .expect("row is an object")
+        .extend(extra.as_object().expect("extra is an object").clone());
+    BindingCandidate::from_row(&row).expect("candidate decodes")
+}
+
+fn registrar_binding() -> BindingCandidate {
+    binding(
+        LEASE,
+        8,
+        json!({"registry_only": false, "authority_kind": "registrar"}),
+    )
+}
+
+/// A NameWrapper binding of the wrapped token, which holds the lease `LEASE`.
+fn wrapper_binding() -> BindingCandidate {
+    binding(
+        WRAPPED,
+        8,
+        json!({"registry_only": false, "authority_kind": "wrapper",
+               "emitting_address": NAME_WRAPPER, "wrapped_registrar_resource_id": LEASE,
+               "node": "0x01", "transaction_hash": "0xwrap"}),
+    )
+}
+
+/// A current-registry owner write of the node to `owner` at `block`.
+fn write(block: i64, resource: &str, owner: &str, reason: Option<&str>) -> OwnerEvent {
+    OwnerEvent {
+        position: Position {
+            block_number: block,
+            transaction_index: Some(0),
+            log_index: Some(2),
+            event_identity: format!("write:{block}"),
+        },
+        transaction_hash: None,
+        logical_name_id: Some(NAME.to_owned()),
+        resource_id: Some(resource.to_owned()),
+        event_kind: "AuthorityTransferred".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        authority_kind: None,
+        owner: Some(owner.to_owned()),
+        registry_owner: Some(owner.to_owned()),
+        owner_word_unmasked: None,
+        owner_getter: Some(owner.to_owned()),
+        owner_getter_reason: reason.map(str::to_owned),
+    }
+}
+
+/// The admitted Graveyard's claim write of the node.
+fn claim(resource: &str) -> OwnerEvent {
+    write(CLAIM_BLOCK, resource, GRAVEYARD, Some("graveyard"))
+}
+
+struct Name {
+    arm: &'static str,
+    place: NamePlace,
+    binding: BindingCandidate,
+    events: Vec<LifecycleEvent>,
+    writes: Vec<OwnerEvent>,
+    wrappers: Vec<WrapperRow>,
+    has_old_record: bool,
+    first_current_record_block: Option<i64>,
+    migration: Option<Position>,
+}
+
+impl Name {
+    fn new(binding: BindingCandidate, events: Vec<LifecycleEvent>) -> Self {
+        let resource = binding.resource_id.clone();
+        Self {
+            arm: "ens_v1",
+            place: NamePlace::EthSecondLevel,
+            binding,
+            events,
+            writes: vec![write(HANDOFF, &resource, HOLDER, None)],
+            wrappers: Vec::new(),
+            has_old_record: false,
+            first_current_record_block: Some(HANDOFF),
+            migration: None,
+        }
+    }
+
+    /// The input with the Graveyard's claim write appended.
+    fn claimed(mut self) -> Self {
+        let resource = self.binding.resource_id.clone();
+        self.writes.push(claim(&resource));
+        self
+    }
+
+    fn read(&self) -> ShadowName {
+        let selection = AuthoritySelection {
+            authority_arm: Some(self.arm.to_owned()),
+            surface_binding_id: Some(self.binding.surface_binding_id.clone()),
+            resource_id: Some(self.binding.resource_id.clone()),
+            ..AuthoritySelection::default()
+        };
+        let facts = NameFacts {
+            input: NameInput {
+                logical_name_id: NAME.to_owned(),
+                namehash: "0x01".to_owned(),
+                selection,
+                place: self.place.clone(),
+            },
+            candidates: vec![self.binding.clone()],
+            lease_candidates: Vec::new(),
+            key_states: BTreeMap::new(),
+            triples: Vec::new(),
+            events: self.events.clone(),
+            wrappers: self
+                .wrappers
+                .iter()
+                .map(|row| (row.resource_id.clone(), row.clone()))
+                .collect(),
+            block_timestamps: Arc::new(BTreeMap::new()),
+            block_seconds: Arc::new(BTreeMap::from([(CLAIM_BLOCK, CLAIM_TIME)])),
+            snapshot_timestamps: Arc::new(BTreeMap::new()),
+            authority_starts: Value::Null,
+            migration: self.migration.clone(),
+            registry_node: Some(RegistryNode {
+                namespace: "ens".to_owned(),
+                node: "0x01".to_owned(),
+                has_old_record: self.has_old_record,
+                first_current_record_block: self.first_current_record_block,
+                owner_events: self.writes.clone(),
+            }),
+            resolution_cutover: false,
+            ens_v2_root: None,
+            grace_registries: Arc::new(Vec::new()),
+        };
+        evaluate(&facts, &CLOCK).expect("the name composes")
+    }
+}
+
+fn field(map: &Map<String, Value>, key: &str) -> Value {
+    map.get(key).cloned().unwrap_or(Value::Null)
+}
+
+/// The Graveyard-held shape, with `holder` as the lapsed owner.
+fn assert_held(shadow: &ShadowName, holder: Option<&str>) {
+    let registration = &shadow.registration;
+    assert_eq!(
+        field(registration, "lifecycle_status"),
+        "released",
+        "{shadow:#?}"
+    );
+    assert_eq!(field(registration, "status"), "released", "{shadow:#?}");
+    assert_eq!(field(registration, "expiry"), Value::Null, "{shadow:#?}");
+    assert_eq!(
+        field(registration, "expires_at_reason"),
+        "released",
+        "{shadow:#?}"
+    );
+    for absent in ["grace_ends_at", "ens_v1_expiry", "registrant"] {
+        assert_eq!(
+            field(registration, absent),
+            Value::Null,
+            "{absent}: {shadow:#?}"
+        );
+    }
+    assert_eq!(
+        field(registration, "released_at"),
+        json!(CLAIM_TIME),
+        "{shadow:#?}"
+    );
+    assert_eq!(
+        field(registration, "lapsed_registration"),
+        json!({"owner": holder, "released_at": CLAIM_TIME, "release_kind": "expired"}),
+        "{shadow:#?}"
+    );
+    for absent in ["owner", "registry_owner", "registrant", "expiry"] {
+        assert_eq!(
+            field(&shadow.control, absent),
+            Value::Null,
+            "{absent}: {shadow:#?}"
+        );
+    }
+}
+
+/// The Graveyard rule did not apply.
+fn assert_not_held(shadow: &ShadowName) {
+    assert_eq!(shadow.trace.get("graveyard_held"), None, "{shadow:#?}");
+    assert_ne!(
+        shadow.registration.get("expires_at_reason"),
+        Some(&json!("released")),
+        "{shadow:#?}"
+    );
+}
+
+/// Row 1, release-line shape: a 2020-migrated name with no lease row, on its registry-only
+/// binding, serves `active` with its registry owner until the claim.
+#[test]
+fn a_migrated_name_with_no_lease_row_is_released_by_the_claim() {
+    let input = || Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
+    let unclaimed = input().read();
+    assert_eq!(field(&unclaimed.registration, "lifecycle_status"), "active");
+    assert_eq!(field(&unclaimed.control, "owner"), HOLDER);
+    assert_held(&input().claimed().read(), Some(HOLDER));
+}
+
+/// Row 1, reconcile shape: the 2020 mint's lease, past grace, is released by its schedule with
+/// its expiry until the claim.
+#[test]
+fn a_migrated_name_with_its_2020_lease_is_released_with_no_expiry() {
+    let input = || {
+        Name::new(
+            binding(REGISTRY_ONLY, HANDOFF, json!({})),
+            vec![lease_grant(12, MIGRATION_EXPIRY)],
+        )
+    };
+    let unclaimed = input().read();
+    assert!(
+        unclaimed.trace.contains_key("implied_lease"),
+        "{unclaimed:#?}"
+    );
+    assert_eq!(
+        field(&unclaimed.registration, "lifecycle_status"),
+        "released"
+    );
+    assert_ne!(field(&unclaimed.registration, "expiry"), Value::Null);
+    assert_held(&input().claimed().read(), Some(HOLDER));
+}
+
+/// Row 2: a controller-registered lease, released past grace before the claim, loses its
+/// expiry, and its release time is the claim's.
+#[test]
+fn a_released_named_lease_is_released_at_the_claim_with_no_expiry() {
+    let input = || {
+        Name::new(
+            registrar_binding(),
+            vec![
+                lease_grant(8, LAPSED_EXPIRY),
+                lease_release(40, LAPSED_EXPIRY),
+            ],
+        )
+    };
+    let unclaimed = input().read();
+    assert_eq!(
+        field(&unclaimed.registration, "lifecycle_status"),
+        "released"
+    );
+    assert_ne!(field(&unclaimed.registration, "expiry"), Value::Null);
+    assert_held(&input().claimed().read(), Some(HOLDER));
+}
+
+/// Row 3: a record cleared to zero before the claim, then claimed: the claim gives the node a
+/// registry-only binding again, and nobody held it when it was claimed.
+#[test]
+fn a_record_cleared_before_the_claim_is_released_with_no_holder() {
+    let mut input = Name::new(binding(REGISTRY_ONLY, CLAIM_BLOCK, json!({})), Vec::new());
+    input
+        .writes
+        .push(write(20, REGISTRY_ONLY, ZERO_ADDRESS, Some("literal_zero")));
+    assert_held(&input.claimed().read(), None);
+}
+
+/// Rows 4, 5 and 10: a name the ENSv2 arm decides is untouched by a Graveyard-held ENSv1 record.
+fn assert_ens_v2_untouched(grant_block: i64, migration: Option<Position>) {
+    let input = || {
+        let mut input = Name::new(
+            binding(
+                ENS_V2,
+                grant_block,
+                json!({"authority_arm": "ens_v2",
+                                                 "registry_only": false,
+                                                 "authority_kind": "ens_v2_registry"}),
+            ),
+            vec![event(
+                "RegistrationGranted",
+                "ens_v2_registry_l1",
+                ENS_V2,
+                grant_block,
+                json!({"authority_kind": "ens_v2_registry", "source_event": "LabelRegistered",
+                       "registrant": NEXT_OWNER, "expiry": LIVE_EXPIRY,
+                       "expiry_seconds": LIVE_EXPIRY}),
+            )],
+        );
+        input.arm = "ens_v2";
+        input.writes = vec![write(HANDOFF, REGISTRY_ONLY, HOLDER, None)];
+        input.migration = migration.clone();
+        input
+    };
+    let unclaimed = input().read();
+    let mut claimed = input();
+    claimed.writes.push(claim(REGISTRY_ONLY));
+    let claimed = claimed.read();
+    assert_not_held(&claimed);
+    assert_eq!(claimed, unclaimed);
+}
+
+/// Row 4: a label registered in ENSv2 before the claim.
+#[test]
+fn an_ens_v2_registration_before_the_claim_is_untouched() {
+    assert_ens_v2_untouched(40, None);
+}
+
+/// Row 10: a label registered in ENSv2 after the claim, which selection gives the ENSv2 arm.
+#[test]
+fn an_ens_v2_registration_after_the_claim_is_untouched() {
+    assert_ens_v2_untouched(70, None);
+}
+
+/// Row 5: a migrated name. The migration hands its ENSv1 record to the Graveyard, which then
+/// never claims it (`_clear` returns before `register`), and the name is on the ENSv2 arm.
+#[test]
+fn a_migrated_name_whose_record_the_graveyard_holds_is_untouched() {
+    let migration = Position {
+        block_number: CLAIM_BLOCK,
+        transaction_index: Some(0),
+        log_index: Some(3),
+        event_identity: "migration".to_owned(),
+    };
+    assert_ens_v2_untouched(CLAIM_BLOCK, Some(migration));
+}
+
+fn wrapped(state: &str, fuses: i64) -> Name {
+    let mut input = Name::new(
+        wrapper_binding(),
+        vec![event(
+            "RegistrationGranted",
+            "ens_v1_wrapper_l1",
+            WRAPPED,
+            8,
+            json!({"authority_kind": "wrapper", "registrant": HOLDER,
+                   "transaction_hash": "0xwrap",
+                   "expiry": LAPSED_EXPIRY + 7_776_000,
+                   "expiry_seconds": LAPSED_EXPIRY + 7_776_000}),
+        )],
+    );
+    input.writes = vec![write(8, WRAPPED, NAME_WRAPPER, None)];
+    input.wrappers = vec![
+        WrapperRow::from_row(&json!({
+            "resource_id": WRAPPED,
+            "logical_name_id": NAME,
+            "wrapper_state": state,
+            "fuses": fuses,
+            "expiry_seconds": (LAPSED_EXPIRY + 7_776_000).to_string(),
+            "expiry_position": {"block_number": 8},
+            "lifecycle_unwrapped": false,
+        }))
+        .expect("wrapper row decodes"),
+    ];
+    input
+}
+
+/// Row 8: a wrapped name past its NameWrapper expiry, claimed. The lapsed owner is the wrapped
+/// token's holder, never the NameWrapper.
+#[test]
+fn a_wrapped_name_is_released_with_its_token_holder_as_the_lapsed_owner() {
+    // PARENT_CANNOT_CONTROL | CANNOT_UNWRAP is not burned; wrapETH2LD burns PARENT_CANNOT_CONTROL.
+    assert_held(
+        &wrapped("emancipated", 0x10000).claimed().read(),
+        Some(HOLDER),
+    );
+}
+
+/// Row 9: a locked wrapped name. Past expiry NameWrapper reads its fuses as zero, so it is
+/// claimable like any other.
+#[test]
+fn a_locked_wrapped_name_is_released_with_its_token_holder_as_the_lapsed_owner() {
+    assert_held(&wrapped("locked", 0x10001).claimed().read(), Some(HOLDER));
+}
+
+/// Row 11: a subname the Graveyard cleared with `setSubnodeRecord`.
+#[test]
+fn a_cleared_subname_is_released() {
+    let input = || {
+        let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
+        input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+        input
+    };
+    let unclaimed = input().read();
+    assert_eq!(field(&unclaimed.registration, "lifecycle_status"), "active");
+    assert_eq!(field(&unclaimed.control, "owner"), HOLDER);
+    assert_held(&input().claimed().read(), Some(HOLDER));
+}
+
+/// Row 11, wrapped: a subname wrapped without `PARENT_CANNOT_CONTROL`, which the Graveyard
+/// re-parents and unwraps to itself.
+#[test]
+fn a_cleared_wrapped_subname_is_released() {
+    let mut input = wrapped("wrapped", 0);
+    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+    assert_held(&input.claimed().read(), Some(HOLDER));
+}
+
+/// Row 12: a name only the 2017 registry recorded was never minted, so the Graveyard cannot
+/// claim it. With no Graveyard write the rule does not apply.
+#[test]
+fn a_never_registered_name_is_untouched() {
+    let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
+    input.has_old_record = true;
+    input.first_current_record_block = None;
+    assert_not_held(&input.read());
+}
+
+/// Row 13: a live lease never claimed.
+#[test]
+fn a_live_lease_is_untouched() {
+    let shadow = Name::new(registrar_binding(), vec![lease_grant(8, LIVE_EXPIRY)]).read();
+    assert_not_held(&shadow);
+    assert_eq!(field(&shadow.registration, "lifecycle_status"), "active");
+    assert_eq!(field(&shadow.control, "owner"), HOLDER);
+}
+
+/// Row 14: a lease lapsed past grace and not yet claimed keeps its expiry: the null expiry is
+/// the Graveyard's alone.
+#[test]
+fn a_lapsed_lease_not_yet_claimed_keeps_its_expiry() {
+    let shadow = Name::new(
+        registrar_binding(),
+        vec![
+            lease_grant(8, LAPSED_EXPIRY),
+            lease_release(40, LAPSED_EXPIRY),
+        ],
+    )
+    .read();
+    assert_not_held(&shadow);
+    assert_eq!(field(&shadow.registration, "lifecycle_status"), "released");
+    assert_ne!(field(&shadow.registration, "expiry"), Value::Null);
+    assert_ne!(field(&shadow.registration, "ens_v1_expiry"), Value::Null);
+}
+
+/// Row 15: a live token its holder sent to the Graveyard keeps its lease: the rule keys on the
+/// registry write, not on token custody.
+#[test]
+fn a_live_token_sent_to_the_graveyard_is_untouched() {
+    let shadow = Name::new(
+        registrar_binding(),
+        vec![
+            lease_grant(8, LIVE_EXPIRY),
+            event(
+                "TokenControlTransferred",
+                "ens_v1_registrar_l1",
+                LEASE,
+                50,
+                json!({"authority_kind": "registrar", "source_event": "Transfer",
+                       "to_address": GRAVEYARD}),
+            ),
+        ],
+    )
+    .read();
+    assert_not_held(&shadow);
+    assert_eq!(field(&shadow.registration, "lifecycle_status"), "active");
+    assert_ne!(field(&shadow.registration, "expiry"), Value::Null);
+}
+
+/// Row 16: a write naming a Graveyard the migration manifest does not admit, or written before
+/// its declared start, carries no Graveyard reason and is an ordinary registry owner.
+#[test]
+fn an_undeclared_graveyard_write_is_an_ordinary_owner() {
+    let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
+    input
+        .writes
+        .push(write(CLAIM_BLOCK, REGISTRY_ONLY, GRAVEYARD, None));
+    let shadow = input.read();
+    assert_not_held(&shadow);
+    assert_eq!(field(&shadow.registration, "lifecycle_status"), "active");
+    assert_eq!(field(&shadow.control, "owner"), GRAVEYARD);
+}
