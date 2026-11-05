@@ -250,6 +250,7 @@ fn push_bucket(query: &mut QueryBuilder<'_, Postgres>, bucket: Bucket, order: Hi
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_root<'a>(
     query: &mut QueryBuilder<'a, Postgres>,
     read: &'a AddressRead<'a>,
@@ -258,13 +259,19 @@ fn push_root<'a>(
     bucket: Bucket,
     identity: Option<&'a str>,
     limit: i64,
+    fence: bool,
 ) {
-    query.push(format!("SELECT ne.*, 0::integer AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM (SELECT {EVENT_COLUMNS} FROM normalized_events ne"));
+    let push_key = |query: &mut QueryBuilder<'a, Postgres>| {
+        query.push("ne.event_kind = 'RootPermissionChanged' AND lower(ne.after_state ->> 'subject') = ").push_bind(read.address);
+        if let Some(namespace) = read.namespace {
+            query.push(" AND ne.namespace = ").push_bind(namespace);
+        }
+    };
+    query.push(format!("SELECT ne.*, 0::integer AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM (SELECT {EVENT_COLUMNS} FROM "));
+    push_event_rows(query, read, filter, bucket, fence, push_key);
     push_arm_filters(query, read, filter, keyset);
-    query.push(" AND ne.event_kind = 'RootPermissionChanged' AND lower(ne.after_state ->> 'subject') = ").push_bind(read.address);
-    if let Some(namespace) = read.namespace {
-        query.push(" AND ne.namespace = ").push_bind(namespace);
-    }
+    query.push(" AND ");
+    push_key(query);
     push_probe_tail(query, filter, bucket, identity, limit);
     query.push(") ne");
 }
@@ -279,13 +286,44 @@ fn push_account<'a>(
     identity: Option<&'a str>,
     limit: i64,
     participant: DirectAccount,
+    fence: bool,
 ) {
-    query.push(format!("SELECT ne.*, 0::integer AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM (SELECT {EVENT_COLUMNS} FROM normalized_events ne"));
+    query.push(format!("SELECT ne.*, 0::integer AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM (SELECT {EVENT_COLUMNS} FROM "));
+    push_event_rows(query, read, filter, bucket, fence, |query| {
+        participant.push_predicate(query, read.address, read.namespace);
+    });
     push_arm_filters(query, read, filter, keyset);
     query.push(" AND ");
     participant.push_predicate(query, read.address, read.namespace);
     push_probe_tail(query, filter, bucket, identity, limit);
     query.push(") ne");
+}
+
+/// The `FROM` item of one probe: `normalized_events` itself, or behind the fence.
+///
+/// The planner estimates any block range above the `block_number` histogram of
+/// `normalized_events` at about one row, and the newest blocks are always above it. Unfenced, a
+/// probe of a bucket near the head was planned as a scan of the whole bucket on
+/// `normalized_events_chain_block_number_desc_idx`, with the probe's key only a filter, once per
+/// source. The fence holds the key, the readable terms each key index is partial on, the bucket
+/// range and the order. `OFFSET 0` keeps the outer filters, the `LIMIT` and the outer chain
+/// equality out of it. The chain-and-block index then has no leading key inside, so the probe's
+/// own index is the only cheap path whatever the estimate. The node and record-id keys carry the
+/// chain because their indexes lead with it. The order lets a `LIMIT 1` seek stop at the first
+/// readable row of a source with a long history. The outer statement still applies every filter,
+/// so the rows are the unfenced statement's rows. The line's other fences are in
+/// `history/wrapped_registrar.rs` and `history/attribution/mirror.rs`.
+fn push_event_rows<'a>(
+    query: &mut QueryBuilder<'a, Postgres>,
+    read: &AddressRead<'_>,
+    filter: &EventHistoryReadFilter,
+    bucket: Bucket,
+    fence: bool,
+    push_key: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
+) {
+    // Red-run stub: the previous statement on both paths.
+    let _ = (read, filter, bucket, fence, push_key);
+    query.push("normalized_events ne");
 }
 
 fn push_probe_tail<'a>(
@@ -304,6 +342,7 @@ fn push_probe_tail<'a>(
     query.push(" LIMIT ").push_bind(limit);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_prefixes<'a>(
     query: &mut QueryBuilder<'a, Postgres>,
     read: &'a AddressRead<'a>,
@@ -312,6 +351,7 @@ fn push_prefixes<'a>(
     bucket: Bucket,
     identity: Option<&'a str>,
     limit: i64,
+    fence: bool,
 ) {
     query.push(", catalogue_prefixes AS MATERIALIZED (");
     for (kind, predicate) in [
@@ -333,7 +373,13 @@ fn push_prefixes<'a>(
         if kind > 0 {
             query.push(" UNION ALL ");
         }
-        query.push(format!("SELECT ne.*, source.witness_kind, NULL::text AS current_chain, NULL::text AS current_name, source.witness_resource FROM catalogue_sources source CROSS JOIN LATERAL (SELECT {EVENT_COLUMNS} FROM normalized_events ne"));
+        query.push(format!("SELECT ne.*, source.witness_kind, NULL::text AS current_chain, NULL::text AS current_name, source.witness_resource FROM catalogue_sources source CROSS JOIN LATERAL (SELECT {EVENT_COLUMNS} FROM "));
+        push_event_rows(query, read, filter, bucket, fence, |query| {
+            if matches!(kind, 2 | 3) {
+                query.push("ne.chain_id = source.chain_id AND ");
+            }
+            query.push(predicate);
+        });
         push_arm_filters(query, read, filter, keyset);
         query
             .push(" AND ")
@@ -356,11 +402,12 @@ fn push_prefixes<'a>(
             identity,
             limit,
             participant,
+            fence,
         );
     }
     if root_enabled(read) {
         query.push(" UNION ALL ");
-        push_root(query, read, filter, keyset, bucket, identity, limit);
+        push_root(query, read, filter, keyset, bucket, identity, limit, fence);
     }
     query.push(")");
 }
@@ -374,6 +421,22 @@ pub(super) fn push_candidate_query<'a>(
     identity: Option<&'a str>,
     limit: i64,
 ) {
+    push_candidate_statement(query, read, filter, keyset, bucket, identity, limit, true);
+}
+
+/// The candidate statement, with the probes fenced (`push_event_rows`) or, for the plan and row
+/// tests' oracle only, as they were before the fence.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_candidate_statement<'a>(
+    query: &mut QueryBuilder<'a, Postgres>,
+    read: &'a AddressRead<'a>,
+    filter: &'a EventHistoryReadFilter,
+    keyset: Option<&HistoryKeyset<'a>>,
+    bucket: i64,
+    identity: Option<&'a str>,
+    limit: i64,
+    fence: bool,
+) {
     push_with(query, filter, keyset);
     push_sources(query, read, filter, bucket, true);
     push_prefixes(
@@ -384,6 +447,7 @@ pub(super) fn push_candidate_query<'a>(
         Bucket::At(bucket),
         identity,
         limit,
+        fence,
     );
     query.push(", catalogue_events AS MATERIALIZED (SELECT DISTINCT ne.normalized_event_id, ne.event_identity, ne.chain_id, ne.block_number, ne.block_hash, ne.transaction_index, ne.log_index FROM catalogue_prefixes ne ORDER BY ");
     push_history_order_terms(query, filter.order);
@@ -400,10 +464,30 @@ pub(super) fn push_seek_query<'a>(
     filter: &'a EventHistoryReadFilter,
     after: Option<i64>,
 ) {
+    push_seek_statement(query, read, filter, after, true);
+}
+
+/// The seek, with the probes fenced or, for the tests' oracle only, as before the fence.
+pub(super) fn push_seek_statement<'a>(
+    query: &mut QueryBuilder<'a, Postgres>,
+    read: &'a AddressRead<'a>,
+    filter: &'a EventHistoryReadFilter,
+    after: Option<i64>,
+    fence: bool,
+) {
     push_with(query, filter, None);
     if let Some(bucket) = after {
         push_sources(query, read, filter, bucket, false);
-        push_prefixes(query, read, filter, None, Bucket::After(bucket), None, 1);
+        push_prefixes(
+            query,
+            read,
+            filter,
+            None,
+            Bucket::After(bucket),
+            None,
+            1,
+            fence,
+        );
     }
     let (bound, direction, comparison, aggregate) = match filter.order {
         HistoryOrder::Asc => ("first_bucket", "ASC", ">", "min"),
@@ -441,12 +525,22 @@ pub(super) fn push_seek_query<'a>(
     } else {
         for participant in direct_accounts::participants(read.scope, read.relations) {
             query.push(" UNION ALL SELECT COALESCE(block_number / 256, -1) FROM (");
-            push_account(query, read, filter, None, Bucket::Any, None, 1, participant);
+            push_account(
+                query,
+                read,
+                filter,
+                None,
+                Bucket::Any,
+                None,
+                1,
+                participant,
+                fence,
+            );
             query.push(") account");
         }
         if root_enabled(read) {
             query.push(" UNION ALL SELECT COALESCE(block_number / 256, -1) FROM (");
-            push_root(query, read, filter, None, Bucket::Any, None, 1);
+            push_root(query, read, filter, None, Bucket::Any, None, 1, fence);
             query.push(") root");
         }
     }
