@@ -2162,7 +2162,8 @@ owned family: name identity and binding candidates,
 registration and lease state, wrapper state, registry ownership, resolver
 classification, the registry-node and resource resolver pointers, node and
 record-id records with resolver links, grants and account approvals,
-ENSv2 registry entries, child edges, reverse tuples and claims, and the address associations. Each row
+ENSv2 registry entries, child edges, reverse tuples and claims, the address associations, and
+the child listing with its counts. Each row
 belongs to one key and holds what the latest events of that key left, clears
 included: a zero pointer, record id `0` or a revoked grant
 stays a row. A row goes only when nothing remains for its key. Each grant also
@@ -2578,6 +2579,48 @@ a surface's visibility or a lineage readability flip, are covered because a
 recompute only happens with a code change that rotates the interpreter
 fingerprint, which rebuilds the families. A reorg goes through undo, which
 restores the summaries from the journal.
+
+### Child listing
+
+F17 stores each parent's listed children, one row per child in `project_child_listing`, so the
+subnames page, the registry labels page and the child counts read rows through indexes and
+compose no child at read. A row holds the child's served fields, its stored name, the sort keys
+and the label registry, and is composed by the children relation
+(`crates/storage/src/families/topology/listing.rs`) at the block Project publishes. The stored
+name spells a label from chain-observed preimages only. A label first learned on another chain
+reaches the stored name at this chain's next block. An imported label reaches it only when its
+row is derived again for another reason (TYR-373/374). Served names heal at read time. The
+rainbow-table import has no block, so the row keeps its placeholder and the reader spells the
+label at read (`crates/storage/src/families/topology/listing_page.rs`). The family step reads
+each other chain's new observations past a journalled watermark
+(`project_child_preimage_watermark`) and derives again the rows that hold one of their labels.
+After an Interpret redo of that chain alone, a label only the redo revealed waits about (that
+chain's `PreimageObserved` rows / 1,000) blocks of this chain.
+
+`display_key` is the stored name in C collation, or its first 500 characters when it is longer
+than 2,000 bytes. `expires_key` and `registered_key` are the child's name summary timestamps in
+Unix seconds, -1 when it has none. `registry_address` is the ENSv2 registry whose labels the
+child is one of, and `summary_owner` is the owner its name summary serves.
+
+`project_child_listing_count` holds, per parent, the number of its rows under the empty
+registry address, and per parent and label registry the number of that registry's labels. A
+count of zero has no row.
+
+After a block's name summaries, the family step reads a work list. A child is derived again,
+under every parent that can list it, when the block touched its summary, an edge naming it,
+its ENSv2 registration, its registry node, its NameWrapper row, a registrar lease of its node or
+a preimage of its name or labels. It is also derived again at `recompose_at`, the second after
+its NameWrapper expiry, when the ENSv1→ENSv2 migration gate keeps it only until then. A parent
+is derived whole, in one statement, when the block moved its migration state, its ENSv2
+subregistry pointer, its surface, its spelling or an address window of its subregistry. The
+step compares the fresh rows with the stored ones, journals every changed row and count with
+its before-image, and moves each count by the same diff. A parent derived whole is set to the
+size of its fresh rows. Above 100,000 rows in one parent the runner logs a `WARN`. Undo restores
+the listing, its counts and the watermarks from the journal.
+
+The composition pass derives every parent whole in a children stream after the names stream.
+Inputs that change in place with no block, such as a lineage readability flip, are covered by
+the rebuild a hash rotation forces, as for the name summaries.
 
 ### ENSv2 registry entries
 

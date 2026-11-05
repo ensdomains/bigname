@@ -481,7 +481,7 @@ field requires no schema migration or replay.
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding or because they contradict themselves or their emitter's earlier logs, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
-| `project_family_marker`, `project_family_undo`, `project_repair_record` and [owned key family tables](glossary.md#per-block-publication) | Project | Permanent current serving state, publication generation, undo journal and repair progress. Readers compose names, records, control, permissions, resolver collections, reverse claims and address relations from one family snapshot. Child lists and counts use `project_child_edge_candidate`, `project_parent_subregistry` and `project_name_summary`; the `GET /v1/names` expiry walk reads `project_name_summary.authority_arm` to skip names an `authority` filter cannot list. An unavailable marker or overlapping redo refuses composed reads. Family data is rebuildable from canonical interpreted input; hash-pinned hydration overlays follow the documented replay policy. |
+| `project_family_marker`, `project_family_undo`, `project_repair_record` and [owned key family tables](glossary.md#per-block-publication) | Project | Permanent current serving state, publication generation, undo journal and repair progress. Readers compose names, records, control, permissions, resolver collections, reverse claims and address relations from one family snapshot. Child lists and counts read `project_child_listing` and `project_child_listing_count`, which the family step composes from `project_child_edge_candidate`, `project_parent_subregistry` and `project_name_summary`; the `GET /v1/names` expiry walk reads `project_name_summary.authority_arm` to skip names an `authority` filter cannot list. An unavailable marker or overlapping redo refuses composed reads. Family data is rebuildable from canonical interpreted input; hash-pinned hydration overlays follow the documented replay policy. |
 | `project_compose_name_work` | Project | The work list of a rebuild's [composition pass](glossary.md#composition-pass): every name id the pass composes or indexes, with what it composes for each, numbered in `COLLATE "C"` order once when the pass begins. The names stream pages through it by number. It holds rows only during a pass: the pass end and a family reset clear the chain's rows. Not journalled, not served. |
 | `project_text_hydration_work`, `project_reverse_hydration_work` | Project | Derived indexes of pending text hydration and continuously refreshed reverse tuples. Keyed like their source rows, with indexed attempt order. The order is scheduling state only: `project_reverse_tuple.attempt_ordinal` can advance while the tuple's name and the block it was observed at (`hydrated_name`, `attempt_block`, `attempt_hash`, `baseline`) stay. The source rows also carry the largest Multicall3 aggregate a selector may next be sent in after its aggregate failed (`attempt_limit`, `hydration_limit`) and the count of reads in a row that observed nothing (`attempt_failures`, `hydration_failures`, copied into the work indexes). Selection uses a positive failure count, a null aggregate limit and the attempt height to delay an individually failed child's retry by 7,200 blocks; outer failures retain their split scheduling. Fresh selector evidence clears obsolete limits and counts. They are journalled and undone with their row. Publication and undo refresh affected keys transactionally; reset clears them and rebuild repopulates them. No provider payloads or separate history. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
@@ -669,9 +669,29 @@ Family indexes serve these concrete readers:
   its captured manifest set changes or a current proxy declaration starts. These changes
   use the same undo journal. Retired addresses keep their latest upgrade without retaining
   the current client-facing role.
-- Child pages and counts check that an ENSv1 or Basenames edge is its child's latest across
+- The subnames page, the registry labels page and the child counts read the child listing
+  family F17 ([projections](projections.md#child-listing)). A page is one range of the sort's
+  index from the cursor, ascending forwards and descending backwards, with no sort step:
+  `project_child_listing_name_idx` for the name sort,
+  `project_child_listing_expires_idx` and `project_child_listing_registered_idx` for the
+  timestamp sorts, `project_child_listing_labels_idx` for a registry's labels and
+  `project_child_listing_label_owners_idx` for an `owner` filter. Each leads with `(chain_id,
+  parent_logical_name_id)` and ends with `display_key` and `child_logical_name_id`.
+  `display_key` is `COLLATE "C"`, so a `q` prefix is a range of it under any database
+  collation, rechecked against the stored name. The name index carries the expiry filter's
+  columns, so a total filtered by `include_expired=false` alone can be counted from the index
+  alone. An unfiltered total is a primary-key read
+  of `project_child_listing_count`. The family step reads
+  `project_child_listing_recompose_idx` for the rows the migration gate drops at a block's time,
+  `project_parent_subregistry_address_idx` for the names whose subregistry an address window
+  moves, and the partial GIN index `project_child_listing_unhealed_idx` on
+  `unhealed_labelhashes` for the rows whose stored name still spells an observed label as
+  `[labelhash]`. All are installed by the phase baseline and
+  `20261103120000_project_child_listing.sql`.
+- The children relation, which composes the listing rows and spells a page row's label
+  placeholders again at read, checks that an ENSv1 or Basenames edge is its child's latest across
   parents through `project_child_edge_candidate_child_idx`, by chain, namespace and child
-  node, and find a registry instance's ENSv2 registrations through
+  node, and finds a registry instance's ENSv2 registrations through
   `project_child_registration_state_registry_idx`; both primary keys lead with a column
   those lookups do not bind. The registry children an address owns read their edges through
   the same index by their candidate nodes rather than by parent.
