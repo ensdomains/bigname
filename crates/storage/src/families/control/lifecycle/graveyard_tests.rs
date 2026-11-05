@@ -764,8 +764,8 @@ fn wrapper_transfer(block: i64, to: &str) -> LifecycleEvent {
     )
 }
 
-/// A wrapped subname whose NameWrapper binding closed at `closed`, with the registry-only
-/// binding a registry write naming someone other than the NameWrapper opened then at `block`
+/// A wrapped subname with the registry-only binding a registry write naming someone other than
+/// the NameWrapper opened at `block`, at time `opened`
 /// (adapters `wrapper_custody.rs`, `keeps_authority`), and the registry's NameWrapper record
 /// until then. Selection picks the registry-only binding, as in production.
 fn handed_off(
@@ -844,4 +844,36 @@ fn an_unwrapped_subname_cleared_later_keeps_its_registry_owner() {
         assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {flag}");
         assert_held(&shadow, Some(NEXT_OWNER));
     }
+}
+
+/// tayy-i on #1390, ruling 4 followed by a token move: a live lease's holder sets the registry
+/// record to the Graveyard, then transfers the BaseRegistrar token without `reclaim`. The
+/// registration ended at the write, so the lapsed owner is the holder then, not the later
+/// recipient the registration laterals name.
+#[test]
+fn a_token_moved_after_its_holders_own_graveyard_write_keeps_the_holder_at_the_write() {
+    let mut input = Name::new(registrar_binding(), vec![lease_grant(8, LIVE_EXPIRY)]).claimed();
+    input.events.push(event(
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        LEASE,
+        70,
+        json!({"authority_kind": "registrar", "source_event": "Transfer",
+               "to_address": NEXT_OWNER}),
+    ));
+    assert_held(&input.read(), Some(HOLDER));
+}
+
+/// tayy-i on #1390: in one transaction the record's owner sets it to `NEXT_OWNER` and then
+/// calls `clear`. The holder is the owner that earlier write of the claim's own transaction
+/// named.
+#[test]
+fn a_record_set_earlier_in_the_claims_transaction_names_the_holder() {
+    let mut input = Name::new(registry_only(HANDOFF), Vec::new());
+    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+    let mut set_owner = write(CLAIM_BLOCK, REGISTRY_ONLY, NEXT_OWNER, None);
+    set_owner.position.log_index = Some(1);
+    set_owner.position.event_identity = "write:set-owner".to_owned();
+    input.writes.push(set_owner);
+    assert_held(&input.claimed().read(), Some(NEXT_OWNER));
 }
