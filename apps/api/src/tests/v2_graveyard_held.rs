@@ -245,7 +245,7 @@ async fn v2_graveyard_held_child_leaves_the_lists_and_the_expiry_listing() -> Re
     database.cleanup().await
 }
 
-/// Row 19: a held name is listed for nobody under the authority relations, neither its holder
+/// A held name is listed for nobody under the authority relations, neither its holder
 /// before the claim nor the Graveyard, and its holder lists it under `former_owner`.
 #[tokio::test]
 async fn v2_graveyard_held_name_lists_its_holder_as_former_owner_only() -> Result<()> {
