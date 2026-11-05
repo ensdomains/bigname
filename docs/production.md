@@ -57,9 +57,9 @@ does not need them. Update this list with every matcher change.
 
 | Refused request | Answer | What to call instead | Exit condition |
 | --- | --- | --- | --- |
-| `/v1/diagnostics/events` and paths below it | `404` | `GET /v1/events`, the product event collection. | Goes when the edge drops this matcher, once the route is served again. |
-| `/v1/names/eth/subnames`, `/v1/names/base.eth/subnames` and paths below them | `400` | The subnames of a narrower parent, or `GET /v1/names` with `parent` and an expiry window. | Goes when the edge drops this matcher, once these parents are served again. |
-| `/v1/events` with `contract_address` and `include=total_count` | `400` | The same read without `include=total_count`. | Retiring: the API now bounds this count. Goes when the edge drops this matcher. |
+| `/v1/diagnostics/events` and paths below it | `404` | `GET /v1/events`, the product event collection. | Goes when the edge drops this matcher. That waits on an API change to this route. |
+| `/v1/names/eth/subnames`, `/v1/names/base.eth/subnames` and paths below them | `400` | `GET /v1/names/{name}/subnames` for any other parent, or `GET /v1/names` with `namespace`, `parent` and an expiry window. | Goes when the edge drops this matcher. That waits on an API change to the subnames route. |
+| `/v1/events` with `contract_address` and `include=total_count` | `400` | The same read without `include=total_count`. | Retiring: the API now caps this count when only a contract anchors the read. Goes when the edge drops this matcher. |
 | `/v1/resolvers/*` with `include=total_count` | `400` | The same read without `include=total_count`. | Retiring: the API now bounds this count. Goes when the edge drops this matcher. |
 
 Matching is case-insensitive on the unescaped path. A query test reads the raw
