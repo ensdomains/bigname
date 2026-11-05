@@ -13,7 +13,7 @@
 //! its partial key indexes need. The row test compares the fenced statements with the previous
 //! ones on every input class, in order.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Write};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -29,11 +29,17 @@ use crate::history::{
 const ADDRESS: &str = "0x0000000000000000000000000000000000000a11";
 const WALLET_COLD: &str = "0x0000000000000000000000000000000000000b21";
 const WALLET_HOT: &str = "0x0000000000000000000000000000000000000b22";
+/// The operator (subject) of a long run of account approvals.
+const WALLET_ACCOUNT: &str = "0x0000000000000000000000000000000000000b23";
+/// The address of a long run of reverse claims.
+const WALLET_REVERSE: &str = "0x0000000000000000000000000000000000000b24";
 const CHAIN: &str = "ethereum-mainnet";
 const DENSE: i64 = 1_000;
 const THIN: i64 = 999;
 const DENSE_EVENTS: i64 = 20_000;
 const HOT_EVENTS: i64 = 3_000;
+/// The bucket of the newest event of each hot history.
+const HOT_LAST: i64 = (400 + (HOT_EVENTS - 1) * 80) / 256;
 const PUBLISHED: i64 = (DENSE + 1) * 256;
 
 /// The readable terms the fence holds before the key, as `push_event_rows` writes them.
@@ -250,7 +256,7 @@ fn cases() -> Vec<Case> {
         Case {
             address: WALLET_HOT,
             few_rows: true,
-            next_bucket: Some(Some((400 + (HOT_EVENTS - 1) * 80) / 256)),
+            next_bucket: Some(Some(HOT_LAST)),
             ..base("hot source seek", Statement::Seek { after: Some(DENSE) })
         },
         // An ascending seek whose window ends before the hot source's tail: the window bound
@@ -265,6 +271,30 @@ fn cases() -> Vec<Case> {
                 "hot source seek asc under a window end",
                 Statement::Seek { after: Some(1) },
             )
+        },
+        // A first seek reads the direct arms without a bucket: a wallet with a long approval or
+        // reverse history must stop at its newest (or oldest) event.
+        Case {
+            address: WALLET_ACCOUNT,
+            few_rows: true,
+            next_bucket: Some(Some(HOT_LAST)),
+            ..base("hot account first seek", Statement::Seek { after: None })
+        },
+        Case {
+            address: WALLET_ACCOUNT,
+            order: HistoryOrder::Asc,
+            few_rows: true,
+            next_bucket: Some(Some(400 / 256)),
+            ..base(
+                "hot account first seek asc",
+                Statement::Seek { after: None },
+            )
+        },
+        Case {
+            address: WALLET_REVERSE,
+            few_rows: true,
+            next_bucket: Some(Some(HOT_LAST)),
+            ..base("hot reverse first seek", Statement::Seek { after: None })
         },
         base(
             "selected event of a row-only cursor",
@@ -342,20 +372,23 @@ async fn catalogue_probes_read_their_key_index() -> Result<()> {
                     let plan = explain(connection, &sql, arguments.clone(), generic).await?;
                     println!("{cell}: {}", json!(probes(&plan[0]["Plan"])));
                     failures.extend(guard(&cell, &plan, generic));
-                    // A descending seek of a source with a long history reads its newest rows
-                    // while the planner believes the history short. With fresh statistics it
-                    // plans the fence for all of the source's rows before the bucket, which is
-                    // the source's own history and never other names' events.
-                    let most = if statistics == Statistics::Fresh && case.label == "hot source seek" {
-                        (HOT_EVENTS + 2) as f64
-                    } else {
-                        4.0
-                    };
+                    // A seek of a source with a long history stops at its first row in order,
+                    // whatever the statistics say about the length of that history.
+                    if case.few_rows {
+                        // Written past the test harness's capture, so a passing run's log keeps
+                        // each seek's plan shape and rows read.
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "seek plan | {cell} | sorts {} | {}",
+                            json!(sorts(&plan[0]["Plan"])),
+                            json!(probes(&plan[0]["Plan"]))
+                        );
+                    }
                     if case.few_rows && !generic {
                         for probe in probes(&plan[0]["Plan"]) {
-                            if probe["rows"].as_f64().unwrap_or(0.0) > most {
+                            if probe["rows"].as_f64().unwrap_or(0.0) > 4.0 {
                                 failures.push(format!(
-                                    "{cell}: the seek read more than {most} rows of the source: {probe}"
+                                    "{cell}: the seek read more than its first rows: {probe}"
                                 ));
                             }
                         }
@@ -606,10 +639,29 @@ fn scope_shape(chain_inside: &str, order: HistoryOrder) -> Result<String> {
     let mut terms = QueryBuilder::<Postgres>::new("");
     push_history_order_terms(&mut terms, order);
     let ordered = format!(" ORDER BY {} OFFSET 0) ne", terms.sql());
-    ensure!(chain_inside.contains(&ordered), "no order in the fence");
-    Ok(chain_inside
-        .replace(&readable, "")
-        .replace(&ordered, " OFFSET 0) ne"))
+    let without_readable = chain_inside.replace(&readable, "");
+    if without_readable.contains(&ordered) {
+        return Ok(without_readable.replace(&ordered, " OFFSET 0) ne"));
+    }
+    // A seek's fence ends in its own LIMIT; the probe's lineage join follows it. The probe's
+    // own order and LIMIT stay.
+    let limited = format!(" ORDER BY {} LIMIT ", terms.sql());
+    let mut shape = String::new();
+    let mut rest = without_readable.as_str();
+    let mut found = false;
+    while let Some(at) = rest.find(&limited) {
+        let tail = &rest[at + limited.len()..];
+        let fence_end = tail
+            .find(") ne")
+            .is_some_and(|end| tail[end + 4..].trim_start().starts_with("LEFT JOIN"));
+        shape.push_str(&rest[..at]);
+        shape.push_str(if fence_end { " LIMIT " } else { &limited });
+        found |= fence_end;
+        rest = tail;
+    }
+    shape.push_str(rest);
+    ensure!(found, "no order in the fence");
+    Ok(shape)
 }
 
 async fn explain(
@@ -710,6 +762,22 @@ fn index_names(probe: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// The sort nodes with a probe below them, innermost last.
+fn sorts(node: &Value) -> Vec<Value> {
+    let mut found = Vec::new();
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        found.extend(sorts(child));
+    }
+    let kind = node["Node Type"].as_str().unwrap_or_default();
+    if (kind == "Sort" || kind == "Incremental Sort") && !probes(node).is_empty() {
+        found.insert(
+            0,
+            json!({"type":kind,"rows":node["Actual Rows"],"loops":node["Actual Loops"]}),
+        );
+    }
+    found
+}
+
 /// Every probe reads its own key index with the key in the index condition, never a
 /// chain-and-block index, and in a custom plan filters out at most a handful of rows per loop.
 fn guard(cell: &str, plan: &Value, generic: bool) -> Vec<String> {
@@ -758,7 +826,8 @@ async fn with_fixture(
     result
 }
 
-/// Adds the dense and thin buckets, the hot and cold wallets and an unpositioned event, then
+/// Adds the dense and thin buckets, the hot and cold wallets, the hot approval and reverse
+/// histories and an unpositioned event, then
 /// builds the catalogue rows. `normalized_events` is not analyzed again, so every new block lies
 /// above its `block_number` histogram until a test analyzes it.
 async fn install(connection: &mut PgConnection) -> Result<()> {
@@ -801,6 +870,12 @@ async fn install(connection: &mut PgConnection) -> Result<()> {
       FROM generate_series(1,4) n;
       INSERT INTO normalized_events(event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,chain_id,derivation_kind,canonicality_state)
       VALUES ('fence:unpositioned','ens','ens:0x'||lpad(to_hex(1),64,'0'),'RegistrationRenewed','ens_v1_registrar_l1',1,'{CHAIN}','ens_v1_unwrapped_authority','canonical');
+      INSERT INTO normalized_events(event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state)
+      SELECT 'fence:hot-account:'||n,'ens','AccountPermissionChanged','ens_v1_registry_l1',1,'{CHAIN}','fence-block-'||(400+n*80),400+n*80,'fence-tx-hot-account-'||n,0,3,'ens_v1_unwrapped_authority','canonical'::canonicality_state,jsonb_build_object('subject','{WALLET_ACCOUNT}','relation_kind','operator','scope',jsonb_build_object('kind','account','owner','0x'||lpad(to_hex(n+2000000),40,'0')))
+      FROM generate_series(0,{HOT_EVENTS}-1) n
+      UNION ALL
+      SELECT 'fence:hot-reverse:'||n,'ens','ReverseChanged','ens_v1_reverse_registrar_l1',1,'{CHAIN}','fence-block-'||(400+n*80),400+n*80,'fence-tx-hot-reverse-'||n,0,4,'ens_v1_reverse_claim','canonical'::canonicality_state,jsonb_build_object('address','{WALLET_REVERSE}','name','fence-'||n||'.eth')
+      FROM generate_series(0,{HOT_EVENTS}-1) n;
       INSERT INTO project_history_source(chain_id,source_kind,source_key,first_bucket,last_bucket,bucket_range,event_mask,key_bloom)
       SELECT chain_id,kind,key,min(block_number/256),max(block_number/256),int8range(min(block_number/256),max(block_number/256)+1),9223372036854775807,~B'0'::bit(256)
       FROM (SELECT chain_id,0::smallint AS kind,logical_name_id AS key,block_number FROM normalized_events WHERE logical_name_id IS NOT NULL AND block_number IS NOT NULL
