@@ -268,9 +268,7 @@ pub async fn load_name_facts_on(
                 .filter_map(|node| node.first_current_record_block),
         )
         .chain(nodes.values().filter_map(|node| {
-            node.latest_transfer()
-                .filter(|write| write.graveyard_held())
-                .map(|write| write.position.block_number)
+            super::graveyard::first_held(node).map(|write| write.position.block_number)
         }))
         .collect::<BTreeSet<_>>()
         .into_iter()

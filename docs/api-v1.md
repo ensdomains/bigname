@@ -2563,7 +2563,8 @@ Graveyard is served as an ended registration, whatever its lease or its schedule
   write in the same transaction. When that record was the NameWrapper's, it is the wrapped
   token's holder. A token sent to the Graveyard before the write leaves its sender as the holder,
   and a token moved after the write does not change it. `released_at` is the block time of the
-  Graveyard's write, and `release_kind` is `expired`.
+  write that gave the Graveyard the record. A later `clear` that writes it again changes neither,
+  and `release_kind` is `expired`.
 
 `registered_at` and `registration_id` keep the registration that ended. A label later
 registered in ENSv2 serves that registration, as does a migrated name, whose ENSv1 record the

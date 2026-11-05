@@ -20,25 +20,54 @@ use serde_json::{Map, Value, json};
 use super::NameFacts;
 use crate::families::control::{
     position::Position,
-    registry::{OwnerEvent, ZERO_ADDRESS},
+    registry::{OwnerEvent, RegistryNode, ZERO_ADDRESS},
     rows::{BindingCandidate, LifecycleEvent},
 };
 
-/// The admitted Graveyard's registry write that holds the name's current ENSv1 record: the node's
-/// newest current-registry owner write, when it names the Graveyard. An ENSv2 name has its own
-/// registry, so a label registered in ENSv2 after the claim serves that registration instead. A
-/// migrated name's record is the Graveyard's from its migration, which `clear` never claims, so
-/// that write is no claim even where the name falls back to its ENSv1 arm.
+/// The admitted Graveyard's registry write that holds the name's current ENSv1 record: when the
+/// node's newest current-registry owner write names the Graveyard, the first write of that
+/// trailing run of Graveyard writes ([`first_held`]). An ENSv2 name has its own registry, so a
+/// label registered in ENSv2 after the claim serves that registration instead. A migrated name's
+/// record is the Graveyard's from its migration, which `clear` never claims, so that write is no
+/// claim even where the name falls back to its ENSv1 arm.
 pub(super) fn claim(facts: &NameFacts) -> Option<&OwnerEvent> {
     if facts.input.selection.authority_arm.as_deref() != Some("ens_v1") || facts.migration.is_some()
     {
         return None;
     }
-    facts
-        .registry_node
-        .as_ref()?
+    first_held(facts.registry_node.as_ref()?)
+}
+
+/// The write that gave the Graveyard the node's record, when it still holds it: the first of the
+/// trailing run of current-registry owner writes naming it. `clear` writes a subname of a name it
+/// holds again each time it runs, for that subname or any name below it, and a holder's own write
+/// to the Graveyard can precede a clear. The registration ended at the first of them, and its
+/// holder is the one before that.
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
+pub(super) fn first_held(node: &RegistryNode) -> Option<&OwnerEvent> {
+    let latest = node
         .latest_transfer()
-        .filter(|write| write.graveyard_held())
+        .filter(|write| write.graveyard_held())?;
+    let writes: Vec<&OwnerEvent> = node
+        .owner_events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "AuthorityTransferred"
+                && event.source_family == latest.source_family
+        })
+        .collect();
+    let before_run = writes
+        .iter()
+        .copied()
+        .filter(|write| !write.graveyard_held())
+        .map(|write| &write.position)
+        .max();
+    writes
+        .into_iter()
+        .filter(|write| {
+            write.graveyard_held() && before_run.is_none_or(|last| write.position > *last)
+        })
+        .min_by(|left, right| left.position.cmp(&right.position))
 }
 
 /// Serve a Graveyard-held name's registration as ended. The lapsed owner is the holder as it
