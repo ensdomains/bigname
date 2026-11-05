@@ -187,8 +187,18 @@ pub(super) async fn assert_alias(
             records["data"], expected,
             "{alias} records under {canonical} with {query}"
         );
-        assert_eq!(records["meta"]["completeness"], "full", "{records:#}");
-        assert_eq!(records["meta"]["source"], "indexed", "{records:#}");
+        for field in [
+            "source",
+            "completeness",
+            "unsupported_fields",
+            "unsupported_reason",
+        ] {
+            assert_eq!(
+                records["meta"].get(field),
+                canonical_records["meta"].get(field),
+                "{alias} {field} under {canonical} with {query}"
+            );
+        }
     }
     Ok(served)
 }
@@ -253,6 +263,8 @@ async fn an_added_mount_serves_the_token_under_its_path() -> Result<()> {
     assert_eq!(served["data"]["status"], "active", "{served:#}");
     assert!(served["data"]["registration_id"].is_string(), "{served:#}");
     assert_eq!(served["data"]["owner"], HOLDER, "{served:#}");
+    let records = ok(&database, "/v1/names/child.z.eth/records?source=indexed").await?;
+    assert_eq!(records["meta"]["completeness"], "full", "{records:#}");
 
     assert_eq!(
         count(&subnames(&database, "m.eth").await?, "child.m.eth"),

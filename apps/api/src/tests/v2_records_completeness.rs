@@ -34,7 +34,7 @@ fn assert_verified_carries_no_completeness(uri: &str, payload: &Value) {
     }
 }
 
-/// Rows 1, 9, 10: an admitted ENSv1 resolver. A key's own `not_found` or `unsupported` answer does
+/// An admitted ENSv1 resolver. A key's own `not_found` or `unsupported` answer does
 /// not lower the field, which speaks for the inventory. Without a `source`, or with `auto`
 /// answered from the index, the read is indexed.
 #[tokio::test]
@@ -71,7 +71,7 @@ async fn v2_records_of_an_admitted_ens_v1_resolver_are_full() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 2: an admitted ENSv2 record-ID resolver, read over the inventory's default key set.
+/// An admitted ENSv2 record-ID resolver, read over the inventory's default key set.
 #[tokio::test]
 async fn v2_records_of_an_admitted_record_id_resolver_are_full() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -86,7 +86,7 @@ async fn v2_records_of_an_admitted_record_id_resolver_are_full() -> Result<()> {
     database.cleanup().await
 }
 
-/// Rows 3, 10: an on-chain resolver whose implementation is not admitted. Each key keeps the
+/// An on-chain resolver whose implementation is not admitted. Each key keeps the
 /// row's own reason. Keyed `auto` answers those keys through the verified read.
 #[tokio::test]
 async fn v2_records_of_a_non_admitted_resolver_are_not_authoritative() -> Result<()> {
@@ -113,7 +113,7 @@ async fn v2_records_of_a_non_admitted_resolver_are_not_authoritative() -> Result
     database.cleanup().await
 }
 
-/// Row 5: a name with no resolver of its own, whose ENSv1 registry pointer is zero.
+/// A name with no resolver of its own, whose ENSv1 registry pointer is zero.
 #[tokio::test]
 async fn v2_records_of_a_name_with_no_resolver_of_its_own_are_not_available() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -138,7 +138,7 @@ async fn v2_records_of_a_name_with_no_resolver_of_its_own_are_not_available() ->
     database.cleanup().await
 }
 
-/// Rows 6, 7: a released lease, a reservation, and an authority with no binding, which enters
+/// A released lease, a reservation, and an authority with no binding, which enters
 /// the name-level short circuit with `inventory_not_available`.
 #[tokio::test]
 async fn v2_records_a_name_withholds_are_not_available() -> Result<()> {
@@ -167,7 +167,7 @@ async fn v2_records_a_name_withholds_are_not_available() -> Result<()> {
     Ok(())
 }
 
-/// Row 6: a name with no live ENSv2 entry keeps answering its keys `not_found`, and no inventory
+/// A name with no live ENSv2 entry keeps answering its keys `not_found`, and no inventory
 /// stands behind that answer.
 #[tokio::test]
 async fn v2_records_of_an_unresolvable_name_are_not_available() -> Result<()> {
@@ -183,7 +183,7 @@ async fn v2_records_of_an_unresolvable_name_are_not_available() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 7: an ENSv2 TLD served through its root-registry resolver pointer stays out of the
+/// An ENSv2 TLD served through its root-registry resolver pointer stays out of the
 /// name-level short circuit, so the pointer's inventory decides.
 #[tokio::test]
 async fn v2_records_of_a_root_registry_pointer_follow_the_inventory() -> Result<()> {
@@ -197,7 +197,7 @@ async fn v2_records_of_a_root_registry_pointer_follow_the_inventory() -> Result<
     database.cleanup().await
 }
 
-/// Rows 11, 12: the resolver records route reports the inventory it read, whatever the name
+/// The resolver records route reports the inventory it read, whatever the name
 /// serves. It has no inventory-less case: a node with no writes at an admitted resolver is an
 /// authoritative empty inventory.
 #[tokio::test]
@@ -228,7 +228,7 @@ async fn v2_resolver_records_report_the_resolver_inventory() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 13 and the diagnostics route: neither gains the field. `POST /v1/lookup` reports its
+/// Lookup and the diagnostics route: neither gains the field. `POST /v1/lookup` reports its
 /// request scope in `meta.as_of_completeness`, and each input carries its own record answers.
 #[tokio::test]
 async fn v2_lookup_and_the_records_diagnostic_carry_no_inventory_completeness() -> Result<()> {

@@ -836,7 +836,9 @@ Rules:
   that provide it. `meta.as_of_token` is opaque and is the value to pass to
   `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
-  read is not clean. `meta.source` appears when the route supports `source`.
+  read is not clean. An indexed answer on the two `GET` records routes is the
+  exception: it always carries `meta.completeness`, which is `full` on a clean
+  read. `meta.source` appears when the route supports `source`.
 - Public reverse requests to `POST /v1/lookup` and all `GET /v1/search`
   requests disclose the chain scope selected by the request. A public reverse
   request or search without an explicit `namespace` accounts for the chains of

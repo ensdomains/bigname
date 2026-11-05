@@ -78,9 +78,8 @@ record-key grammar of
 - `text`: `text:<key>`, and `avatar`, which reads `text:avatar`.
 - `contenthash`: `contenthash`.
 
-Any other family is not served as a key. The inventory lists ABI content types
-in `abi_content_types`. A `pubkey` write is an example of a family that reports
-`record_family_not_supported`.
+Any other family is not served as a key, so a `pubkey` write shows no key. The
+inventory lists ABI content types in `abi_content_types`.
 
 ### Admitted resolvers
 
@@ -113,7 +112,7 @@ the declared implementation.
 `meta.unsupported_reason` on the records routes uses two codes for the inventory
 behind an indexed answer
 ([`meta.completeness`](api-v1-routes.md#get-v1namesnamerecords)). The inventory's
-`abi_unsupported_reason` uses the same two:
+`abi_unsupported_reason` can carry the same two:
 
 | Code | Meaning |
 | --- | --- |
@@ -138,7 +137,6 @@ An admitted resolver can still report a key `unsupported`, which leaves
 | Key reason | Meaning |
 | --- | --- |
 | `value_not_retained` | An event named the key, but bigname retained no value for it. |
-| `record_family_not_supported` | The family is not one of the three served families. |
 | `record_family_not_supported_by_resolver` | The admitted resolver has no getter for the family. |
 
 ## Direct PublicResolverV2 record support

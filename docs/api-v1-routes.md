@@ -1800,7 +1800,7 @@ its value map:
   | Inventory behind the answer | `meta.completeness` | `meta.unsupported_fields` | `meta.unsupported_reason` |
   | --- | --- | --- | --- |
   | Authoritative: coverage `status` is `full` or `projected` and it names no `unsupported_reason` | `full` | absent | absent |
-  | A row that is not authoritative: a resolver whose implementation is not admitted, or an address no resolver manifest declares, which includes an offchain resolver | `unsupported` | `["records"]` | `inventory_not_authoritative` |
+  | A row that is not authoritative: a resolver whose implementation is not admitted, an address no resolver manifest declares, which includes an offchain resolver, or a mirror whose registry walk finds no projected ENSv1 resolver | `unsupported` | `["records"]` | `inventory_not_authoritative` |
   | No inventory the name may serve: no resolver of its own, a released or unbound name, a reservation, or a name whose resolution is withheld | `unsupported` | `["records"]` | `inventory_not_available` |
   | None read, because the name is unsupported or its resolution cannot be attributed | `unsupported` | `["records"]` | the name-level reason each key carries |
 
@@ -1809,11 +1809,12 @@ its value map:
   reason. Under `inventory_not_authoritative`, each key keeps the row's own
   reason, such as `resolver_not_declared`. Under `inventory_not_available`, a
   name that serves no records, such as a released ENSv2 registration, keeps
-  answering its keys `not_found`, and so does a registry clear on `source=auto`.
+  answering its keys `not_found`. So does a keyed `source=auto` read of a name
+  with no resolver to read, such as a registry clear.
 
   The three fields are absent when `meta.source=verified`, including a default
   or `source=auto` read once any key came from the verified read. `values=false`
-  reports the same fields as the value read of the same name.
+  reports the same fields as the indexed value read of the same name.
   `POST /v1/lookup` and `GET /v1/diagnostics/names/{name}/records` do not set
   them.
 - Pagination behavior: none.
@@ -5295,10 +5296,11 @@ For a registrar lease first identified by a later readable observation, registra
 - `meta.completeness` reports the inventory read at this resolver, with the
   [name records route's meanings](#get-v1namesnamerecords). It is `full` for an
   [admitted resolver](consumer-capabilities.md#admitted-resolvers), including a
-  node with no inventory there. It is `unsupported` with
+  node with no inventory there. It is `unsupported` for any other resolver, and
+  for a mirror whose registry walk finds no projected ENSv1 resolver, with
   `meta.unsupported_fields=["records"]` and
-  `meta.unsupported_reason=inventory_not_authoritative` otherwise. This route
-  always reads an inventory row, so it never reports `inventory_not_available`.
+  `meta.unsupported_reason=inventory_not_authoritative`. This route always
+  reads an inventory row, so it never reports `inventory_not_available`.
 - Which records are read: the writes the resolver emitted for the name's node,
   under the record-version and link rules of the name records route. For a
   declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
