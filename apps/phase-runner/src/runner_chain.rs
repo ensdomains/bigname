@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::{
     config::{ChainConfig, RuntimeConfig},
-    error::{RunnerError, RunnerResult},
+    error::{ErrorKind, RunnerError, RunnerResult},
     phase::{PhaseName, RunMode},
     phase_lock::PhaseLock,
     runner_support::StopClock,
@@ -132,7 +132,8 @@ impl PhaseRunner {
                 self.recover_stopped_phases(chain).await
             },
         )
-        .await?;
+        .await
+        .map_err(held_start_up_lock_is_retryable)?;
         if cancellation.is_cancelled() {
             return Ok(());
         }
@@ -194,6 +195,17 @@ impl PhaseRunner {
             .preflight(&chain.chain_id, &chain.sources, &mode)?;
         self.run_phase_with_restart(chain, PhaseName::Verify, mode, cancellation)
             .await
+    }
+}
+
+/// A phase lock held at start-up is usually the previous process's session, which PostgreSQL has
+/// not reaped yet, so the supervisor retries it. A lock held once the chain is running belongs to
+/// a concurrent redo or runner and stays a stop.
+fn held_start_up_lock_is_retryable(error: RunnerError) -> RunnerError {
+    if error.kind() == ErrorKind::LockHeld {
+        RunnerError::transient(format!("phase lock held at start-up: {error}"))
+    } else {
+        error
     }
 }
 

@@ -472,8 +472,11 @@ keeps serving its metrics, the chain's row stays `failed`, and there is no
 restart loop and nothing to silence. On a runner with several chains the others
 keep running. Once a build that handles the value is deployed, stop the runner
 and start that build. The stop exits 0, because the failure was already
-reported. With no chain left running the runner also logs `no chain is running;
-the runner stays up serving its metrics until it is stopped`.
+reported. With no chain left running the runner also logs this line:
+
+```text
+no chain is running, and the runner serves its metrics until it is stopped
+```
 
 The stopped chain's last publication is kept, and the API serves it only while
 it is within the
@@ -523,6 +526,21 @@ threshold. A panic leaves the phase row `running`, so
 `BignamePhaseRunnerHeartbeatStale` pages as well. The runner logs
 `chain supervisor stopped after a terminal error` in every case. Stop the runner
 to replace the build or to start again once the cause is fixed.
+
+Some errors do not stop the chain. A database or RPC error outside a phase's
+own retry, such as one during start-up recovery, is one. A phase lock still
+held at start-up is another, usually the previous process's session before
+PostgreSQL reaps it. The runner runs that chain again with backoff and no
+limit. Each attempt logs this line at `WARN` with the attempt number and the
+error:
+
+```text
+chain supervisor runs the chain again after a retryable error
+```
+
+Each attempt also counts as loop progress, so a retry that never succeeds does not page
+through `BignamePhaseRunnerLoopStale`. A lock held once the chain is running,
+by a redo or a second runner, still stops the chain.
 
 A slow crash loop remains unpaged when its restart period is five minutes or
 longer, each outage lasts less than two minutes, and no phase failure has yet

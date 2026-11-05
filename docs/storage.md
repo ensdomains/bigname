@@ -1382,7 +1382,8 @@ earlier checkpoint is recorded as `failed` so ordinary phase execution can
 resume it. A saved Verify final checkpoint stays `failed` until current
 configuration and retained verification evidence pass the completed-Verify
 checks. A lock still held by another runner, or a lost lock connection during
-the state update, stops the new runner or refuses the redo. The update and lock use one database
+the state update, refuses the redo. A supervised runner runs that chain again
+with backoff until the lock is free. The update and lock use one database
 connection. If the client cannot tell whether PostgreSQL committed the update
 before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
@@ -1461,8 +1462,7 @@ depends on the redo:
   have completed. Until then it is refused because Project is not completed.
   The completion error says so.
 - A supervisor's own required redo refused at completion stops that chain.
-  The next supervisor start reruns the required redo. No operator action is
-  needed.
+  Restart the runner. That start reruns the required redo.
 
 Project is treated differently at completion. A Project redo that a stamp
 overtook after its last progress write still completes on one condition.

@@ -1547,8 +1547,8 @@ find the phase still held.
 
 Route from the first confirmed symptom:
 
-- `interpret` crash-loops with an identity or derivation mismatch, or one
-  chain's Interpret state is `failed` while the container stays up ->
+- A chain's Interpret state is `failed` on an identity or derivation
+  mismatch ->
   [stop and escalate before selecting a repair](#stop-and-escalate-an-interpreter-mismatch).
 - a schema-migration deploy stops between the schema-migration and service
   start -> [recover an aborted schema-migration deploy](#recover-an-aborted-schema-migration-deploy).

@@ -2212,7 +2212,12 @@ pub async fn prove_normal_sepolia_http(
     let mut runner = OwnedProofProcess::spawn(command, "ops-normal-run")?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
     loop {
-        if let Err(error) = runner.ensure_running() {
+        let health = match runner.ensure_running() {
+            // A chain that stops leaves the runner up, so its failed row is the signal.
+            Ok(()) => require_no_failed_phase(&db.pool, "ethereum-sepolia").await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = health {
             let captured: Result<PathBuf> = async {
                 let snapshot = std::env::temp_dir().join(format!(
                     "bigname-e2e-failed-normal-{}.json",
@@ -2423,6 +2428,21 @@ pub async fn prove_normal_sepolia_http(
         "HTTP changed produced tables"
     );
     api.stop().await?;
+    Ok(())
+}
+
+async fn require_no_failed_phase(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
+    let failed: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, last_error FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_status = 'failed'
+         ORDER BY phase_name LIMIT 1",
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((phase, last_error)) = failed {
+        bail!("{chain_id} phase {phase} failed: {last_error:?}");
+    }
     Ok(())
 }
 

@@ -803,8 +803,7 @@ that chain with a configuration error, which is not retried. On an Ingest or
 Live source it also sets `phase_runner_rpc_chain_mismatch` (see the
 [monitoring runbook](runbooks/pipeline-monitoring.md#alerts)). The runner stays
 up after a mismatch found while running, so Prometheus scrapes that gauge. A
-Verify reference
-that fails pages through `BignamePhaseFailed`. Hydration URLs are
+Verify reference that fails pages through `BignamePhaseFailed`. Hydration URLs are
 checked at startup only.
 
 Each intake cursor records the chain id its endpoint reported and, once checked
