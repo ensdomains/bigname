@@ -11,7 +11,14 @@ use crate::{
     rpc::{JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient},
 };
 
+mod destination;
 mod gateway;
+#[cfg(test)]
+pub(crate) use destination::seam;
+pub use destination::{
+    GatewayDestinationPolicy, GatewayRefusalClass, install_gateway_destination_policy,
+    install_gateway_refusal_observer,
+};
 #[cfg(test)]
 pub(crate) use gateway::encode_batch_query_for_test;
 
@@ -64,6 +71,7 @@ pub(crate) struct CcipReadError {
     message: String,
     transport_failure: bool,
     configured_timeout: bool,
+    destination_refused: bool,
 }
 
 impl CcipReadError {
@@ -72,6 +80,7 @@ impl CcipReadError {
             message: error.to_string(),
             transport_failure: false,
             configured_timeout: false,
+            destination_refused: false,
         }
     }
 
@@ -80,6 +89,16 @@ impl CcipReadError {
             message: message.into(),
             transport_failure: true,
             configured_timeout,
+            destination_refused: false,
+        }
+    }
+
+    /// A gateway failure that is not a transport failure, served in band.
+    fn gateway_failed(error: gateway::GatewayError) -> Self {
+        let destination_refused = error.refusal().is_some();
+        Self {
+            destination_refused,
+            ..Self::malformed(error)
         }
     }
 
@@ -89,6 +108,10 @@ impl CcipReadError {
 
     pub const fn is_configured_timeout(&self) -> bool {
         self.configured_timeout
+    }
+
+    pub const fn is_destination_refused(&self) -> bool {
+        self.destination_refused
     }
 }
 
@@ -113,7 +136,9 @@ pub(crate) async fn follow_ccip_read(
     };
     let mut expected_sender = expected_sender.to_owned();
     let mut gateway_budget = CCIP_READ_BUDGET;
-    for redirect_index in 0..MAX_CCIP_REDIRECTS {
+    let mut steps = 0;
+    loop {
+        steps += 1;
         if !lookup.sender.eq_ignore_ascii_case(&expected_sender) {
             return Err(CcipReadError::malformed(format!(
                 "CCIP-Read OffchainLookup sender {} does not match called contract {}",
@@ -145,7 +170,12 @@ pub(crate) async fn follow_ccip_read(
                         error.is_timeout(),
                     ));
                 }
-                Ok(Err(error)) => return Err(CcipReadError::malformed(error)),
+                Ok(Err(error)) => {
+                    if let Some(class) = error.refusal() {
+                        destination::observe_refusal(class);
+                    }
+                    return Err(CcipReadError::gateway_failed(error));
+                }
             };
         let callback_calldata = callback_calldata(
             lookup.callback_function,
@@ -167,10 +197,14 @@ pub(crate) async fn follow_ccip_read(
                 )
             })?;
         if let Err(error) = &callback_result.result
-            && redirect_index + 1 < MAX_CCIP_REDIRECTS
             && let Some(next) =
                 offchain_lookup_from_rpc_error(error).map_err(CcipReadError::malformed)?
         {
+            if steps == MAX_CCIP_REDIRECTS {
+                return Err(CcipReadError::malformed(format!(
+                    "CCIP-Read callback still reverted with OffchainLookup after {MAX_CCIP_REDIRECTS} steps"
+                )));
+            }
             expected_sender = callback_sender;
             lookup = next;
             continue;
@@ -179,9 +213,6 @@ pub(crate) async fn follow_ccip_read(
             result: callback_result,
         }));
     }
-    Err(CcipReadError::malformed(
-        "CCIP-Read exceeded maximum redirect depth",
-    ))
 }
 
 pub(crate) fn rpc_error_contains_offchain_lookup(error: &JsonRpcCallError) -> Result<bool> {

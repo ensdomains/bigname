@@ -9,9 +9,10 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
 use sqlx::{Row, raw_sql};
 
+use super::super::count_registry_labels;
 use super::*;
 use super::{
-    listing_support::checked_page,
+    listing_support::{checked_page, compose_listing},
     served_page::{served_decode, served_page_query},
 };
 
@@ -74,6 +75,7 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                 let labels = RegistryLabels {
                     registry,
                     owner: *owner,
+                    registration_limit: None,
                 };
                 let label = format!("{mode} {parent} {registry} {owner:?}");
                 let narrowed =
@@ -119,7 +121,10 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                 });
                 ensure!(stored_rows == before_rows, "{label}: the rows differ");
                 if owner.is_none() {
-                    ensure!(count(&mut conn, parent, Some(registry.as_str())).await? == total);
+                    ensure!(
+                        count_registry_labels(&mut conn, parent, registry, 10_000).await?
+                            == Some(total)
+                    );
                 }
             }
         }
@@ -127,10 +132,13 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
         // both arms, 10 with no summary and both arms, 10 whose selected arm is ENSv1), two of
         // which are also released. Labels that expired without a release are held; another
         // instance's registrations are not.
-        let eth = count(&mut conn, ETH, Some(registry(1).as_str())).await?;
-        ensure!(eth == 800 - 50 - 30 + 2, "eth labels: {eth}");
-        ensure!(count(&mut conn, ETH, Some(registry(2).as_str())).await? == 0);
-        ensure!(count(&mut conn, OTHER_PARENT, Some(registry(2).as_str())).await? == 100);
+        let eth = count_registry_labels(&mut conn, ETH, &registry(1), 10_000).await?;
+        ensure!(eth == Some(800 - 50 - 30 + 2), "eth labels: {eth:?}");
+        ensure!(count_registry_labels(&mut conn, ETH, &registry(2), 10_000).await? == Some(0));
+        ensure!(
+            count_registry_labels(&mut conn, OTHER_PARENT, &registry(2), 10_000).await?
+                == Some(100)
+        );
 
         let mut count_query = QueryBuilder::<Postgres>::new("WITH ");
         let eth_registry = registry(1);
@@ -141,6 +149,7 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
             Some(RegistryLabels {
                 registry: &eth_registry,
                 owner: None,
+                registration_limit: None,
             }),
             None,
         );
@@ -207,6 +216,43 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
                     );
                 }
             }
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// The capped registry count: the stored label count while it is at most `cap`, `None` above,
+/// whatever the registrations number. Registry 1 holds 750 unreleased registrations under the eth
+/// parent, 722 of them labels; registry 2 holds 100 under the other parent, all labels.
+#[tokio::test]
+async fn registry_label_count_is_null_above_the_cap() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("registry_label_count_cap").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        compose_listing(&mut conn).await?;
+        for (parent, registry, cap, expected) in [
+            // At the cap the count is exact; one label over it, none is reported, and
+            // registrations past the cap that are not labels do not count.
+            (ETH, registry(1), 750, Some(722)),
+            (ETH, registry(1), 722, Some(722)),
+            (ETH, registry(1), 721, None),
+            (OTHER_PARENT, registry(2), 100, Some(100)),
+            (OTHER_PARENT, registry(2), 99, None),
+            // No registration under the parent: zero at any cap.
+            (ETH, registry(2), 0, Some(0)),
+        ] {
+            let count = count_registry_labels(&mut conn, parent, &registry, cap).await?;
+            ensure!(
+                count == expected,
+                "{parent} {registry} cap {cap}: {count:?}, expected {expected:?}"
+            );
         }
         Ok(())
     }

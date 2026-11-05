@@ -4,7 +4,11 @@
 //! (`bigname_storage::families::topology::listing_statement`) at the block, compared with the
 //! stored rows, and every changed row is journalled with its before-image and written, in the
 //! block's transaction. The counts move by the same diff. Undo restores both from the journal,
-//! like any other family, so it derives nothing.
+//! like any other family. It then derives the restored rows that still spell a label as
+//! `[labelhash]` again at the restored block, by the same statement, and writes only those it
+//! spells further (`derive_heals`, `families/undo.rs`). Interpret's redo never removes a label
+//! from `label_preimages`, so a row the undone block healed stays healed, as a rebuild at the
+//! restored block spells it.
 //!
 //! The work list (`work.rs`) has two arms. A child is derived again, under every parent that can
 //! list it, when the block touched a fact of its own: its name summary, an ENSv1 or Basenames
@@ -128,6 +132,19 @@ const CHANGES: &str = "/* project:families.derived.child_listing_changes */
     LEFT JOIN stored ON stored.child_logical_name_id = keys.child_logical_name_id
     LEFT JOIN fresh ON fresh.child_logical_name_id = keys.child_logical_name_id
     WHERE to_jsonb(stored) IS DISTINCT FROM to_jsonb(fresh)";
+
+/// An undo's derivation keeps only the rows it spells further: the same row with fewer labels left
+/// as `[labelhash]` and nothing else changed but the name and its key (`derive_heals`).
+const HEALS_ONLY: &str = "/* project:families.derived.child_listing_heals_only */
+    DELETE FROM pg_temp.bigname_child_listing_change change
+    WHERE NOT COALESCE(
+        (change.before_image - '{display_key,display_name,unhealed_labelhashes}'::text[])
+            = (change.after_image - '{display_key,display_name,unhealed_labelhashes}'::text[])
+        AND (change.before_image -> 'unhealed_labelhashes')
+            @> (change.after_image -> 'unhealed_labelhashes')
+        AND (change.before_image -> 'unhealed_labelhashes')
+            <> (change.after_image -> 'unhealed_labelhashes'),
+        FALSE)";
 
 /// The journal key text of a listing row, as `store::key_text` writes it.
 const LISTING_JOURNAL: &str = "/* project:families.derived.child_listing_journal */
@@ -271,6 +288,28 @@ pub(crate) async fn derive(
     parents: &[String],
     children: &[String],
 ) -> Result<Refreshed> {
+    derive_with(transaction, chain_id, block, (parents, children), false).await
+}
+
+/// `derive` for an undo (`families/undo.rs`): the rows of `children` at the restored block
+/// `block`, which journals nothing, writing only the rows it spells further (`HEALS_ONLY`). The
+/// undo's other rows stay as the journal restored them, and no count moves.
+pub(crate) async fn derive_heals(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    children: &[String],
+) -> Result<Refreshed> {
+    derive_with(transaction, chain_id, block, (&[], children), true).await
+}
+
+async fn derive_with(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    (parents, children): (&[String], &[String]),
+    heals_only: bool,
+) -> Result<Refreshed> {
     if parents.is_empty() && children.is_empty() {
         return Ok(Refreshed::default());
     }
@@ -347,13 +386,20 @@ pub(crate) async fn derive(
                 )
             })?;
     }
-    let changed = execute(
+    let mut changed = execute(
         transaction,
         CHANGES,
         chain_id,
         "failed to diff the child listing",
     )
     .await?;
+    if heals_only && changed > 0 {
+        changed -= sqlx::query(HEALS_ONLY)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("failed to keep the undo's heals", error))?
+            .rows_affected();
+    }
     let mut refreshed = Refreshed::default();
     if changed > 0 {
         if block.journal {

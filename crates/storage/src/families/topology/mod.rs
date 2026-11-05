@@ -32,7 +32,7 @@ pub use listing::{
     listing_statement,
 };
 pub(crate) use listing_page::{
-    count as count_children_on, counts as count_children_of_parents_on, page as children_page_on,
+    count_registry_labels, counts as count_children_of_parents_on, page as children_page_on,
 };
 pub(crate) use name_topology::load_name_topology_on;
 pub use name_topology::load_name_topology_shadow;

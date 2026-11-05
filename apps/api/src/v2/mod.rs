@@ -2,6 +2,7 @@ mod address_history;
 mod address_names;
 mod cache_headers;
 mod chains;
+mod child_count_cap;
 pub(crate) mod collection_snapshot;
 mod cursor;
 mod diag_events;
@@ -37,6 +38,8 @@ mod permissions;
 mod primary_name;
 pub(crate) mod record_groups;
 mod registries;
+#[cfg(test)]
+pub(crate) use registries::role_counts_test_hooks as registry_role_counts_test_hooks;
 mod resolvers;
 #[cfg(test)]
 pub(crate) use resolvers::generation_test_hooks as resolver_generation_test_hooks;
@@ -64,6 +67,9 @@ pub(crate) use address_names::{AddressNameGrant, AddressNameResolution, get_addr
 pub(crate) use chains::{
     all_chain_slugs, numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug,
 };
+pub(crate) use child_count_cap::child_count_cap;
+#[cfg(test)]
+pub(crate) use child_count_cap::with_child_count_cap;
 pub(crate) use cursor::{Payload as CursorPayload, decode, encode};
 pub(crate) use diag_events::get_diagnostic_events;
 pub(crate) use diag_namespace_manifests::get_diagnostic_namespace_manifests;
@@ -79,13 +85,16 @@ pub(crate) use event_data::{
     EventDetail, HistoryInclude, build_event_detail, history_include, raw_event_kind,
 };
 pub(crate) use events::{
-    Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
+    Event, build_event, emitter_exact_count_cap, events_cursor_payload, events_storage_cursor,
+    get_events,
 };
+#[cfg(test)]
+pub(crate) use events::{events_summary_mode, parse_events_filter, with_emitter_count_cap};
 pub(crate) use history::{
     HISTORY_TOTAL_COUNT_CAP, format_timestamp, get_history, history_event_id, history_event_type,
     history_page_options, history_sort_token, history_storage_order, history_storage_scope,
-    history_total_count, insert_history_filter_keys, map_history_page_error,
-    product_history_event_kinds, resolve_history_block_window, v2_exact_name_snapshot_scope,
+    insert_history_filter_keys, map_history_page_error, product_history_event_kinds,
+    resolve_history_block_window, v2_exact_name_snapshot_scope,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 #[cfg(test)]
@@ -114,6 +123,8 @@ pub(crate) use permission_values::{
 };
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
+#[cfg(test)]
+pub(crate) use registries::registry_events_count_cap;
 pub(crate) use registries::{
     RegistryRef, get_registry, get_registry_labels, load_subregistry_refs, name_chain_id,
     snapshot_block_for_chain,

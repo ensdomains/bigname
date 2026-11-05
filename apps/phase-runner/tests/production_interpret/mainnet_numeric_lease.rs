@@ -19,6 +19,8 @@ const MINT: i64 = 9_412_290;
 /// The registry writes after the mint: the ownerless clear and the registry-only handoff.
 const HANDOFF: i64 = 9_412_300;
 const LIVE: i64 = 9_412_310;
+/// A controller renewal of a migrated name, before `LIVE`.
+const RENEWAL: i64 = 9_412_305;
 /// From this block the lease is past its expiry and in grace.
 const GRACE: i64 = 9_412_320;
 /// From this block the lease is past its grace period.
@@ -33,6 +35,7 @@ mod events {
     alloy_sol_types::sol! {
         event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
         event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+        event NameRenewed(uint256 indexed id, uint256 expires);
     }
 }
 
@@ -542,12 +545,16 @@ async fn through(pool: &PgPool, from: i64, to: i64, mode: FamilyMode) -> Result<
 }
 
 async fn corpus(name: &str) -> Result<ScratchDatabase> {
+    corpus_of(name, facts()?).await
+}
+
+async fn corpus_of(name: &str, facts: Facts) -> Result<ScratchDatabase> {
     let scratch = ScratchDatabase::create(name).await?;
     let pool = scratch.pool();
     let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet");
     sync_schema_v2_repository(pool, &load_repository(profile)?).await?;
     seed(pool).await?;
-    facts()?.insert(pool).await?;
+    facts.insert(pool).await?;
     Ok(scratch)
 }
 
@@ -742,5 +749,127 @@ async fn a_migrated_name_is_renamed_on_read_and_registered_again() -> Result<()>
         "registered again at {at_again}, {registered_at:?}: {:#}",
         again.declared_summary
     );
+    scratch.cleanup().await
+}
+
+/// A BaseRegistrar mint of `label` straight to HOLDER with no controller event in its
+/// transaction, so the numeric `NameRegistered` is the lease and the mint's own `Transfer` is the
+/// token's only move
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L152 @ ens_v1@91c966f).
+fn direct_mint(facts: &mut Facts, transaction: i64, label: &str) {
+    facts.push(
+        MINT,
+        transaction,
+        BASE_REGISTRAR,
+        token_transfer(label, "0x0000000000000000000000000000000000000000", HOLDER),
+    );
+    facts.push(MINT, transaction, REGISTRY, new_owner(eth(), label, HOLDER));
+    facts.push(
+        MINT,
+        transaction,
+        BASE_REGISTRAR,
+        numeric_registration(label, HOLDER),
+    );
+}
+
+/// A legacy controller renewal of `label`: the BaseRegistrar's numeric `NameRenewed`, then the
+/// controller's label-bearing event, which owns the renewal
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L170 @ ens_v1@91c966f).
+fn controller_renewal(facts: &mut Facts, transaction: i64, label: &str) -> Result<()> {
+    let expires = U256::from(u64::try_from(EXPIRY + 365 * DAY)?);
+    facts.push(
+        RENEWAL,
+        transaction,
+        BASE_REGISTRAR,
+        events::NameRenewed {
+            id: token(label),
+            expires,
+        }
+        .encode_log_data(),
+    );
+    facts.push(
+        RENEWAL,
+        transaction,
+        LEGACY_CONTROLLER,
+        NameRenewed {
+            name: label.to_owned(),
+            label: labelhash(label),
+            cost: U256::from(1_u64),
+            expires,
+        }
+        .encode_log_data(),
+    );
+    Ok(())
+}
+
+/// A 2020 migration mint whose token never moved after the mint transaction, with its label
+/// known, whose holder then cleared the registry record and renewed the lease through a
+/// controller. The mint's numeric `NameRegistered` grants the lease to its owner, so the renewal
+/// derives no grant. The zero registry owner leaves the lease's holder as the only owner the name
+/// can serve, and it serves that holder and lists the name for it. Both mint shapes: through the
+/// migrator, and straight to the holder.
+#[tokio::test]
+async fn a_known_migrated_name_never_transferred_serves_its_mint_holder() -> Result<()> {
+    const LABELS: [&str; 2] = ["known-migrated", "known-minted"];
+    let mut facts = Facts::default();
+    facts.push(
+        FIRST,
+        0,
+        REGISTRY,
+        new_owner(B256::ZERO, "eth", BASE_REGISTRAR),
+    );
+    migration_mint(&mut facts, 0, LABELS[0]);
+    direct_mint(&mut facts, 1, LABELS[1]);
+    for (transaction, label) in LABELS.into_iter().enumerate() {
+        let transaction = i64::try_from(transaction)?;
+        facts.push(
+            HANDOFF,
+            transaction,
+            REGISTRY,
+            record_owner(label, "0x0000000000000000000000000000000000000000"),
+        );
+        controller_renewal(&mut facts, transaction, label)?;
+    }
+    let scratch = corpus_of("production_interpret_mainnet_numeric_lease_known", facts).await?;
+    let pool = scratch.pool();
+    for label in LABELS {
+        sqlx::query(
+            "INSERT INTO label_preimages (
+                 labelhash, raw_label, decoded_label, normalizer_version, normalized_under_version,
+                 source_kind, source_priority
+             ) VALUES ($1, convert_to($2, 'UTF8'), $2, $3, true, 'import', 0)",
+        )
+        .bind(format!("{:#x}", labelhash(label)))
+        .bind(label)
+        .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+        .execute(pool)
+        .await?;
+    }
+    through(pool, FIRST, LIVE, FamilyMode::Rebuild).await?;
+    for label in LABELS {
+        let row = project_name(pool, &name(label)).await?;
+        let summary = &row.declared_summary;
+        anyhow::ensure!(
+            row.normalized_name == format!("{label}.eth")
+                && summary.pointer("/registration/status") == Some(&json!("active"))
+                && summary.pointer("/registration/authority_kind") == Some(&json!("registrar"))
+                && summary.pointer("/control/owner") == Some(&json!(HOLDER))
+                && summary.pointer("/control/registry_owner") != Some(&json!(HOLDER)),
+            "{label}: {summary:#}"
+        );
+        let owner: Option<String> = sqlx::query_scalar(
+            "SELECT owner FROM project_name_summary WHERE chain_id = $1 AND logical_name_id = $2",
+        )
+        .bind(CHAIN)
+        .bind(name(label))
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(owner.as_deref() == Some(HOLDER), "{label}: {owner:?}");
+        let held = bigname_storage::load_address_names_current(pool, HOLDER, None, None)
+            .await?
+            .into_iter()
+            .any(|relation| relation.logical_name_id == name(label));
+        anyhow::ensure!(held, "{label} is listed for its holder");
+    }
     scratch.cleanup().await
 }

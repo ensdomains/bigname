@@ -6,7 +6,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
 use sqlx::{PgConnection, raw_sql};
 
-use super::super::listing_page::{count_query, page_query};
+use super::super::listing_page::{capped_count_query, page_query};
 use super::{
     listing_support::{checked_page, compose_listing},
     performance_tests::{CHAIN, CHILDREN, PARENT, install},
@@ -108,7 +108,7 @@ async fn a_stored_page_is_a_limit_over_the_sorts_index() -> Result<()> {
         for (sort, index) in SORTS {
             for order in ORDERS {
                 let filter = sorted(sort, order);
-                let first = page(&mut conn, PARENT, &filter, None, None, 5).await?;
+                let first = page(&mut conn, PARENT, &filter, None, None, 5, None).await?;
                 let cursor = first.next_cursor.clone().expect("a second page");
                 for cursor in [None, Some(&cursor)] {
                     statement += 1;
@@ -210,7 +210,8 @@ async fn a_walk_lists_every_child_once_and_descending_is_the_exact_reverse() -> 
                 let mut walked = Vec::new();
                 let mut cursor = None;
                 loop {
-                    let page = page(&mut conn, PARENT, &filter, None, cursor.as_ref(), 37).await?;
+                    let page =
+                        page(&mut conn, PARENT, &filter, None, cursor.as_ref(), 37, None).await?;
                     ensure!(page.total_count == CHILDREN as u64, "{sort:?} {order:?}");
                     walked.extend(page.rows.into_iter().map(|row| row.child_logical_name_id));
                     cursor = page.next_cursor;
@@ -336,7 +337,7 @@ async fn a_filtered_total_counts_the_name_index_only() -> Result<()> {
         raw_sql("SET enable_seqscan = off")
             .execute(&mut *conn)
             .await?;
-        let query = count_query(PARENT, &fenced, None);
+        let query = capped_count_query(PARENT, &fenced, None, None);
         raw_sql(&format!("PREPARE fenced (text, text) AS {}", query.sql()))
             .execute(&mut *conn)
             .await?;
@@ -386,14 +387,14 @@ async fn an_imported_label_serves_healed_and_pages_by_its_stored_key() -> Result
         compose_listing(&mut conn).await?;
         let stored_key = format!("[{}].eth", &label[2..]);
         let filter = ChildrenCurrentPageFilter::default();
-        let first = page(&mut conn, PARENT, &filter, None, None, 1).await?;
+        let first = page(&mut conn, PARENT, &filter, None, None, 1, None).await?;
         ensure!(
             first.rows.len() == 1 && first.rows[0].canonical_display_name == "healed.eth",
             "{first:?}"
         );
         let cursor = first.next_cursor.clone().expect("a next page");
         ensure!(cursor.canonical_display_name == stored_key, "{cursor:?}");
-        let second = page(&mut conn, PARENT, &filter, None, Some(&cursor), 1).await?;
+        let second = page(&mut conn, PARENT, &filter, None, Some(&cursor), 1, None).await?;
         ensure!(
             second.rows.len() == 1
                 && second.rows[0].child_logical_name_id == format!("ens:0x{:064x}", 2),

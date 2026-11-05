@@ -1115,12 +1115,13 @@ async fn extending_only_the_reservation_moves_its_deadline_and_keeps_the_lease_d
 }
 
 /// The families block `block` journalled with their row counts, leaving out the two markers
-/// every block journals.
+/// every block journals and the event counts every block with an event journals.
 async fn journalled(fixture: &Fixture, block: i64) -> Result<Vec<(String, i64)>> {
     Ok(sqlx::query_as(
         "SELECT family, count(*) FROM project_family_undo
          WHERE chain_id = $1 AND block_number = $2
-           AND family NOT IN ('marker', 'project_history_catalogue_marker')
+           AND family NOT IN ('marker', 'project_history_catalogue_marker',
+               'project_event_count')
          GROUP BY family ORDER BY family",
     )
     .bind(CHAIN)

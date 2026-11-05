@@ -90,6 +90,7 @@ pub(crate) async fn checked_page(
         registry,
         cursor,
         page_size,
+        None,
     )
     .await?;
     let served = served_page(

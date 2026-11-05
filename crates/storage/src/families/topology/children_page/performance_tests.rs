@@ -3,13 +3,17 @@
 //! Project registry-children fixtures exercise that write path); summary composition has no
 //! surface to compose for them. The previous correlated arm fallback scanned all candidates
 //! once per child, even when the requested page had only five rows.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
 use sqlx::raw_sql;
 
+use super::super::listing_page::capped_count_query;
 use super::*;
-use super::{listing_support::checked_page, served_page::served_page_query};
+use super::{
+    listing_support::{checked_page, compose_listing},
+    served_page::served_page_query,
+};
 
 pub(super) const CHILDREN: i64 = 2_000;
 pub(super) const PARENT: &str = "ens:parent";
@@ -64,6 +68,116 @@ async fn a_small_child_page_does_not_rescan_all_candidates_per_child() -> Result
     .await;
     database.cleanup().await?;
     result
+}
+
+/// A capped total reads at most `cap + 1`, while the page's rows and cursors are those of the
+/// uncapped page; at the cap the total is exact. The unfiltered total is the stored count, read
+/// no higher than `cap + 1`, and a filtered total counts the child listing under a `Limit` of
+/// `cap + 1` rows above its scan of `project_child_listing`.
+#[tokio::test]
+async fn a_capped_total_stops_counting_at_the_cap() -> Result<()> {
+    const CAP: u64 = 200;
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("children_page_total_cap").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        compose_listing(&mut conn).await?;
+        let fenced = ChildrenCurrentPageFilter {
+            include_expired: false,
+            ..ChildrenCurrentPageFilter::default()
+        };
+        for (name, filter) in [
+            ("unfiltered", ChildrenCurrentPageFilter::default()),
+            ("fenced", fenced),
+        ] {
+            let mut cursor = None;
+            let mut exact_total = None;
+            for _ in 0..2 {
+                let uncapped =
+                    page(&mut conn, PARENT, &filter, None, cursor.as_ref(), 5, None).await?;
+                let capped = page(
+                    &mut conn,
+                    PARENT,
+                    &filter,
+                    None,
+                    cursor.as_ref(),
+                    5,
+                    Some(CAP),
+                )
+                .await?;
+                ensure!(
+                    uncapped.total_count > CAP,
+                    "{name}: uncapped total {}",
+                    uncapped.total_count
+                );
+                ensure!(
+                    capped.total_count == CAP + 1,
+                    "{name}: capped total {}",
+                    capped.total_count
+                );
+                ensure!(capped.rows == uncapped.rows && capped.next_cursor == uncapped.next_cursor);
+                exact_total = Some(uncapped.total_count);
+                cursor = capped.next_cursor;
+            }
+            let at_cap = exact_total.context("an uncapped page")?;
+            let exact = page(&mut conn, PARENT, &filter, None, None, 5, Some(at_cap)).await?;
+            ensure!(
+                exact.total_count == at_cap,
+                "{name}: total at the cap {}",
+                exact.total_count
+            );
+        }
+
+        let total_limit = i64::try_from(CAP + 1)?;
+        let query = capped_count_query(PARENT, &fenced, None, Some(total_limit));
+        raw_sql(&format!(
+            "PREPARE capped_total (text, text, bigint) AS {}",
+            query.sql()
+        ))
+        .execute(&mut *conn)
+        .await?;
+        for mode in ["force_custom_plan", "force_generic_plan"] {
+            raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await?;
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE capped_total \
+                 ('{PARENT}', '{PARENT}', {total_limit})"
+            ))
+            .fetch_one(&mut *conn)
+            .await?;
+            ensure!(
+                capped_total_scan(&plan[0]["Plan"], CAP + 1),
+                "{mode}: no Limit of {} rows above the total's scan of the child listing: {plan}",
+                CAP + 1
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// A `Limit` returning `kept` rows directly above a scan of `project_child_listing` that also
+/// returned no more than `kept`.
+fn capped_total_scan(plan: &Value, kept: u64) -> bool {
+    let rows = |node: &Value| node["Actual Rows"].as_u64().unwrap_or(u64::MAX);
+    let capped =
+        plan["Node Type"] == "Limit"
+            && rows(plan) == kept
+            && plan["Plans"].as_array().into_iter().flatten().any(|child| {
+                child["Relation Name"] == "project_child_listing" && rows(child) <= kept
+            });
+    capped
+        || plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| capped_total_scan(child, kept))
 }
 
 fn assert_linear_candidates(plan: &Value) -> Result<()> {

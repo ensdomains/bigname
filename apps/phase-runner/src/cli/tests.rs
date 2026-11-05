@@ -1045,3 +1045,80 @@ fn run_cli_carries_the_live_publication_lag_and_refuses_one_above_three_blocks()
         "{error}"
     );
 }
+
+/// `run` or `redo` with the given index rebuild options.
+fn index_build_command(command: &str, options: &[&str]) -> Result<Cli, clap::Error> {
+    let mut arguments = vec![
+        "phase-runner",
+        command,
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+    ];
+    if command == "run" {
+        arguments.extend([
+            "--verification-database-url",
+            "postgres://phase-runner.invalid/verification",
+            "--chain",
+            "ethereum-mainnet",
+            "--source",
+            REDO_SOURCE,
+        ]);
+    } else {
+        arguments.extend([
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "1",
+            "--to-block",
+            "30",
+        ]);
+    }
+    arguments.extend_from_slice(options);
+    Cli::try_parse_from(arguments)
+}
+
+#[test]
+fn run_and_redo_carry_the_index_rebuild_settings_and_default_to_the_server() {
+    configure_redo_source_endpoint();
+    let settings = |cli: Cli| match cli.resolve().expect("index rebuild options must resolve") {
+        ResolvedCommand::Run { index_build, .. } | ResolvedCommand::Redo { index_build, .. } => {
+            index_build
+        }
+        _ => panic!("expected run or redo"),
+    };
+    for command in ["run", "redo"] {
+        let unset = index_build_command(command, &[]).expect("parse");
+        assert_eq!(settings(unset), IndexBuildSettings::default(), "{command}");
+        let given = index_build_command(
+            command,
+            &[
+                "--restore-maintenance-work-mem",
+                "2GB",
+                "--restore-parallel-maintenance-workers",
+                "4",
+            ],
+        )
+        .expect("parse");
+        assert_eq!(
+            settings(given),
+            IndexBuildSettings {
+                maintenance_work_mem: Some("2GB".to_owned()),
+                max_parallel_maintenance_workers: Some(4),
+            },
+            "{command}"
+        );
+        for refused in [
+            ["--restore-maintenance-work-mem", "2 GB"],
+            ["--restore-maintenance-work-mem", "lots"],
+            ["--restore-maintenance-work-mem", "GB"],
+            ["--restore-parallel-maintenance-workers", "-1"],
+            ["--restore-parallel-maintenance-workers", "1025"],
+        ] {
+            assert!(
+                index_build_command(command, &refused).is_err(),
+                "{command} {refused:?}"
+            );
+        }
+    }
+}

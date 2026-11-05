@@ -1033,6 +1033,8 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
                     | "project_child_listing"
                     | "project_child_listing_count"
                     | "project_child_preimage_watermark"
+                    // Added later, by 20261104130000_project_event_count.sql.
+                    | "project_event_count"
             )
         })
         .chain([

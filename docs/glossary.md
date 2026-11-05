@@ -2646,7 +2646,11 @@ resolver
 (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f).
 This path does not turn the ancestor into the name's declared exact resolver
-and has no live/indexed comparison.
+and has no live/indexed comparison. A `source=auto` records read does not take
+it for an ENSv1 registry clear, a `.eth` name whose `authority` is `ens_v1` or `ens_v0` and whose
+latest observed ENSv1 pointer write set the pointer to zero. That read answers
+`not_found` from the index
+([records route](api-v1-routes.md#ensv1-registry-clear-on-an-auto-read)).
 
 ## Universal Resolver cutover
 
@@ -2780,8 +2784,8 @@ Project's publication of current state directly from the
 changed keys, undo journal and marker together. Rebuilds can group older work
 blocks into bounded ranges; reads remain unavailable until the marker is live.
 
-The families carry labels F1 to F17, used in the difference lists, the table
-comments and the reducers' module headers; F10, the retired resolver alias
+The families carry labels F1 to F17 and F20, used in the difference lists, the
+table comments and the reducers' module headers; F10, the retired resolver alias
 tables, is unused. Each label names these tables and
 the reducer under `crates/project/src/families/` that writes them:
 
@@ -2805,6 +2809,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F15, name summary | `project_name_summary` | `derived/summary.rs` |
 | F16, ENSv2 registry entries | `project_ens_v2_entry_owner`, `project_ens_v2_registry_parent` | `ens_v2_registry.rs` |
 | F17, child listing | `project_child_listing`, `project_child_listing_count`, `project_child_preimage_watermark` | `derived/children.rs`, `derived/children/sources.rs` |
+| F20, event counts | `project_event_count` | `event_counts.rs` |
 
 ## Family marker
 

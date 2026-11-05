@@ -839,8 +839,8 @@ collection route carry neither header.
   `source`, `include=counts`. `source` accepts `indexed` or `verified`; omitting it is identical
   to `source=indexed`. This name-profile route does not accept `source=auto`.
   `include=counts` adds `subname_count`, the name's direct readable subname
-  count (the same per-parent aggregate `GET /v1/names/{name}/subnames` reports
-  as `page.total_count`), and `record_count`, the known record-selector count
+  count (the per-parent aggregate `GET /v1/names/{name}/subnames` reports as
+  its unfiltered `page.total_count` up to 10,000), and `record_count`, the known record-selector count
   of the current registration's record inventory with the same meaning as on
   address-name rows; `record_count` is omitted when the row has no current
   record inventory. A name served through its ENSv1 registry pointer counts
@@ -1258,7 +1258,9 @@ its value map:
   declares serves that address with its `resolver_not_declared` inventory.
   `source=verified` and the verified keys of `source=auto` read the chain as
   for any other name. Whether that read runs Universal Resolver discovery
-  still follows the stored resolver.
+  still follows the stored resolver. A registry clear is the exception for
+  `source=auto`, which answers its keys `not_found` from the index (see
+  [ENSv1 registry clear](#ensv1-registry-clear-on-an-auto-read) below).
 - Records this route withholds, for a released name, a lapsed reservation or
   a name whose resolution is withheld, can still be read by resolver:
   [`GET /v1/resolvers/{chain_id}/{address}/records`](#get-v1resolverschain_idaddressrecords)
@@ -1526,14 +1528,33 @@ its value map:
   effective resolver; either inconsistency fails the request closed. Ordinary
   selector-local failed or unsupported results remain mixed per key. This route
   has no indexed comparison: success and
-  live `not_found` write and clear no divergence rows, while CCIP-required
-  answers remain `unsupported` with `offchain_lookup_required` and likewise
-  write nothing. ENS verified record resolution continues not to follow CCIP-Read.
+  live `not_found` write and clear no divergence rows. An `OffchainLookup`
+  revert is followed through the CCIP-Read gateway transport
+  (`docs/execution.md` § CCIP-Read gateway transport), on this route and on
+  exact-resolver ENS reads alike. Its answer is served and never written,
+  compared or cleared.
+  <a id="ensv1-registry-clear-on-an-auto-read"></a>`source=auto` does not run
+  this discovery for an ENSv1 registry clear: a `.eth` name whose `authority`
+  is `ens_v1` or `ens_v0`, whose latest observed ENSv1 resolver pointer write
+  set the pointer to the zero address, so `ens_v1.resolver` is null, and whose
+  resolution is not withheld. It answers every requested key of such a name
+  `not_found` from the index, with `meta.source=indexed`, `resolver: null`
+  and no provider call, because the registry holds no resolver for the node.
+  It does not run the ancestor walk
+  ([known divergence](upstream.md#ensv1-registry-clear-answers-from-the-index)).
+  A name with no observed pointer write is not a clear and keeps discovery.
+  A name outside `.eth`, such as a DNS name, keeps discovery too, because its
+  TLD's ENSIP-10 resolver can answer it from DNS. So does a request that names
+  an [alias path](api-v1.md#alias-paths), because the chain reads the path
+  requested.
+  `source=verified` runs discovery for a clear as for any other null-resolver
+  name.
   Basenames and other chains and namespaces do not enter this route. Outside this
   null-exact-resolver class, exact indexed `ok` answers and authoritative
   ENSIP-19 derived answers satisfy auto without a provider request. Within this
-  class, all requested keys execute through verified lookup because retained
-  exact inventory predates the resolver-clear boundary. If no admitted
+  class, except an ENSv1 registry clear, all requested keys execute through
+  verified lookup because retained exact inventory predates the resolver-clear
+  boundary. If no admitted
   Universal Resolver entrypoint is available at execution time, the requested
   keys are explicitly `unsupported`; auto never turns that inability to execute
   into an indexed null-resolver `not_found`. For
@@ -2035,8 +2056,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `page.total_count` is the parent's direct readable subname count, read from
   the count Project stores for the parent, when the page admits every child,
   that is when `q` is absent and `include_expired` is not `false`. A narrowed
-  page reports the exact filtered total, counted with the same child-name and
-  expiry predicates as its list, before the cursor.
+  page reports the filtered total, counted with the same child-name and
+  expiry predicates as its list, before the cursor; that count stops after
+  10,001. Either total is exact up to 10,000 children and `null` above. The
+  rows and cursors do not depend on it.
 - Snapshot behavior: the parent, child rows and filtered count are read on one
   database snapshot of the captured publication, disclosed in `meta.as_of`. The
   cursor holds only its sort position and query filters; expiry uses each page's
@@ -2291,6 +2314,13 @@ A recognized namespace with no available publication returns retryable `409 stal
   on continuation pages; the flag does not bind cursors. Each opt-in request
   counts again at its current published position. No cached or approximate
   total is returned, and an exact empty result is zero.
+- A `/v1/events` read that only an emitting contract anchors (`resolver`,
+  `contract_address`, or both, with no `name`, `registration_id`, or
+  `address`) caps the opt-in count at 100,000 rows. One contract can emit more
+  rows than an exact count reads within the request deadline. Up to the cap
+  `include=total_count` returns the exact total as above. Above it the count
+  stops after 100,001 rows and the page reports `total_count=null`. The rows,
+  `next_cursor`, and `has_more` are the same as without the flag.
 
 ### History event payloads (`include=data`, `include=raw`)
 
@@ -4651,7 +4681,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total. When only resolver or contract_address anchors the read, it is exact up to 100,000 rows and null above. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4780,7 +4810,9 @@ For a registrar lease first identified by a later readable observation, registra
   rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
   `registration_id`, `address`, or `resolver` anchors the read; opting into
   `include=total_count` removes that cap and also enables exact filtered totals
-  for contract-address reads, whose default remains null. Other unanchored
+  for contract-address reads, whose default remains null. When only
+  `resolver` or `contract_address` anchors the read, the opt-in count is
+  exact up to 100,000 rows and `null` beyond. Other unanchored
   reads always return null.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
@@ -5226,7 +5258,7 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- | --- |
 | `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 100,000 events and null above. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -5279,19 +5311,26 @@ For a registrar lease first identified by a later readable observation, registra
   `SourceManifestUpdated` payloads recorded during that admission to establish the
   registry role. The retained declaration identity and address must match; later re-admission neither changes
   an older interval's role nor fills the gap between admissions.
-  `counts.labels` is the total of the labels route below for the registry's
-  representative pointing name: the name `name` selects, the earliest name
-  whose current subregistry pointer targets the registry. Labels the registry
-  holds under another name that also points at it are not counted. It is `0`
-  when no name points at the registry. `counts.events` is present only with
+  `counts.labels` is present only with `include=counts` and is the total of
+  the labels route below for the registry's representative pointing name: the
+  name `name` selects, the earliest name whose current subregistry pointer
+  targets the registry. Labels the registry holds under another name that also
+  points at it are not counted. It is `0` when no name points at the registry.
+  It is exact when the registry holds at most 10,000 registrations under that
+  name, and `null` otherwise: the count stops reading after 10,001 of them,
+  because a registry such as the `.eth` one holds more than an exact count
+  composes within the request deadline. `counts.events` is present only with
   `include=counts` and counts the product-visible events the contract emitted
   on this chain up to the selected position, in any namespace. For an ENSv2
   registry, whose events are all in `ens`, it equals the `total_count` of
   `GET /v1/events?contract_address=` at the same chain and block: that feed
-  defaults to the `ens` namespace, which is served on one chain. For an address
+  defaults to the `ens` namespace, which is served on one chain. The
+  overview's count and the feed's `include=total_count` count are both exact
+  up to 100,000 events and `null` above that, so they also agree above the
+  cap. For an address
   an operator also admits into another namespace on this chain, the overview
-  counts those events too and the default feed does not. The count reads every
-  event of the contract rather than a projected total. It includes the
+  counts those events too and the default feed does not. The count reads the
+  contract's events rather than a projected total, and stops after 100,001. It includes the
   registry's root role changes (`RootPermissionChanged` `permission` rows),
   which the feed has listed since they became product history.
   `counts.roles`, also present with `include=counts`, is the exact number of
@@ -5330,9 +5369,10 @@ For a registrar lease first identified by a later readable observation, registra
   `counts.labels` is `null` for a historical selection that differs from the
   current published position. The creation, pointer, reference, role and event
   evidence and `counts.labels` are read on one database snapshot of the captured
-  publication: `counts.labels` finds the registry's representative pointing name
-  there and takes that name's labels-route total, or `0` when no name points at
-  the registry. It describes the same publication as `name`, `parent_registry`,
+  publication: with `include=counts`, `counts.labels` finds the registry's
+  representative pointing name there and takes that name's labels-route total,
+  or `0` when no name points at the registry, and `null` above the registration
+  cap. It describes the same publication as `name`, `parent_registry`,
   `referenced_by` and `meta.as_of`; a publication during the read does not
   affect the response.
 - Status semantics: an unknown registry returns `404 not_found` at every
@@ -5420,8 +5460,9 @@ For a registrar lease first identified by a later readable observation, registra
   ascending, compared byte by byte, then by child identity, as the `name` sort
   of `GET /v1/names/{name}/subnames` orders them. `page.total_count` is the
   exact number of labels the owner filter admits, counted before paging;
-  unfiltered, it is the same number as `counts.labels` on the registry route,
-  read from the label count Project stores for the registry's name. So `exclude_owner=<address>&page_size=1`
+  unfiltered, it is the same number as `counts.labels` on the registry route
+  whenever that count is not `null`, read from the label count Project stores
+  for the registry's name. So `exclude_owner=<address>&page_size=1`
   answers whether the registry holds any label that address does not own from
   `total_count` alone. The cursor binds the chain, the registry and the owner
   filter.

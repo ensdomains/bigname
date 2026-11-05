@@ -12,16 +12,25 @@ use super::types::{ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCur
 
 /// Load a bounded page of declared direct children narrowed and ordered by `filter`.
 ///
-/// `summary` on the returned page is always the unfiltered per-parent aggregate: callers that
-/// narrowed the page use the separately computed `total_count`. `cursor` must have been issued for
-/// the same `sort` and `order`; a cursor whose sort value kind does not match the sort is
-/// rejected here rather than silently re-anchored.
+/// `total_count` counts every child the filter admits, before the cursor; with `total_cap` it
+/// stops at `total_cap + 1`, and the rows are those of the uncapped page. `cursor` must have been
+/// issued for the same `sort` and `order`; a cursor whose sort value kind does not match the sort
+/// is rejected here rather than silently re-anchored.
 pub async fn load_children_current_page_filtered(
     db: impl Into<crate::ReadDb<'_>>,
     parent_logical_name_id: &str,
     filter: &ChildrenCurrentPageFilter<'_>,
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
+    total_cap: Option<u64>,
 ) -> Result<ChildrenCurrentPage> {
-    super::families::page(db.into(), parent_logical_name_id, filter, cursor, page_size).await
+    super::families::page(
+        db.into(),
+        parent_logical_name_id,
+        filter,
+        cursor,
+        page_size,
+        total_cap,
+    )
+    .await
 }

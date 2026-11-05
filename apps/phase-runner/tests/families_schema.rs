@@ -48,6 +48,7 @@ const FAMILY_TABLES: &[&str] = &[
     "project_history_source",
     "project_history_source_edge",
     "project_history_catalogue_marker",
+    "project_event_count",
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",
@@ -495,6 +496,16 @@ const DURABLE_SEARCH: &str =
     include_str!("../../../migrations/20261005210000_durable_name_search.sql");
 const BOUND_NAMES: &str =
     include_str!("../../../migrations/20261014120000_project_name_summary_bound_names.sql");
+const SEARCH_PREFIX_BUCKETS: &str =
+    include_str!("../../../migrations/20261029120000_search_prefix_bucket_indexes.sql");
+/// The schema-migrations after the earlier search shape that touch these tables, in version
+/// order, as a real upgrade applies them.
+const SEARCH_UPGRADE: [&str; 4] = [
+    DURABLE_SEARCH,
+    REGISTRATION_LIFECYCLE,
+    BOUND_NAMES,
+    SEARCH_PREFIX_BUCKETS,
+];
 const SEARCH_TABLES: &[&str] = &[
     "name_search_documents",
     "name_search_postings",
@@ -555,7 +566,7 @@ async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_
         VALUES ('0x01',convert_to('retained','UTF8'),'retained','old',true,'fixture',1)")
         .execute(&mut *tx).await?;
     tx.commit().await?;
-    for migration in [DURABLE_SEARCH, REGISTRATION_LIFECYCLE, BOUND_NAMES] {
+    for migration in SEARCH_UPGRADE {
         sqlx::raw_sql(migration).execute(upgraded.pool()).await?;
     }
     for table in SEARCH_TABLES {
@@ -588,7 +599,7 @@ async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_
     )
     .execute(upgraded.pool())
     .await?;
-    for migration in [DURABLE_SEARCH, REGISTRATION_LIFECYCLE, BOUND_NAMES] {
+    for migration in SEARCH_UPGRADE {
         sqlx::raw_sql(migration).execute(upgraded.pool()).await?;
     }
     let summaries: i64 =

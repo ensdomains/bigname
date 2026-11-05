@@ -63,7 +63,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `status` | registration lifecycle: `active`, `expired`, `released`, or `unregistered`, evaluated at the publication timestamp independently of ownership, resolution and wrapping | replaces `registration_status` |
 | `ens_v1` | on name-shaped rows (name detail, resolver `bound_names`, lookup `profile=detail` and `profile=feed`, address names, subnames, registry labels, `GET /v1/names` and search): what only ENSv1 holds about the name, `{expires_at, resolver, wrapper_state?, wrapper_fuses?, wrapper_expires_at?, wrapper_expires_at_reason?}`. Present exactly while the name's `authority` is `ens_v1` or `ens_v0` and omitted otherwise, including on every `ens_v2` row; subname, registry-label, `GET /v1/names` and search rows follow the `authority` they carry, and lookup `profile=feed` records follow the `authority` of the detail record for the same name, which they do not carry | new in v2; replaces the earlier top-level `wrapper_state` and `wrapper_fuses` |
 | `ens_v1.expires_at` | the name's ENSv1 BaseRegistrar lease expiry as a decimal string of Unix seconds (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f), or `null` when the name has no lease, as for every name below a `.eth` second-level name, including a wrapped subname whose only expiry is its NameWrapper entry's. Before the [Universal Resolver cutover](glossary.md#universal-resolver-cutover) it equals the top-level `expires_at` of a `.eth` second-level name; from the cutover a name with a retained canonical ENSv2 entry serves that entry's expiry at the top level and keeps the lease date here (see [Expiry and grace](#expiry-and-grace)). A lease has no sentinel expiry, so there is no reason field: `null` only means no lease. Values are exact up to `9223372036854775807` (`i64::MAX`); a lease expiry above it is served as `"9223372036854775807"`. The admitted Sepolia testnet premigration registrar takes a caller-chosen registration duration, so such a lease is reachable there (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L161-L165 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L214-L217 @ ens_v2_sepolia_20260916@366de741). There is no grace field: below `9223372036854775807` the lease's grace deadline is `ens_v1.expires_at` plus 90 days (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f). A saturated `"9223372036854775807"` no longer carries the lease's own expiry, so its grace deadline cannot be recovered from it. Premigration's 62-day continuity bonus makes that deadline equal the top-level `grace_ends_at` when the name is reserved (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741), but the alignment is not guaranteed: a reservation can be extended without the BaseRegistrar, for example by the admitted BatchRegistrar, and then the two deadlines differ (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L66-L70 @ ens_v2_sepolia_20260916@366de741) | new in v2 |
-| `ens_v1.resolver` | the ENSv1 registry's resolver pointer for the name's node, a [`ContractRef`](#contractref) `{chain_id, address}`. It is what `ENSRegistry.resolver(node)` returns (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f). It is `null` when the pointer is zero, or when bigname observed no pointer write for the node, such as a node whose resolver was set before the indexed history begins and never changed since. See [Known divergences](upstream.md#ensv1-registry-resolver-pointer-without-an-observed-write). It is a registry fact, like `ens_v1.expires_at`, and is reported whatever the name resolves through. The top-level `resolver` and `records` say how the name resolves, and they can withhold the resolver, as for a `.eth` name with no live ENSv2 entry after the [Universal Resolver cutover](glossary.md#universal-resolver-cutover). For a name whose `authority` is `ens_v1` or `ens_v0` they read through this pointer, so `resolver` equals `ens_v1.resolver` whenever both are present ([projections](projections.md#an-ensv1-name-serves-the-resolver-its-registry-record-holds)). Name detail and the records route also check this at request time, as a backstop for rows composed before that rule: when such a name is not withheld and its stored resolver names another one, they read `resolver` and its records through this pointer. A pointer to an address no resolver manifest declares serves that address with its `resolver_not_declared` inventory (see [`GET /v1/names/{name}`](api-v1-routes.md#get-v1namesname)). A pointer to an address with no classification row keeps the composed answer. The address need not be a resolver bigname admits. A migrated name carries no `ens_v1` object. On chain the unwrapped and the unlocked wrapped ENSv1→ENSv2 migrations clear the pointer (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L112-L117 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2_sepolia_20261001@07e55a05), and so does the locked migration of a name without `CANNOT_SET_RESOLVER` burned (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L137-L138 @ ens_v2_sepolia_20261001@07e55a05). Only a locked name with that fuse burned keeps it (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L139-L144 @ ens_v2_sepolia_20261001@07e55a05) | new in v2 |
+| `ens_v1.resolver` | the ENSv1 registry's resolver pointer for the name's node, a [`ContractRef`](#contractref) `{chain_id, address}`. It is what `ENSRegistry.resolver(node)` returns (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f). It is `null` when the pointer is zero, or when bigname observed no pointer write for the node, such as a node whose resolver was set before the indexed history begins and never changed since. See [Known divergences](upstream.md#ensv1-registry-resolver-pointer-without-an-observed-write). It is a registry fact, like `ens_v1.expires_at`, and is reported whatever the name resolves through. The top-level `resolver` and `records` say how the name resolves, and they can withhold the resolver, as for a `.eth` name with no live ENSv2 entry after the [Universal Resolver cutover](glossary.md#universal-resolver-cutover). For a name whose `authority` is `ens_v1` or `ens_v0` they read through this pointer, so `resolver` equals `ens_v1.resolver` whenever both are present ([projections](projections.md#an-ensv1-name-serves-the-resolver-its-registry-record-holds)). Name detail and the records route also check this at request time, as a backstop for rows composed before that rule: when such a name is not withheld and its stored resolver names another one, they read `resolver` and its records through this pointer. When its latest observed pointer write cleared the pointer and it is a `.eth` name, a `source=auto` records read answers its keys `not_found` from the index without asking the chain (see [`GET /v1/names/{name}/records`](api-v1-routes.md#ensv1-registry-clear-on-an-auto-read)). A pointer to an address no resolver manifest declares serves that address with its `resolver_not_declared` inventory (see [`GET /v1/names/{name}`](api-v1-routes.md#get-v1namesname)). A pointer to an address with no classification row keeps the composed answer. The address need not be a resolver bigname admits. A migrated name carries no `ens_v1` object. On chain the unwrapped and the unlocked wrapped ENSv1→ENSv2 migrations clear the pointer (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L112-L117 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2_sepolia_20261001@07e55a05), and so does the locked migration of a name without `CANNOT_SET_RESOLVER` burned (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L137-L138 @ ens_v2_sepolia_20261001@07e55a05). Only a locked name with that fuse burned keeps it (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L139-L144 @ ens_v2_sepolia_20261001@07e55a05) | new in v2 |
 | `wrapper_state` | inside `ens_v1`: `wrapped`, `emancipated`, `locked`, `lapsed`, `unwrapped`, or `unknown`. The first three are backed entry/fuse states; `lapsed` means an emancipated/locked entry has lost its holder at wrapper expiry, `unwrapped` requires proven unwrap or registry custody, and `unknown` means required wrapping evidence is incomplete. Permission rows and wrapper restrictions use backed states only. Omitted without ENSv1 context or where a child has no composed name. | raw NameWrapper fuse bitmap |
 | `wrapper_fuses` | inside `ens_v1`, and on permission rows and wrapper `restrictions`: typed summary of the current [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); present inside `ens_v1` only with the backed states `wrapped`, `emancipated`, or `locked`, never with `lapsed`, `unwrapped`, or `unknown`. Permission rows carry both backed state and fuses or neither; an existing wrapper restriction requires both | raw NameWrapper fuse bitmap |
 | `fuses` | uint32 fuse word nested in `wrapper_fuses`; it is zero after wrapper expiry even though normalized events retain their expiry-unadjusted interpreted word | raw NameWrapper fuse bitmap |
@@ -782,12 +782,16 @@ Rules:
   anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000
   product-visible rows and `null` beyond by default; `include=total_count`
-  requests an exact uncapped count on anchored history. On name history with
+  requests an exact uncapped count on anchored history. The exception is a
+  `/v1/events` read that only `resolver` or `contract_address` anchors, with
+  no `name`, `registration_id`, or `address`. There `include=total_count`
+  counts exactly up to 100,000 rows and reports `null` beyond. On name history with
   `include=child_registrations` the count covers the name's rows and its direct
   child registration rows together, each event once. It is always `null` for unanchored event
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
   readable subname count, applying the same optional prefix and expiry filters
-  as the page before its cursor.
+  as the page before its cursor: exact up to 10,000 subnames and `null`
+  beyond.
   The registry overview's nested `referenced_by` page populates it only with
   `include=counts`.
   The resolver overview's nested `bound_names` page populates it only with
@@ -2673,16 +2677,37 @@ Rules:
   the existing in-band execution-failure behavior; they are not whole-request
   `408` responses. Provider connect-phase timeouts and other transport failures
   during verified record resolution return whole-request `500 internal_error`;
-  no execution outcome is cached for any v2 lookup. ENS/60 primary-name
-  verification uses the same transport
-  split with its CCIP-Read gateway leg: configured provider or gateway response
+  no execution outcome is cached for any v2 lookup. Verified record resolution
+  and ENS/60 primary-name verification use the same transport
+  split with their CCIP-Read gateway leg: configured provider or gateway response
   timeouts, and the shared CCIP-Read gateway budget running out in whatever
   phase the in-flight gateway request was in, remain in-band failures for that
   response, while provider or gateway
   connect-phase timeouts, DNS failures, TLS failures, connection resets, and
   other transport failures within a request's own timeouts return
-  whole-request `500 internal_error`. Neither
-  result is persisted by the v2 serving path.
+  whole-request `500 internal_error`. A gateway that answers `4xx` fails the
+  record at once. A redirect, another non-`2xx` status or an undecodable body
+  fails it when no later URL answers. On a direct gateway fetch both fail it in
+  band with `failure_reason=ccip_read_failed`. A connect, DNS or TLS failure or
+  a connection reset on any URL tried takes precedence over those, and the
+  request then fails whole with `500 internal_error`, unless a later URL
+  answers. When the Universal Resolver batches its gateway queries locally
+  (`x-batch-gateway:true`), each inner request follows its own URL list the same
+  way. A status or decode failure of an inner request goes back to the contract
+  as a failed batch entry, and the callback's revert answers
+  `failure_reason=resolver_call_reverted` in band instead. A connect, DNS or TLS
+  failure or a connection reset that an inner request ends on is not a batch
+  entry. It fails the whole request with `500 internal_error`, even when the
+  other inner requests answered. An `OffchainLookup` from any sender but the
+  called contract and a callback still reverting with `OffchainLookup` after
+  four steps fail the record in band with `failure_reason=ccip_read_failed` on
+  either path. A gateway URL whose host is a literal address, or resolves to any
+  address, in a refused destination range fails the record in band with
+  `failure_reason=gateway_destination_refused`. No connection is opened, no
+  later URL is tried, and in an `x-batch-gateway:true` query one refused inner
+  request fails the whole record. A refusal is never a whole-request `500`. The
+  refused ranges are listed in `docs/execution.md` § CCIP-Read gateway
+  transport. Neither result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz` and `/v1/status` retain
   that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved
@@ -3483,9 +3508,9 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object RegistryCounts -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `labels` | nullable integer | always | Exact current label count, or null for a historical selection where a current label count is not meaningful. |
+| `labels` | nullable integer | optional | Current label count; only with include=counts. Exact when the registry holds at most 10,000 registrations under its name, and null otherwise or for a historical selection, where a current label count is not meaningful. |
 | `roles` | integer | optional | Count of observed nonzero declared role assignments; only with include=counts. |
-| `events` | integer | optional | Count of product-visible events emitted by the registry; only with include=counts. |
+| `events` | nullable integer | optional | Count of product-visible events emitted by the registry, exact up to 100,000 and null above; only with include=counts. |
 
 ### ReferencedBy
 
@@ -3508,7 +3533,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `created_at` | nullable string | always | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `created_transaction_hash` | nullable string | always | Creation or first-pointer transaction; null for a declaration or missing transaction evidence. |
 | `created_basis` | enum `registry_created`, `subregistry_pointer`, `declared` | always | Evidence used for the registry creation fields. |
-| `counts` | object RegistryCounts | always | Current label count and optional role/event totals. |
+| `counts` | object RegistryCounts | always | Label, role and event totals, each only with include=counts. |
 | `referenced_by` | object ReferencedBy | always | Nested page of current names pointing to this registry. |
 
 ### ResolverOverview

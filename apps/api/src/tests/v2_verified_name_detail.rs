@@ -275,6 +275,56 @@ async fn verified_name_detail_reports_a_failed_getter_as_failed() -> Result<()> 
     database.cleanup().await
 }
 
+mod refused_gateway_abi {
+    alloy_sol_types::sol! {
+        error OffchainLookup(
+            address sender,
+            string[] urls,
+            bytes callData,
+            bytes4 callbackFunction,
+            bytes extraData
+        );
+    }
+}
+
+/// `addr:60` reverts with an `OffchainLookup` from the Universal Resolver whose only gateway URL
+/// is a loopback literal on a port nothing listens on. Dialled, it is a refused connection, which
+/// fails the whole request. Judged first, it is a refused destination.
+fn refused_gateway_lookup(_: &str) -> Value {
+    let lookup = refused_gateway_abi::OffchainLookup {
+        sender: "0xeeeeeeee14d718c2b47d9923deab1335e144eeee"
+            .parse()
+            .expect("the Universal Resolver address parses"),
+        urls: vec!["http://127.0.0.1:1/{sender}".to_owned()],
+        callData: vec![0x12, 0x34].into(),
+        callbackFunction: [0x01, 0x02, 0x03, 0x04].into(),
+        extraData: vec![0xab].into(),
+    };
+    let data = alloy_sol_types::SolError::abi_encode(&lookup);
+    json!({"__rpc_error": {
+        "code": 3,
+        "message": "execution reverted",
+        "data": format!("0x{}", hex::encode(data)),
+    }})
+}
+
+#[tokio::test]
+async fn verified_name_detail_serves_a_refused_gateway_destination_in_band() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_sepolia_record_lookup(&database, true).await?;
+    let (rpc_url, rpc_handle) = spawn_record_getter_mock_rpc(1, refused_gateway_lookup).await?;
+
+    let (status, detail) =
+        sepolia_verified_get(&database, &rpc_url, "/v1/names/alice.eth?source=verified").await?;
+    assert_eq!(status, StatusCode::OK, "a refused destination is never a 500: {detail}");
+    let data = &detail["data"];
+    assert_eq!(data["read_status"], json!("failed"), "{detail}");
+    assert_eq!(data["failure_reason"], json!("gateway_destination_refused"), "{detail}");
+    assert_eq!(data["records"]["addresses"], json!({}), "{detail}");
+    assert_eq!(joined_keys(rpc_handle).await?, ["addr:60"]);
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn verified_name_detail_dispatches_nothing_for_an_ineligible_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

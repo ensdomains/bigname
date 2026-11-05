@@ -16,7 +16,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use super::{
     block::BlockStats,
     derived::{self, Touched},
-    history_catalogue,
+    event_counts, history_catalogue,
     input::BlockHeader,
     lookup, marker,
     tables::{CHILD_LISTING, NAME_SUMMARY},
@@ -430,7 +430,8 @@ pub(crate) async fn pairs_chunk(
 
 /// Refresh the catalogue for the events of the window `(after, block]`, with no name of its own:
 /// the names stream composed every name's own sources and current memberships, and this adds the
-/// sources and resource memberships of the window's events, as each block of it did.
+/// sources and resource memberships of the window's events, as each block of it did. The window's
+/// events also add to the stored event counts, which the ranges before the pass left empty.
 pub(crate) async fn window_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -438,5 +439,6 @@ pub(crate) async fn window_chunk(
     after: i64,
     stats: &mut BlockStats,
 ) -> Result<()> {
-    history_catalogue::refresh(transaction, chain_id, block, after, &[], &[], stats).await
+    history_catalogue::refresh(transaction, chain_id, block, after, &[], &[], stats).await?;
+    event_counts::refresh(transaction, chain_id, block, after, stats).await
 }
