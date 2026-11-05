@@ -1,9 +1,17 @@
 //! A name whose newest current-registry write names the admitted Graveyard serves its ENSv1
 //! registration as ended: `released`, no expiry (`expires_at_reason: released`), no owner,
-//! manager or registrant, released at the claim's block, with its holder before the claim as the
-//! lapsed owner. A name the Graveyard does not hold composes as it did. Each input class is one
-//! test. A claim is only reachable for a lease past its expiry and grace, so the classes below
-//! are the only claim inputs (`Graveyard.sol` `_clear`, BaseRegistrar `available`).
+//! manager or registrant, released at the Graveyard's write that began its control, with the
+//! holder who controlled the name before it as the lapsed owner. A name the Graveyard does not
+//! hold composes as it did. A claim is only reachable for a lease past its expiry and grace
+//! (`Graveyard.sol` `_clear`, BaseRegistrar `available`).
+//!
+//! The custody rows below each drive one sequence of the events the adapters emit: registry owner
+//! writes, NameWrapper mints and transfers (adapters `wrapper.rs`, `wrapper/transfer.rs`) and
+//! BaseRegistrar grants and transfers (adapters `registrar/token_transfer.rs`). The adapters
+//! record no NameWrapper burn, no transfer of a token whose NameWrapper authority a registry write
+//! ended, and no BaseRegistrar transfer to or from zero, so no row has one. Each row is two tests:
+//! `serves` checks the served fields and `controller_trace` checks the controller after each
+//! step of the pass over the name's custody events, written out by hand.
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -18,7 +26,7 @@ use crate::families::{
     control::{
         position::Position,
         registry::{OwnerEvent, RegistryNode, ZERO_ADDRESS},
-        rows::{BindingCandidate, LifecycleEvent, WrapperRow},
+        rows::{BindingCandidate, LifecycleEvent},
     },
     name::selection::select,
 };
@@ -28,9 +36,14 @@ const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
 const NEXT_OWNER: &str = "0x00000000000000000000000000000000000000bb";
 const NAME_WRAPPER: &str = "0x00000000000000000000000000000000000000cc";
 const GRAVEYARD: &str = "0x00000000000000000000000000000000000000dd";
+const MANAGER: &str = "0x00000000000000000000000000000000000000ee";
+const PARENT_OWNER: &str = "0x00000000000000000000000000000000000000ff";
 const REGISTRY_ONLY: &str = "00000000-0000-0000-0000-0000000000a0";
 const LEASE: &str = "00000000-0000-0000-0000-0000000000b1";
+/// The resources of a name's first and second wrap: each wrap is a new NameWrapper resource with
+/// its own candidate (adapters `wrapper.rs`, `authority_key`).
 const WRAPPED: &str = "00000000-0000-0000-0000-0000000000c1";
+const REWRAPPED: &str = "00000000-0000-0000-0000-0000000000c2";
 const ENS_V2: &str = "00000000-0000-0000-0000-0000000000d1";
 /// The first current-registry record.
 const HANDOFF: i64 = 5;
@@ -42,10 +55,19 @@ const LAPSED_EXPIRY: i64 = 1_600_000_000;
 /// The 2020 registrar migration's lease expiry.
 const MIGRATION_EXPIRY: i64 = 1_590_000_000;
 const LIVE_EXPIRY: i64 = 2_000_000_000;
+/// The BaseRegistrar's grace period.
+const GRACE: i64 = 7_776_000;
 const CLOCK: Clock = Clock {
     block_number: 100,
     timestamp_seconds: 1_900_000_000,
 };
+/// The controller the trace names for the Graveyard.
+const IN_GRAVEYARD: Option<&str> = Some("graveyard");
+
+/// The block time of `block` in the custody rows, on the line through the claim and the clock.
+fn time(block: i64) -> i64 {
+    1_650_000_000 + block * 2_500_000
+}
 
 fn event(kind: &str, family: &str, resource: &str, block: i64, extra: Value) -> LifecycleEvent {
     let mut row = json!({
@@ -87,14 +109,14 @@ fn lease_release(block: i64, expiry: i64) -> LifecycleEvent {
         LEASE,
         block,
         json!({"authority_kind": "registrar", "source_event": "RegistrationReleased",
-               "before_registrant": HOLDER, "released_at": expiry + 7_776_001,
+               "before_registrant": HOLDER, "released_at": expiry + GRACE + 1,
                "expiry": expiry, "expiry_seconds": expiry}),
     )
 }
 
 fn binding(resource: &str, block: i64, extra: Value) -> BindingCandidate {
     let mut row = json!({
-        "surface_binding_id": format!("binding-{resource}"),
+        "surface_binding_id": format!("binding-{resource}-{block}"),
         "logical_name_id": NAME,
         "authority_arm": "ens_v1",
         "resource_id": resource,
@@ -125,19 +147,8 @@ fn registry_only(block: i64) -> BindingCandidate {
 fn registrar_binding() -> BindingCandidate {
     binding(
         LEASE,
-        8,
+        HANDOFF,
         json!({"registry_only": false, "authority_kind": "registrar"}),
-    )
-}
-
-/// A NameWrapper binding of the wrapped token, which holds the lease `LEASE`.
-fn wrapper_binding() -> BindingCandidate {
-    binding(
-        WRAPPED,
-        8,
-        json!({"registry_only": false, "authority_kind": "wrapper",
-               "emitting_address": NAME_WRAPPER, "wrapped_registrar_resource_id": LEASE,
-               "node": "0x01", "transaction_hash": "0xwrap"}),
     )
 }
 
@@ -175,7 +186,6 @@ struct Name {
     binding: BindingCandidate,
     events: Vec<LifecycleEvent>,
     writes: Vec<OwnerEvent>,
-    wrappers: Vec<WrapperRow>,
     has_old_record: bool,
     first_current_record_block: Option<i64>,
     migration: Option<Position>,
@@ -190,7 +200,6 @@ impl Name {
             binding,
             events,
             writes: vec![write(HANDOFF, &resource, HOLDER, None)],
-            wrappers: Vec::new(),
             has_old_record: false,
             first_current_record_block: Some(HANDOFF),
             migration: None,
@@ -228,11 +237,7 @@ impl Name {
             key_states: BTreeMap::new(),
             triples: Vec::new(),
             events: self.events.clone(),
-            wrappers: self
-                .wrappers
-                .iter()
-                .map(|row| (row.resource_id.clone(), row.clone()))
-                .collect(),
+            wrappers: BTreeMap::new(),
             block_timestamps: Arc::new(BTreeMap::new()),
             block_seconds: Arc::new(BTreeMap::from([(CLAIM_BLOCK, CLAIM_TIME)])),
             snapshot_timestamps: Arc::new(BTreeMap::new()),
@@ -252,9 +257,9 @@ impl Name {
     }
 }
 
-/// The composed reader's path: select the authority from the candidates and history alone
-/// (`name/selection.rs`), then compose. Returns the selected arm and the composition.
-fn selected(mut facts: NameFacts) -> (Option<String>, ShadowName) {
+/// The composed reader's selection: the authority chosen from the candidates and history alone
+/// (`name/selection.rs`).
+fn with_selection(mut facts: NameFacts) -> NameFacts {
     facts.input.selection = AuthoritySelection::default();
     let readable: BTreeSet<String> = facts
         .candidates
@@ -263,9 +268,14 @@ fn selected(mut facts: NameFacts) -> (Option<String>, ShadowName) {
         .collect();
     let decided = select(&facts, &CLOCK, None, None, &readable).expect("the name selects");
     facts.input.selection = decided.selection;
-    let arm = facts.input.selection.authority_arm.clone();
+    facts
+}
+
+/// Select, then compose. Returns the selected arm and the composition.
+fn selected(facts: NameFacts) -> (Option<String>, ShadowName) {
+    let facts = with_selection(facts);
     (
-        arm,
+        facts.input.selection.authority_arm.clone(),
         evaluate(&facts, &CLOCK).expect("the selected name composes"),
     )
 }
@@ -329,8 +339,9 @@ fn assert_not_held(shadow: &ShadowName) {
     );
 }
 
-/// Row 1, release-line shape: a 2020-migrated name with no lease row, on its registry-only
-/// binding, serves `active` with its registry owner until the claim.
+/// A 2020-migrated name with no lease row, on its registry-only binding, serves `active` with
+/// its registry owner until the claim. The claim is the plain `.eth` claim: `clear` registers the
+/// lapsed name to the Graveyard, whose registry write is the only row it leaves.
 #[test]
 fn a_migrated_name_with_no_lease_row_is_released_by_the_claim() {
     let input = || Name::new(registry_only(HANDOFF), Vec::new());
@@ -340,8 +351,8 @@ fn a_migrated_name_with_no_lease_row_is_released_by_the_claim() {
     assert_held(&input().claimed().read(), Some(HOLDER));
 }
 
-/// Row 1, reconcile shape: the 2020 mint's lease, past grace, is released by its schedule with
-/// its expiry until the claim.
+/// The 2020 mint's lease, past grace, is released by its schedule with its expiry until the
+/// claim.
 #[test]
 fn a_migrated_name_with_its_2020_lease_is_released_with_no_expiry() {
     let input = || {
@@ -363,8 +374,8 @@ fn a_migrated_name_with_its_2020_lease_is_released_with_no_expiry() {
     assert_held(&input().claimed().read(), Some(HOLDER));
 }
 
-/// Row 2: a controller-registered lease, released past grace before the claim, loses its
-/// expiry, and its release time is the claim's.
+/// A controller-registered lease, released past grace before the claim, loses its expiry, and
+/// its release time is the claim's.
 #[test]
 fn a_released_named_lease_is_released_at_the_claim_with_no_expiry() {
     let input = || {
@@ -385,8 +396,8 @@ fn a_released_named_lease_is_released_at_the_claim_with_no_expiry() {
     assert_held(&input().claimed().read(), Some(HOLDER));
 }
 
-/// Row 3: a record cleared to zero before the claim, then claimed: the claim gives the node a
-/// registry-only binding again, and nobody held it when it was claimed.
+/// A registry-only record cleared to zero before the claim, then claimed: nobody held it when it
+/// was claimed.
 #[test]
 fn a_record_cleared_before_the_claim_is_released_with_no_holder() {
     let mut input = Name::new(registry_only(CLAIM_BLOCK), Vec::new());
@@ -396,16 +407,15 @@ fn a_record_cleared_before_the_claim_is_released_with_no_holder() {
     assert_held(&input.claimed().read(), None);
 }
 
-/// Rows 4, 5 and 10: a name the ENSv2 arm decides is untouched by a Graveyard-held ENSv1 record.
+/// A name the ENSv2 arm decides is untouched by a Graveyard-held ENSv1 record.
 fn assert_ens_v2_untouched(grant_block: i64, migration: Option<Position>) {
     let input = || {
         let mut input = Name::new(
             binding(
                 ENS_V2,
                 grant_block,
-                json!({"authority_arm": "ens_v2",
-                                                 "registry_only": false,
-                                                 "authority_kind": "ens_v2_registry"}),
+                json!({"authority_arm": "ens_v2", "registry_only": false,
+                       "authority_kind": "ens_v2_registry"}),
             ),
             vec![event(
                 "RegistrationGranted",
@@ -430,20 +440,20 @@ fn assert_ens_v2_untouched(grant_block: i64, migration: Option<Position>) {
     assert_eq!(claimed, unclaimed);
 }
 
-/// Row 4: a label registered in ENSv2 before the claim.
+/// A label registered in ENSv2 before the claim.
 #[test]
 fn an_ens_v2_registration_before_the_claim_is_untouched() {
     assert_ens_v2_untouched(40, None);
 }
 
-/// Row 10: a label registered in ENSv2 after the claim, which selection gives the ENSv2 arm.
+/// A label registered in ENSv2 after the claim, which selection gives the ENSv2 arm.
 #[test]
 fn an_ens_v2_registration_after_the_claim_is_untouched() {
     assert_ens_v2_untouched(70, None);
 }
 
-/// Row 5: a migrated name. The migration hands its ENSv1 record to the Graveyard, which then
-/// never claims it (`_clear` returns before `register`), and the name is on the ENSv2 arm.
+/// A migrated name. The migration hands its ENSv1 record to the Graveyard, which then never
+/// claims it (`_clear` returns before `register`), and the name is on the ENSv2 arm.
 #[test]
 fn a_migrated_name_whose_record_the_graveyard_holds_is_untouched() {
     let migration = Position {
@@ -455,126 +465,8 @@ fn a_migrated_name_whose_record_the_graveyard_holds_is_untouched() {
     assert_ens_v2_untouched(CLAIM_BLOCK, Some(migration));
 }
 
-fn wrapped(state: &str, fuses: i64) -> Name {
-    let mut input = Name::new(
-        wrapper_binding(),
-        vec![event(
-            "RegistrationGranted",
-            "ens_v1_wrapper_l1",
-            WRAPPED,
-            8,
-            json!({"authority_kind": "wrapper", "registrant": HOLDER,
-                   "transaction_hash": "0xwrap",
-                   "expiry": LAPSED_EXPIRY + 7_776_000,
-                   "expiry_seconds": LAPSED_EXPIRY + 7_776_000}),
-        )],
-    );
-    input.writes = vec![write(8, WRAPPED, NAME_WRAPPER, None)];
-    input.wrappers = vec![
-        WrapperRow::from_row(&json!({
-            "resource_id": WRAPPED,
-            "logical_name_id": NAME,
-            "wrapper_state": state,
-            "fuses": fuses,
-            "expiry_seconds": (LAPSED_EXPIRY + 7_776_000).to_string(),
-            "expiry_position": {"block_number": 8},
-            "lifecycle_unwrapped": false,
-        }))
-        .expect("wrapper row decodes"),
-    ];
-    input
-}
-
-/// Row 8: a wrapped name past its NameWrapper expiry, claimed. The lapsed owner is the wrapped
-/// token's holder, never the NameWrapper.
-#[test]
-fn a_wrapped_name_is_released_with_its_token_holder_as_the_lapsed_owner() {
-    // PARENT_CANNOT_CONTROL | CANNOT_UNWRAP is not burned; wrapETH2LD burns PARENT_CANNOT_CONTROL.
-    assert_held(
-        &wrapped("emancipated", 0x10000).claimed().read(),
-        Some(HOLDER),
-    );
-}
-
-/// Row 9: a locked wrapped name. Past expiry NameWrapper reads its fuses as zero, so it is
-/// claimable like any other.
-#[test]
-fn a_locked_wrapped_name_is_released_with_its_token_holder_as_the_lapsed_owner() {
-    assert_held(&wrapped("locked", 0x10001).claimed().read(), Some(HOLDER));
-}
-
-/// Row 11: a subname the Graveyard cleared with `setSubnodeRecord`.
-#[test]
-fn a_cleared_subname_is_released() {
-    let input = || {
-        let mut input = Name::new(registry_only(HANDOFF), Vec::new());
-        input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-        input
-    };
-    let unclaimed = input().read();
-    assert_eq!(field(&unclaimed.registration, "lifecycle_status"), "active");
-    assert_eq!(field(&unclaimed.control, "owner"), HOLDER);
-    assert_held(&input().claimed().read(), Some(HOLDER));
-}
-
-/// Row 11, wrapped: a wrapped subname whose token survives the clear, under a parent the
-/// Graveyard holds: the Graveyard takes the registry record with `setSubnodeRecord`.
-#[test]
-fn a_cleared_wrapped_subname_is_released() {
-    let mut input = wrapped("wrapped", 0);
-    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-    assert_held(&input.claimed().read(), Some(HOLDER));
-}
-
-/// Row 11, re-parented (ruling 3's case): a wrapped subname without `PARENT_CANNOT_CONTROL` under
-/// a locked parent. In one transaction the Graveyard has the NameWrapper re-parent the token to
-/// it, which writes the registry record to the NameWrapper and moves the token to the Graveyard,
-/// then unwraps it to itself. Neither the Graveyard nor the NameWrapper is a holder. The holder
-/// is the recipient of the NameWrapper's last transfer before the claim's write that is not the
-/// Graveyard: the wrap's.
-#[test]
-fn a_re_parented_wrapped_subname_is_released_with_its_token_holder() {
-    let mut input = wrapped("wrapped", 0);
-    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-    input.events.push(wrapper_transfer(8, HOLDER));
-    input.events.push(event(
-        "TokenControlTransferred",
-        "ens_v1_wrapper_l1",
-        WRAPPED,
-        CLAIM_BLOCK,
-        json!({"authority_kind": "wrapper", "source_event": "TransferSingle",
-               "to_address": GRAVEYARD}),
-    ));
-    let mut re_parent = write(CLAIM_BLOCK, WRAPPED, NAME_WRAPPER, None);
-    re_parent.position.log_index = Some(0);
-    re_parent.position.event_identity = "write:re-parent".to_owned();
-    input.writes.push(re_parent);
-    assert_held(&input.claimed().read(), Some(HOLDER));
-}
-
-/// A live token sent to the Graveyard, later claimed: the Graveyard is not the lapsed holder, the
-/// registry owner the holder left behind is.
-#[test]
-fn a_token_sent_to_the_graveyard_then_claimed_keeps_its_holder() {
-    let input = Name::new(
-        registrar_binding(),
-        vec![
-            lease_grant(8, LAPSED_EXPIRY),
-            event(
-                "TokenControlTransferred",
-                "ens_v1_registrar_l1",
-                LEASE,
-                50,
-                json!({"authority_kind": "registrar", "source_event": "Transfer",
-                       "to_address": GRAVEYARD}),
-            ),
-        ],
-    );
-    assert_held(&input.claimed().read(), Some(HOLDER));
-}
-
-/// Row 5 on the ENSv1 arm: a migrated name whose selection falls back to its ENSv1 binding. Its
-/// record is the Graveyard's from the migration, which no claim follows.
+/// A migrated name whose selection falls back to its ENSv1 binding. Its record is the
+/// Graveyard's from the migration, which no claim follows.
 #[test]
 fn a_migrated_name_on_its_ens_v1_arm_is_untouched() {
     let mut input = Name::new(registry_only(HANDOFF), Vec::new()).claimed();
@@ -587,9 +479,9 @@ fn a_migrated_name_on_its_ens_v1_arm_is_untouched() {
     assert_not_held(&input.read());
 }
 
-/// Row 12: a name only the 2017 registry recorded was never minted, so the Graveyard cannot
-/// claim it. Its one owner write stands for the 2017 registry's record. With no Graveyard write
-/// the rule does not apply.
+/// A name only the 2017 registry recorded was never minted, so the Graveyard cannot claim it.
+/// Its one owner write stands for the 2017 registry's record. With no Graveyard write the rule
+/// does not apply.
 #[test]
 fn a_never_registered_name_is_untouched() {
     let mut input = Name::new(registry_only(HANDOFF), Vec::new());
@@ -598,7 +490,7 @@ fn a_never_registered_name_is_untouched() {
     assert_not_held(&input.read());
 }
 
-/// Row 13: a live lease never claimed.
+/// A live lease never claimed.
 #[test]
 fn a_live_lease_is_untouched() {
     let shadow = Name::new(registrar_binding(), vec![lease_grant(8, LIVE_EXPIRY)]).read();
@@ -607,8 +499,8 @@ fn a_live_lease_is_untouched() {
     assert_eq!(field(&shadow.control, "owner"), HOLDER);
 }
 
-/// Row 14: a lease lapsed past grace and not yet claimed keeps its expiry: the null expiry is
-/// the Graveyard's alone.
+/// A lease lapsed past grace and not yet claimed keeps its expiry: the null expiry is the
+/// Graveyard's alone.
 #[test]
 fn a_lapsed_lease_not_yet_claimed_keeps_its_expiry() {
     let shadow = Name::new(
@@ -625,8 +517,8 @@ fn a_lapsed_lease_not_yet_claimed_keeps_its_expiry() {
     assert_ne!(field(&shadow.registration, "ens_v1_expiry"), Value::Null);
 }
 
-/// Row 15: a live token its holder sent to the Graveyard keeps its lease: the rule keys on the
-/// registry write, not on token custody.
+/// A live token its holder sent to the Graveyard keeps its lease: the rule keys on the registry
+/// write, not on token custody.
 #[test]
 fn a_live_token_sent_to_the_graveyard_is_untouched() {
     let shadow = Name::new(
@@ -649,8 +541,8 @@ fn a_live_token_sent_to_the_graveyard_is_untouched() {
     assert_ne!(field(&shadow.registration, "expiry"), Value::Null);
 }
 
-/// Row 16: a write naming a Graveyard the migration manifest does not admit, or written before
-/// its declared start, carries no Graveyard reason and is an ordinary registry owner.
+/// A write naming a Graveyard the migration manifest does not admit, or written before its
+/// declared start, carries no Graveyard reason and is an ordinary registry owner.
 #[test]
 fn an_undeclared_graveyard_write_is_an_ordinary_owner() {
     let mut input = Name::new(registry_only(HANDOFF), Vec::new());
@@ -663,10 +555,10 @@ fn an_undeclared_graveyard_write_is_an_ordinary_owner() {
     assert_eq!(field(&shadow.control, "owner"), GRAVEYARD);
 }
 
-/// Ruling 4: a live holder's `setOwner` of the registry record to the Graveyard, not a claim.
-/// `clear` cannot claim a live lease, so the write is the holder's own. The record is the
-/// Graveyard's, which never transfers it, and the name is served released, with the lease's
-/// holder as the lapsed owner, until a newer registry write (the token holder's `reclaim`).
+/// A live holder's `setOwner` of the registry record to the Graveyard is not a claim: `clear`
+/// cannot claim a live lease, so the write is the holder's own. The record is the Graveyard's,
+/// which never transfers it, and the name is served released, with the lease's holder as the
+/// lapsed owner, until a newer registry write (the token holder's `reclaim`).
 #[test]
 fn a_set_owner_to_the_graveyard_by_a_live_holder_not_a_claim_serves_released() {
     let input = || Name::new(registrar_binding(), vec![lease_grant(8, LIVE_EXPIRY)]);
@@ -711,8 +603,8 @@ fn open_registry_only() -> BindingCandidate {
     candidate
 }
 
-/// R4 row A: a Graveyard-held name whose one candidate is an open ENSv1 binding, with no other
-/// authority. Selection gives it the ENSv1 arm, so the rule serves it released.
+/// A Graveyard-held name whose one candidate is an open ENSv1 binding, with no other authority.
+/// Selection gives it the ENSv1 arm, so the rule serves it released.
 #[test]
 fn a_held_name_with_one_open_ens_v1_candidate_is_selected_and_released() {
     let input = || Name::new(open_registry_only(), Vec::new());
@@ -724,9 +616,9 @@ fn a_held_name_with_one_open_ens_v1_candidate_is_selected_and_released() {
     assert_held(&claimed, Some(HOLDER));
 }
 
-/// R4 row A', the staging summary's reading of the two names: an ENSv1 candidate whose binding
-/// is not open at the clock, and no arm from history. Selection gives no arm, so the rule does
-/// not reach the name and the claim changes nothing.
+/// A Graveyard-held name whose one ENSv1 candidate is not open at the clock, with no arm from
+/// history. Selection gives no arm, so the rule does not reach the name and the claim changes
+/// nothing.
 #[test]
 fn a_held_name_whose_one_candidate_is_not_open_has_no_arm_and_is_untouched() {
     let input = || Name::new(registry_only(HANDOFF), Vec::new());
@@ -737,8 +629,8 @@ fn a_held_name_whose_one_candidate_is_not_open_has_no_arm_and_is_untouched() {
     assert_same_registration(&claimed, &unclaimed);
 }
 
-/// R4 row B: a Graveyard-held name with no candidate. Selection gives no arm, so the rule does
-/// not reach the name and the claim changes nothing.
+/// A Graveyard-held name with no candidate. Selection gives no arm, so the rule does not reach
+/// the name and the claim changes nothing.
 #[test]
 fn a_held_name_with_no_candidate_has_no_arm_and_is_untouched() {
     let without_candidates = |name: Name| {
@@ -758,687 +650,1290 @@ fn a_held_name_with_no_candidate_has_no_arm_and_is_untouched() {
     assert_same_registration(&claimed, &unclaimed);
 }
 
-/// A NameWrapper transfer of the wrapped token `WRAPPED` to `to`, the shape the NameWrapper's
-/// `NameWrapped` and transfers take (adapters `wrapper.rs`).
-fn wrapper_transfer(block: i64, to: &str) -> LifecycleEvent {
-    event(
-        "TokenControlTransferred",
-        "ens_v1_wrapper_l1",
-        WRAPPED,
-        block,
-        json!({"authority_kind": "wrapper", "source_event": "TransferSingle", "to_address": to}),
-    )
+/// One custody event of a row, at (block, transaction, log).
+#[derive(Clone, Copy)]
+enum Step {
+    /// A current-registry owner write naming the owner.
+    Write(i64, i64, i64, &'static str),
+    /// A NameWrapper wrap minting the token of the resource to the recipient (`NameWrapped`).
+    Mint(i64, i64, i64, &'static str, &'static str),
+    /// A NameWrapper transfer of the token of the resource to the recipient.
+    Transfer(i64, i64, i64, &'static str, &'static str),
+    /// A BaseRegistrar transfer of the `.eth` token to the recipient.
+    Lease(i64, i64, i64, &'static str),
+    /// A BaseRegistrar `NameRegistered` grant to the registrant.
+    Grant(i64, i64, i64, &'static str),
 }
 
-/// A wrapped subname with the registry-only binding a registry write naming someone other than
-/// the NameWrapper opened at `block`, at time `opened`
-/// (adapters `wrapper_custody.rs`, `keeps_authority`), and the registry's NameWrapper record
-/// until then. Selection picks the registry-only binding, as in production.
-fn handed_off(
-    block: i64,
-    opened: i64,
-    registry_only_flag: bool,
-    transfers: &[(i64, &str)],
-) -> Name {
-    let mut input = wrapped("wrapped", 0);
-    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-    input.events.push(wrapper_transfer(8, HOLDER));
-    for (at, to) in transfers {
-        input.events.push(wrapper_transfer(*at, to));
-    }
-    let mut registry_only = binding(
-        REGISTRY_ONLY,
-        block,
-        json!({"state_derived": true, "registry_only": registry_only_flag,
-               "predecessor_resource_id": WRAPPED,
-               "surface_bound_position": {"block_number": block, "transaction_index": 0,
-                                          "log_index": 2, "event_identity": "surface-bound"}}),
-    );
-    registry_only.active_from_seconds = Some(opened as f64);
-    input.binding = registry_only;
-    input
-}
-
-/// The composed reader's selection over the NameWrapper binding, closed at `closed`, and the
-/// registry-only binding.
-fn select_handed_off(input: Name, closed: i64) -> (Option<String>, ShadowName) {
-    let mut wrapper = wrapper_binding();
-    wrapper.active_from_seconds = Some(1_500_000_000.0);
-    wrapper.active_to_seconds = Some(closed as f64);
-    let mut facts = input.facts();
-    facts.candidates = vec![wrapper, facts.candidates[0].clone()];
-    selected(facts)
-}
-
-/// Row 11, handed off (Codex P2 on #1390): a wrapped subname whose token survives, cleared by the
-/// Graveyard's `setSubnodeRecord`. The write names the Graveyard, not the NameWrapper, so it ends
-/// the NameWrapper authority and opens a registry-only binding at the claim. The lapsed owner is
-/// the recipient of the NameWrapper's last transfer before the claim, never the NameWrapper or
-/// the Graveyard: the wrap's, a later holder's, or, for a token its holder sent to the Graveyard
-/// before the claim, the sender's. Each registry-only flag a handoff binding can carry.
-#[test]
-fn a_cleared_wrapped_subname_handed_to_a_registry_only_binding_keeps_its_token_holder() {
-    let cases: [(&[(i64, &str)], &str); 3] = [
-        (&[], HOLDER),
-        (&[(30, NEXT_OWNER)], NEXT_OWNER),
-        (&[(40, GRAVEYARD)], HOLDER),
-    ];
-    for flag in [true, false] {
-        for (transfers, holder) in cases {
-            let input = handed_off(CLAIM_BLOCK, CLAIM_TIME, flag, transfers).claimed();
-            let (arm, shadow) = select_handed_off(input, CLAIM_TIME);
-            assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {flag}");
-            assert_held(&shadow, Some(holder));
+impl Step {
+    fn block(self) -> i64 {
+        match self {
+            Self::Write(block, ..)
+            | Self::Mint(block, ..)
+            | Self::Transfer(block, ..)
+            | Self::Lease(block, ..)
+            | Self::Grant(block, ..) => block,
         }
     }
 }
 
-/// Codex P2 on #1390: a wrapped `.eth` name past its NameWrapper expiry, claimed. The claim's
-/// registry write names the Graveyard, which ends the NameWrapper authority and selects a
-/// registry-only binding. The lease's BaseRegistrar history is retained, including its transfer
-/// into the NameWrapper at the wrap, which the registration laterals keep as the last transfer.
-/// The lapsed owner is the wrapped token's holder, never the NameWrapper. Each registry-only flag
-/// a handoff binding can carry: the `true` flag implies the lease, whose transfers the laterals
-/// keep; the `false` flag admits none of them and guards the registry fallback.
-#[test]
-fn a_claimed_wrapped_eth_name_handed_to_a_registry_only_binding_keeps_its_token_holder() {
-    for flag in [true, false] {
-        let mut input = handed_off(CLAIM_BLOCK, CLAIM_TIME, flag, &[]);
-        input.place = NamePlace::EthSecondLevel;
-        let mut wrap = event(
-            "TokenControlTransferred",
-            "ens_v1_registrar_l1",
-            LEASE,
-            8,
-            json!({"authority_kind": "registrar", "source_event": "Transfer",
-                   "to_address": NAME_WRAPPER, "transaction_hash": "0xwrap"}),
+fn at(block: i64, transaction: i64, log: i64) -> Position {
+    Position {
+        block_number: block,
+        transaction_index: Some(transaction),
+        log_index: Some(log),
+        event_identity: format!("{block}:{transaction}:{log}"),
+    }
+}
+
+/// A row's history: where the name sits, its lease's expiry, and the block whose registry write
+/// ended its last live wrap and opened the registry-only binding the composed reader selects, if
+/// one did.
+struct History {
+    place: NamePlace,
+    expiry: i64,
+    handoff: Option<i64>,
+}
+
+/// A `.eth` second-level name on its BaseRegistrar binding.
+fn eth(expiry: i64) -> History {
+    History {
+        place: NamePlace::EthSecondLevel,
+        expiry,
+        handoff: None,
+    }
+}
+
+/// A subname of a `.eth` name, on its registry-only binding.
+fn subname() -> History {
+    History {
+        place: NamePlace::BelowEthSecondLevel("ens:0x02".to_owned()),
+        expiry: 0,
+        handoff: None,
+    }
+}
+
+impl History {
+    /// The same history, selected over its closed NameWrapper candidates and the registry-only
+    /// binding the registry write at `block` opened. That binding is the handoff Project marks
+    /// registry-only, with the last NameWrapper candidate as its predecessor (crates/project
+    /// `families/identity.rs`, `handoff`).
+    fn handed_off_at(mut self, block: i64) -> Self {
+        self.handoff = Some(block);
+        self
+    }
+
+    fn facts(&self, steps: &[Step]) -> NameFacts {
+        let two_ld = self.place == NamePlace::EthSecondLevel;
+        let mut events = Vec::new();
+        let mut writes = Vec::new();
+        let mut wraps: Vec<(&str, i64)> = Vec::new();
+        for &step in steps {
+            match step {
+                Step::Write(block, transaction, log, owner) => {
+                    let reason = match owner {
+                        GRAVEYARD => Some("graveyard"),
+                        ZERO_ADDRESS => Some("literal_zero"),
+                        _ => None,
+                    };
+                    let resource = if two_ld { LEASE } else { REGISTRY_ONLY };
+                    let mut row = write(block, resource, owner, reason);
+                    row.position = at(block, transaction, log);
+                    writes.push(row);
+                }
+                Step::Mint(block, transaction, log, resource, to)
+                | Step::Transfer(block, transaction, log, resource, to) => {
+                    let source = if matches!(step, Step::Mint(..)) {
+                        wraps.push((resource, block));
+                        "NameWrapped"
+                    } else {
+                        "TransferSingle"
+                    };
+                    let mut row = event(
+                        "TokenControlTransferred",
+                        "ens_v1_wrapper_l1",
+                        resource,
+                        block,
+                        json!({"authority_kind": "wrapper", "source_event": source,
+                               "to_address": to}),
+                    );
+                    row.position = at(block, transaction, log);
+                    events.push(row);
+                }
+                Step::Lease(block, transaction, log, to) => {
+                    let mut row = event(
+                        "TokenControlTransferred",
+                        "ens_v1_registrar_l1",
+                        LEASE,
+                        block,
+                        json!({"authority_kind": "registrar", "source_event": "Transfer",
+                               "to_address": to}),
+                    );
+                    row.position = at(block, transaction, log);
+                    events.push(row);
+                }
+                Step::Grant(block, transaction, log, registrant) => {
+                    let mut row = event(
+                        "RegistrationGranted",
+                        "ens_v1_registrar_l1",
+                        LEASE,
+                        block,
+                        json!({"authority_kind": "registrar", "source_event": "NameRegistered",
+                               "registrant": registrant, "expiry": self.expiry,
+                               "expiry_seconds": self.expiry}),
+                    );
+                    row.position = at(block, transaction, log);
+                    events.push(row);
+                }
+            }
+        }
+        let mut wrappers: Vec<BindingCandidate> = wraps
+            .iter()
+            .map(|&(resource, block)| {
+                let mut candidate = binding(
+                    resource,
+                    block,
+                    json!({"registry_only": false, "authority_kind": "wrapper",
+                           "emitting_address": NAME_WRAPPER, "node": "0x01",
+                           "transaction_hash": format!("0xwrap{block}")}),
+                );
+                if two_ld {
+                    candidate.wrapped_registrar_resource_id = Some(LEASE.to_owned());
+                }
+                candidate
+            })
+            .collect();
+        let main = match self.handoff {
+            Some(block) => {
+                for wrapper in &mut wrappers {
+                    wrapper.active_from_seconds = Some(1_500_000_000.0);
+                    wrapper.active_to_seconds = Some(time(block) as f64);
+                }
+                let predecessor = wraps.last().map(|&(resource, _)| resource);
+                let mut handoff = binding(
+                    REGISTRY_ONLY,
+                    block,
+                    json!({"state_derived": true, "registry_only": true,
+                           "predecessor_resource_id": predecessor,
+                           "surface_bound_position": {"block_number": block,
+                                                      "transaction_index": 0, "log_index": 2,
+                                                      "event_identity": "surface-bound"}}),
+                );
+                handoff.active_from_seconds = Some(time(block) as f64);
+                handoff
+            }
+            None if two_ld => registrar_binding(),
+            None => registry_only(HANDOFF),
+        };
+        let mut name = Name::new(main, events);
+        name.place = self.place.clone();
+        name.first_current_record_block = writes.first().map(|write| write.position.block_number);
+        name.writes = writes;
+        let mut facts = name.facts();
+        let blocks: BTreeSet<i64> = steps.iter().map(|step| step.block()).collect();
+        facts.block_seconds = Arc::new(
+            blocks
+                .into_iter()
+                .map(|block| (block, time(block)))
+                .collect(),
         );
-        wrap.position.log_index = Some(0);
-        input
-            .events
-            .splice(0..0, [lease_grant(7, LAPSED_EXPIRY), wrap]);
-        let (arm, shadow) = select_handed_off(input.claimed(), CLAIM_TIME);
-        assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {flag}");
-        assert_held(&shadow, Some(HOLDER));
+        if self.handoff.is_some() {
+            facts.candidates.splice(0..0, wrappers);
+            with_selection(facts)
+        } else {
+            facts.candidates.extend(wrappers);
+            facts
+        }
     }
 }
 
-/// A wrapped subname unwrapped to `NEXT_OWNER` (or its record overwritten by the parent's
-/// `setSubnodeOwner`, which leaves the same facts), then cleared: the registry record was not the
-/// NameWrapper's when the Graveyard claimed it, so the holder is the owner its last registry write
-/// named, not the wrap's recipient.
-#[test]
-fn an_unwrapped_subname_cleared_later_keeps_its_registry_owner() {
-    const UNWRAP_BLOCK: i64 = 20;
-    const UNWRAP_TIME: i64 = 1_700_000_000;
-    for flag in [true, false] {
-        let mut input = handed_off(UNWRAP_BLOCK, UNWRAP_TIME, flag, &[]);
-        input
-            .writes
-            .push(write(UNWRAP_BLOCK, REGISTRY_ONLY, NEXT_OWNER, None));
-        let (arm, shadow) = select_handed_off(input.claimed(), UNWRAP_TIME);
-        assert_eq!(arm.as_deref(), Some("ens_v1"), "registry_only {flag}");
-        assert_held(&shadow, Some(NEXT_OWNER));
+/// One custody row: the facts, the controller after each step, the lapsed holder and the block
+/// whose time is `released_at`.
+struct Row {
+    facts: NameFacts,
+    trace: Vec<(i64, i64, i64, Option<&'static str>)>,
+    holder: Option<&'static str>,
+    released_at: i64,
+}
+
+fn row(
+    history: History,
+    steps: &[Step],
+    trace: &[(i64, i64, i64, Option<&'static str>)],
+    holder: Option<&'static str>,
+    released_block: i64,
+) -> Row {
+    Row {
+        facts: history.facts(steps),
+        trace: trace.to_vec(),
+        holder,
+        released_at: time(released_block),
     }
 }
 
-/// tayy-i on #1390, ruling 4 followed by a token move: a live lease's holder sets the registry
-/// record to the Graveyard, then transfers the BaseRegistrar token without `reclaim`. The
-/// registration ended at the write, so the lapsed owner is the holder then, not the later
-/// recipient the registration laterals name.
-#[test]
-fn a_token_moved_after_its_holders_own_graveyard_write_keeps_the_holder_at_the_write() {
-    let mut input = Name::new(registrar_binding(), vec![lease_grant(8, LIVE_EXPIRY)]).claimed();
-    input.events.push(event(
-        "TokenControlTransferred",
-        "ens_v1_registrar_l1",
-        LEASE,
-        70,
-        json!({"authority_kind": "registrar", "source_event": "Transfer",
-               "to_address": NEXT_OWNER}),
-    ));
-    assert_held(&input.read(), Some(HOLDER));
-}
-
-/// tayy-i on #1390: in one transaction the record's owner sets it to `NEXT_OWNER` and then
-/// calls `clear`. The holder is the owner that earlier write of the claim's own transaction
-/// named.
-#[test]
-fn a_record_set_earlier_in_the_claims_transaction_names_the_holder() {
-    let mut input = Name::new(registry_only(HANDOFF), Vec::new());
-    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-    let mut set_owner = write(CLAIM_BLOCK, REGISTRY_ONLY, NEXT_OWNER, None);
-    set_owner.position.log_index = Some(1);
-    set_owner.position.event_identity = "write:set-owner".to_owned();
-    input.writes.push(set_owner);
-    assert_held(&input.claimed().read(), Some(NEXT_OWNER));
-}
-
-/// `clear` writes a subname of a name it holds again each time it runs, for that subname or any
-/// name below it (`Graveyard.sol` `_clear`, the owned-parent branch). The registration ended at
-/// the first Graveyard write: `released_at` is its block time and the lapsed owner is the holder
-/// before it, never the Graveyard.
-#[test]
-fn a_repeated_graveyard_write_keeps_the_first_claim_and_its_holder() {
-    let mut input = Name::new(registry_only(HANDOFF), Vec::new()).claimed();
-    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-    input
-        .writes
-        .push(write(80, REGISTRY_ONLY, GRAVEYARD, Some("graveyard")));
-    assert_held(&input.read(), Some(HOLDER));
-}
-
-/// A guard: the `.eth` claim's BaseRegistrar burn of the lapsed token and its mint to the Graveyard
-/// come before the registry write in the claim's transaction. Interpret records no transfer to or
-/// from zero, so no such rows arise; if a transfer to zero or the Graveyard were recorded there,
-/// neither would name a holder, and the lapsed owner stays the lease's holder before them.
-#[test]
-fn a_claimed_lease_burned_and_minted_to_the_graveyard_keeps_its_holder() {
-    let transfer = |log: i64, to: &str| {
-        let mut row = event(
-            "TokenControlTransferred",
-            "ens_v1_registrar_l1",
-            LEASE,
-            CLAIM_BLOCK,
-            json!({"authority_kind": "registrar", "source_event": "Transfer", "to_address": to}),
+impl Row {
+    fn serves(&self) {
+        assert_eq!(
+            self.facts.input.selection.authority_arm.as_deref(),
+            Some("ens_v1")
         );
-        row.position.log_index = Some(log);
-        row.position.event_identity = format!("transfer:{log}");
-        row
-    };
-    let input = Name::new(
-        registrar_binding(),
-        vec![
-            lease_grant(8, LAPSED_EXPIRY),
-            lease_release(40, LAPSED_EXPIRY),
-            transfer(0, ZERO_ADDRESS),
-            transfer(1, GRAVEYARD),
-        ],
-    );
-    assert_held(&input.claimed().read(), Some(HOLDER));
-}
-
-/// The resource of a re-parented subname's later wrap: each wrap is a new NameWrapper resource
-/// with its own binding (adapters `wrapper.rs`, `authority_key`).
-const REWRAPPED: &str = "00000000-0000-0000-0000-0000000000c2";
-
-/// A re-parented subname, claimed at `CLAIM_BLOCK`, then cleared again at `RECLAIM_BLOCK`. Each
-/// re-parent writes the record to the NameWrapper, mints the wrapped token to the Graveyard and
-/// writes the record to the Graveyard, in one transaction; the later one wraps under
-/// `REWRAPPED`.
-fn re_parented_again() -> NameFacts {
-    let mut input = wrapped("wrapped", 0);
-    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-    input.events.push(wrapper_transfer(8, HOLDER));
-    let mut first = write(CLAIM_BLOCK, WRAPPED, NAME_WRAPPER, None);
-    first.position.log_index = Some(0);
-    first.position.event_identity = "write:re-parent".to_owned();
-    input.writes.push(first);
-    input.events.push(wrapper_transfer(CLAIM_BLOCK, GRAVEYARD));
-    let mut input = input.claimed();
-    let mut again = write(RECLAIM_BLOCK, REWRAPPED, NAME_WRAPPER, None);
-    again.position.log_index = Some(0);
-    again.position.event_identity = "write:re-parent-again".to_owned();
-    input.writes.push(again);
-    let mut mint = wrapper_transfer(RECLAIM_BLOCK, GRAVEYARD);
-    mint.resource_id = Some(REWRAPPED.to_owned());
-    input.events.push(mint);
-    let mut repeat = write(RECLAIM_BLOCK, REWRAPPED, GRAVEYARD, Some("graveyard"));
-    repeat.position.event_identity = "write:repeat".to_owned();
-    input.writes.push(repeat);
-    let mut facts = input.facts();
-    facts.candidates.push(binding(
-        REWRAPPED,
-        RECLAIM_BLOCK,
-        json!({"registry_only": false, "authority_kind": "wrapper",
-               "emitting_address": NAME_WRAPPER, "node": "0x01",
-               "transaction_hash": "0xrewrap"}),
-    ));
-    facts.block_seconds = Arc::new(BTreeMap::from([
-        (CLAIM_BLOCK, CLAIM_TIME),
-        (RECLAIM_BLOCK, RECLAIM_TIME),
-    ]));
-    facts
-}
-
-/// A re-parented subname cleared again: the later `clear` re-parents it once more under a new
-/// wrapped resource. That custody write does not end the Graveyard's hold: `released_at` stays at
-/// the first claim and the holder is the one before it.
-#[test]
-fn a_re_parented_subname_cleared_again_keeps_the_first_claim_and_its_holder() {
-    let facts = re_parented_again();
-    assert_held(
-        &evaluate(&facts, &CLOCK).expect("the name composes"),
-        Some(HOLDER),
-    );
-}
-
-/// The block of a token holder's own write to the Graveyard after a hold, and its block time.
-const RECLAIM_BLOCK: i64 = 90;
-const RECLAIM_TIME: i64 = 1_850_000_000;
-
-/// Ruling 4's hold: a live lease's holder writes the registry record to the Graveyard at the
-/// claim block, then transfers the BaseRegistrar token to `NEXT_OWNER` at block 70.
-fn held_then_moved() -> Name {
-    let mut input = Name::new(registrar_binding(), vec![lease_grant(8, LIVE_EXPIRY)]).claimed();
-    input.events.push(event(
-        "TokenControlTransferred",
-        "ens_v1_registrar_l1",
-        LEASE,
-        70,
-        json!({"authority_kind": "registrar", "source_event": "Transfer",
-               "to_address": NEXT_OWNER}),
-    ));
-    input
-}
-
-/// A registry write of the node to `owner` at `RECLAIM_BLOCK`, at `transaction` and `log`.
-fn reclaim_block_write(
-    transaction: i64,
-    log: i64,
-    owner: &str,
-    reason: Option<&str>,
-) -> OwnerEvent {
-    let mut write = write(RECLAIM_BLOCK, LEASE, owner, reason);
-    write.position.transaction_index = Some(transaction);
-    write.position.log_index = Some(log);
-    write.position.event_identity = format!("write:{RECLAIM_BLOCK}:{transaction}:{log}");
-    write
-}
-
-/// Compose with the block times of the claim and of `RECLAIM_BLOCK`, and `extra` candidates.
-fn read_at_reclaim(input: &Name, extra: Vec<BindingCandidate>) -> ShadowName {
-    let mut facts = input.facts();
-    facts.candidates.extend(extra);
-    facts.block_seconds = Arc::new(BTreeMap::from([
-        (CLAIM_BLOCK, CLAIM_TIME),
-        (RECLAIM_BLOCK, RECLAIM_TIME),
-    ]));
-    evaluate(&facts, &CLOCK).expect("the name composes")
-}
-
-/// tayy-i on #1390: after ruling 4's hold, the token's new holder (a contract) calls `reclaim` and
-/// then writes the record to the Graveyard in one transaction. The reclaim ended the earlier hold,
-/// so its write between the two Graveyard writes ends the run: the registration ended at the later
-/// write, and its holder is the reclaimer.
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
-#[test]
-fn a_reclaim_and_graveyard_write_in_one_transaction_start_a_new_hold() {
-    let mut input = held_then_moved();
-    input
-        .writes
-        .push(reclaim_block_write(0, 0, NEXT_OWNER, None));
-    input
-        .writes
-        .push(reclaim_block_write(0, 2, GRAVEYARD, Some("graveyard")));
-    assert_held_at(
-        &read_at_reclaim(&input, Vec::new()),
-        Some(NEXT_OWNER),
-        RECLAIM_TIME,
-    );
-}
-
-/// The same with the reclaim and the Graveyard write in two transactions of one block.
-#[test]
-fn a_reclaim_then_a_graveyard_write_in_another_transaction_start_a_new_hold() {
-    let mut input = held_then_moved();
-    input
-        .writes
-        .push(reclaim_block_write(0, 0, NEXT_OWNER, None));
-    input
-        .writes
-        .push(reclaim_block_write(1, 0, GRAVEYARD, Some("graveyard")));
-    assert_held_at(
-        &read_at_reclaim(&input, Vec::new()),
-        Some(NEXT_OWNER),
-        RECLAIM_TIME,
-    );
-}
-
-/// A BaseRegistrar transfer of the lease at `RECLAIM_BLOCK`, at `log`, carrying the later wrap's
-/// transaction.
-fn lease_transfer_at_reclaim(log: i64, to: &str) -> LifecycleEvent {
-    let mut transfer = event(
-        "TokenControlTransferred",
-        "ens_v1_registrar_l1",
-        LEASE,
-        RECLAIM_BLOCK,
-        json!({"authority_kind": "registrar", "source_event": "Transfer",
-               "to_address": to, "transaction_hash": "0xrewrap"}),
-    );
-    transfer.position.log_index = Some(log);
-    transfer.position.event_identity = format!("lease-transfer:{log}");
-    transfer
-}
-
-/// After ruling 4's hold, the token's new holder wraps the name with itself as the wrapped owner
-/// (`wrapETH2LD`: the BaseRegistrar token moves into the NameWrapper, whose `reclaim` writes the
-/// record to it, and the wrapped token is minted to the holder), then unwraps it with the
-/// Graveyard as the registry owner (`unwrapETH2LD`: the record is written to the Graveyard and the
-/// BaseRegistrar token is returned), in one transaction. The wrapped token went to the holder, so
-/// the hold ends: the holder is the wrapped token's.
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L277 @ ens_v1@91c966f)
-#[test]
-fn a_holders_wrap_and_unwrap_to_the_graveyard_in_one_transaction_start_a_new_hold() {
-    let mut input = held_then_moved();
-    input
-        .events
-        .push(lease_transfer_at_reclaim(0, NAME_WRAPPER));
-    input
-        .writes
-        .push(reclaim_block_write(0, 1, NAME_WRAPPER, None));
-    let mut mint = wrapper_transfer(RECLAIM_BLOCK, NEXT_OWNER);
-    mint.resource_id = Some(REWRAPPED.to_owned());
-    mint.position.log_index = Some(2);
-    input.events.push(mint);
-    input
-        .writes
-        .push(reclaim_block_write(0, 4, GRAVEYARD, Some("graveyard")));
-    input.events.push(lease_transfer_at_reclaim(5, NEXT_OWNER));
-    assert_held_at(
-        &read_at_reclaim(&input, vec![rewrap_binding(RECLAIM_BLOCK)]),
-        Some(NEXT_OWNER),
-        RECLAIM_TIME,
-    );
-}
-
-/// A later Graveyard write in another transaction, and its block time.
-const LATER_BLOCK: i64 = 95;
-const LATER_TIME: i64 = 1_870_000_000;
-
-/// A subname whose holder `HOLDER` wrote its unwrapped record to the Graveyard at the claim block,
-/// then the registry `writes` and the name's wrapped token `transfers` (on `REWRAPPED`, whose
-/// NameWrapper binding the name has), each at (block, transaction, log). A write to the Graveyard
-/// carries its reason.
-fn held_subname(
-    writes: &[(i64, i64, i64, &str)],
-    transfers: &[(i64, i64, i64, &str)],
-) -> NameFacts {
-    let mut input = Name::new(registry_only(HANDOFF), Vec::new()).claimed();
-    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
-    for &(block, transaction, log, owner) in writes {
-        let reason = (owner == GRAVEYARD).then_some("graveyard");
-        let mut registry = write(block, REGISTRY_ONLY, owner, reason);
-        registry.position.transaction_index = Some(transaction);
-        registry.position.log_index = Some(log);
-        registry.position.event_identity = format!("write:{block}:{transaction}:{log}");
-        input.writes.push(registry);
+        let shadow = evaluate(&self.facts, &CLOCK).expect("the name composes");
+        assert_held_at(&shadow, self.holder, self.released_at);
     }
-    for &(block, transaction, log, to) in transfers {
-        let mut transfer = wrapper_transfer(block, to);
-        transfer.resource_id = Some(REWRAPPED.to_owned());
-        transfer.position.transaction_index = Some(transaction);
-        transfer.position.log_index = Some(log);
-        transfer.position.event_identity = format!("transfer:{block}:{transaction}:{log}");
-        input.events.push(transfer);
+
+    fn controller_trace(&self) {
+        let actual: Vec<(i64, i64, i64, Option<String>)> = super::trace(&self.facts)
+            .into_iter()
+            .map(|(position, controller)| {
+                (
+                    position.block_number,
+                    position.transaction_index.unwrap_or(-1),
+                    position.log_index.unwrap_or(-1),
+                    controller,
+                )
+            })
+            .collect();
+        let expected: Vec<(i64, i64, i64, Option<String>)> = self
+            .trace
+            .iter()
+            .map(|&(block, transaction, log, controller)| {
+                (block, transaction, log, controller.map(str::to_owned))
+            })
+            .collect();
+        assert_eq!(actual, expected);
     }
-    let mut facts = input.facts();
-    facts.candidates.push(binding(
-        REWRAPPED,
-        RECLAIM_BLOCK,
-        json!({"registry_only": false, "authority_kind": "wrapper",
-               "emitting_address": NAME_WRAPPER, "node": "0x01",
-               "transaction_hash": "0xrewrap"}),
-    ));
-    facts.block_seconds = Arc::new(BTreeMap::from([
-        (CLAIM_BLOCK, CLAIM_TIME),
-        (RECLAIM_BLOCK, RECLAIM_TIME),
-        (LATER_BLOCK, LATER_TIME),
-    ]));
-    facts
 }
 
-fn compose(facts: &NameFacts) -> ShadowName {
-    evaluate(facts, &CLOCK).expect("the name composes")
+/// Each row function `name` gets a module `name` with its two tests.
+macro_rules! custody_rows {
+    ($($name:ident),* $(,)?) => {$(
+        mod $name {
+            #[test]
+            fn serves() {
+                super::$name().serves();
+            }
+
+            #[test]
+            fn controller_trace() {
+                super::$name().controller_trace();
+            }
+        }
+    )*};
 }
 
-/// tayy-i on #1390: in one transaction the wrapped parent's owner `NEXT_OWNER` has the NameWrapper
-/// write the held child's record to itself and mint the token to the Graveyard
-/// (`setSubnodeRecord`), moves the token to itself (`setSubnodeOwner` on a wrapped child writes no
-/// record), and unwraps it to the Graveyard, which burns it (the adapter records no burn). The
-/// transfer out of the Graveyard
-/// ends the hold, even though the transaction started with a mint to it: the holder is the one
-/// before the later write.
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L585 @ ens_v1@91c966f)
-#[test]
-fn a_held_child_minted_to_the_graveyard_then_taken_out_starts_a_new_hold() {
-    let facts = held_subname(
-        &[
-            (RECLAIM_BLOCK, 0, 0, NAME_WRAPPER),
-            (RECLAIM_BLOCK, 0, 6, GRAVEYARD),
-        ],
-        &[
-            (RECLAIM_BLOCK, 0, 1, GRAVEYARD),
-            (RECLAIM_BLOCK, 0, 3, NEXT_OWNER),
-        ],
-    );
-    assert_held_at(&compose(&facts), Some(NEXT_OWNER), RECLAIM_TIME);
-}
+use Step::{Grant, Lease, Mint, Transfer, Write};
 
-/// In one transaction the wrapped parent's owner wraps the held child to itself, sends the token
-/// to the Graveyard, and, as the parent's registry owner after unwrapping the parent, writes the
-/// child's record to the Graveyard. It controlled the record in between, so the hold ends there
-/// even though the token ends with the Graveyard.
-#[test]
-fn a_held_child_taken_out_then_sent_back_to_the_graveyard_starts_a_new_hold() {
-    let facts = held_subname(
-        &[
-            (RECLAIM_BLOCK, 0, 0, NAME_WRAPPER),
-            (RECLAIM_BLOCK, 0, 6, GRAVEYARD),
-        ],
-        &[
-            (RECLAIM_BLOCK, 0, 1, NEXT_OWNER),
-            (RECLAIM_BLOCK, 0, 3, GRAVEYARD),
-        ],
-    );
-    assert_held_at(&compose(&facts), Some(NEXT_OWNER), RECLAIM_TIME);
-}
+/// A lease that lapses past its grace between block 52 and the claim at block 60.
+const CLAIMABLE_EXPIRY: i64 = 1_780_000_000;
 
-/// The NameWrapper writes the held child's record to itself and mints the token to the Graveyard
-/// in one transaction, and the record is written to the Graveyard in a later one. No one else
-/// controlled it in between, so the hold carries: released at the first write, with its holder.
-#[test]
-fn a_held_child_minted_to_the_graveyard_and_written_back_later_keeps_the_first_claim() {
-    let facts = held_subname(
+/// The `.eth` claim: the lease lapses past grace and `clear` registers the name to the Graveyard,
+/// whose BaseRegistrar burn and mint leave no rows and whose registry write is the claim.
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L157-L164 @ ens_v2_mainnet_20261002@4f47cbcc)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
+fn a_lapsed_eth_name_is_released_at_the_claim_to_its_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY),
         &[
-            (RECLAIM_BLOCK, 0, 0, NAME_WRAPPER),
-            (LATER_BLOCK, 0, 2, GRAVEYARD),
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Write(60, 0, 2, GRAVEYARD),
         ],
-        &[(RECLAIM_BLOCK, 0, 1, GRAVEYARD)],
-    );
-    assert_held(&compose(&facts), Some(HOLDER));
-}
-
-/// A registry write to the NameWrapper with no wrapped token transfer before the Graveyard's
-/// write: a parent's `setSubnodeOwner` to the NameWrapper, which wraps nothing. The Graveyard did
-/// not control the record in between, so the hold ends: released at the later write, with no
-/// wrapped holder.
-#[test]
-fn a_name_wrapper_write_with_no_wrapped_transfer_starts_a_new_hold() {
-    let facts = held_subname(
         &[
-            (RECLAIM_BLOCK, 0, 0, NAME_WRAPPER),
-            (RECLAIM_BLOCK, 0, 2, GRAVEYARD),
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
         ],
-        &[],
-    );
-    assert_held_at(&compose(&facts), None, RECLAIM_TIME);
-}
-
-/// After ruling 4's hold, the token's new holder wraps the `.eth` name with the Graveyard as the
-/// wrapped owner (`wrapETH2LD`): the BaseRegistrar token moves into the NameWrapper, whose
-/// `reclaim` writes the record to it, and the wrapped token is minted to the Graveyard. Once the
-/// lease is past its expiry and grace, the Graveyard's claim writes the record to it again. No
-/// one else controlled the record in between, so the hold carries from the holder's own write.
-/// The composition reads no expiry here, so the fixture keeps the lease's.
-#[test]
-fn a_eth_name_wrapped_to_the_graveyard_then_claimed_keeps_the_first_claim() {
-    let mut input = held_then_moved();
-    let mut custody = event(
-        "TokenControlTransferred",
-        "ens_v1_registrar_l1",
-        LEASE,
-        80,
-        json!({"authority_kind": "registrar", "source_event": "Transfer",
-               "to_address": NAME_WRAPPER, "transaction_hash": "0xrewrap"}),
-    );
-    custody.position.log_index = Some(0);
-    input.events.push(custody);
-    let mut wrap = write(80, LEASE, NAME_WRAPPER, None);
-    wrap.position.log_index = Some(1);
-    input.writes.push(wrap);
-    let mut mint = wrapper_transfer(80, GRAVEYARD);
-    mint.resource_id = Some(REWRAPPED.to_owned());
-    mint.position.log_index = Some(3);
-    input.events.push(mint);
-    input
-        .writes
-        .push(write(LATER_BLOCK, LEASE, GRAVEYARD, Some("graveyard")));
-    assert_held(
-        &read_at_reclaim(&input, vec![rewrap_binding(80)]),
         Some(HOLDER),
-    );
-}
-
-/// After ruling 4's hold and the token's move, its new holder calls `reclaim` to the Graveyard.
-/// The record was already the Graveyard's and the token controlled nothing, so there is no write
-/// between the two Graveyard writes: the hold carries from the holder's own write.
-#[test]
-fn a_reclaim_to_the_graveyard_after_a_token_move_keeps_the_first_claim() {
-    let mut input = held_then_moved();
-    input
-        .writes
-        .push(reclaim_block_write(0, 2, GRAVEYARD, Some("graveyard")));
-    assert_held(&read_at_reclaim(&input, Vec::new()), Some(HOLDER));
-}
-
-/// Holder recovery after an old wrap: the subname was wrapped to `HOLDER` and unwrapped to
-/// `NEXT_OWNER`, who wrote it to the Graveyard. A parent's `setSubnodeOwner` writes it to the
-/// NameWrapper, wrapping nothing, and then to the Graveyard. The hold ends at the later write,
-/// and the old wrap's holder, who lost control at the unwrap, is no holder: released at the later
-/// write with none.
-#[test]
-fn an_old_wraps_holder_is_not_the_holder_after_a_bare_name_wrapper_write() {
-    let mut facts = held_subname(
-        &[
-            (8, 0, 2, NAME_WRAPPER),
-            (20, 0, 2, NEXT_OWNER),
-            (80, 0, 0, NAME_WRAPPER),
-            (RECLAIM_BLOCK, 0, 2, GRAVEYARD),
-        ],
-        &[(8, 0, 3, HOLDER)],
-    );
-    facts.block_seconds = Arc::new(BTreeMap::from([
-        (CLAIM_BLOCK, CLAIM_TIME),
-        (RECLAIM_BLOCK, RECLAIM_TIME),
-    ]));
-    assert_held_at(&compose(&facts), None, RECLAIM_TIME);
-}
-
-/// A NameWrapper binding of a later wrap at `block`, under `REWRAPPED`, of the lease `LEASE`.
-fn rewrap_binding(block: i64) -> BindingCandidate {
-    binding(
-        REWRAPPED,
-        block,
-        json!({"registry_only": false, "authority_kind": "wrapper",
-               "emitting_address": NAME_WRAPPER, "wrapped_registrar_resource_id": LEASE,
-               "node": "0x01", "transaction_hash": "0xrewrap"}),
+        60,
     )
 }
 
-/// After ruling 4's hold and the token's move, its new holder `NEXT_OWNER` calls `reclaim`, which
-/// ends the hold, then wraps the `.eth` name with the Graveyard as the wrapped owner
-/// (`wrapETH2LD`): the BaseRegistrar token moves into the NameWrapper, whose `reclaim` writes the
-/// record to it, and the wrapped token is minted to the Graveyard. The Graveyard's claim later
-/// writes the record to it. The wrapper handed the name to the Graveyard, as a token sent to the
-/// Graveyard leaves its sender: the holder is the lease's last holder outside the NameWrapper.
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L277 @ ens_v1@91c966f)
-#[test]
-fn a_reclaim_then_a_wrap_to_the_graveyard_then_a_claim_names_the_reclaimer() {
-    let mut input = held_then_moved();
-    input.writes.push(write(80, LEASE, NEXT_OWNER, None));
-    let mut custody = event(
-        "TokenControlTransferred",
-        "ens_v1_registrar_l1",
-        LEASE,
-        85,
-        json!({"authority_kind": "registrar", "source_event": "Transfer",
-               "to_address": NAME_WRAPPER, "transaction_hash": "0xrewrap"}),
-    );
-    custody.position.log_index = Some(0);
-    input.events.push(custody);
-    let mut wrap = write(85, LEASE, NAME_WRAPPER, None);
-    wrap.position.log_index = Some(1);
-    input.writes.push(wrap);
-    let mut mint = wrapper_transfer(85, GRAVEYARD);
-    mint.resource_id = Some(REWRAPPED.to_owned());
-    mint.position.log_index = Some(3);
-    input.events.push(mint);
-    input
-        .writes
-        .push(reclaim_block_write(0, 2, GRAVEYARD, Some("graveyard")));
-    assert_held_at(
-        &read_at_reclaim(&input, vec![rewrap_binding(85)]),
-        Some(NEXT_OWNER),
-        RECLAIM_TIME,
-    );
-}
-
-/// A subname whose record `NEXT_OWNER` holds (written by its parent at block 20), then the
-/// registry `writes` and the wrapped token `transfers` on `REWRAPPED`, as in [`held_subname`],
-/// with no Graveyard write before them.
-fn owned_subname(
-    writes: &[(i64, i64, i64, &str)],
-    transfers: &[(i64, i64, i64, &str)],
-) -> NameFacts {
-    let mut facts = held_subname(writes, transfers);
-    let node = facts.registry_node.as_mut().expect("the name has a node");
-    node.owner_events
-        .retain(|event| event.position.block_number != CLAIM_BLOCK);
-    node.owner_events
-        .push(write(20, REGISTRY_ONLY, NEXT_OWNER, None));
-    facts
-}
-
-/// The holder of a subname wraps it with the Graveyard as the wrapped owner (`wrap` writes the
-/// record to the NameWrapper and mints the token to the Graveyard), and the Graveyard, holding the
-/// parent, clears it with `setSubnodeRecord`. The holder handed the name to the Graveyard, so it
-/// is the lapsed owner.
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L375 @ ens_v1@91c966f)
-#[test]
-fn a_subname_its_holder_wrapped_to_the_graveyard_names_that_holder() {
-    let facts = owned_subname(
-        &[(80, 0, 2, NAME_WRAPPER), (RECLAIM_BLOCK, 0, 2, GRAVEYARD)],
-        &[(80, 0, 3, GRAVEYARD)],
-    );
-    assert_held_at(&compose(&facts), Some(NEXT_OWNER), RECLAIM_TIME);
-}
-
-/// The Graveyard's first re-parent of an unwrapped subname under a locked parent it holds: in one
-/// transaction the NameWrapper's `setSubnodeRecord` writes the record to the NameWrapper and mints
-/// the token to the Graveyard, and `unwrap` writes the record to the Graveyard. The record's owner
-/// before the re-parent is the lapsed owner.
-/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
-#[test]
-fn an_unwrapped_subname_re_parented_by_the_graveyard_names_its_registry_owner() {
-    let facts = owned_subname(
+/// The registry owner clears the record to zero (`setOwner`), then the claim: no one controlled
+/// the name when the Graveyard took it, so there is no lapsed holder, whatever the lease says.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+fn a_lapsed_eth_name_cleared_to_zero_has_no_lapsed_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY),
         &[
-            (RECLAIM_BLOCK, 0, 0, NAME_WRAPPER),
-            (RECLAIM_BLOCK, 0, 4, GRAVEYARD),
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Write(40, 0, 2, ZERO_ADDRESS),
+            Write(60, 0, 2, GRAVEYARD),
         ],
-        &[(RECLAIM_BLOCK, 0, 1, GRAVEYARD)],
-    );
-    assert_held_at(&compose(&facts), Some(NEXT_OWNER), RECLAIM_TIME);
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (40, 0, 2, None),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        None,
+        60,
+    )
 }
 
-/// The holder of a subname writes its record to the NameWrapper with `setOwner`, which wraps
-/// nothing, and the Graveyard later clears it. The holder lost control at that write and no
-/// wrapped token reached the Graveyard, so there is no lapsed owner.
-#[test]
-fn a_bare_name_wrapper_write_by_the_holder_names_no_lapsed_owner() {
-    let facts = owned_subname(
-        &[(80, 0, 2, NAME_WRAPPER), (RECLAIM_BLOCK, 0, 2, GRAVEYARD)],
-        &[],
-    );
-    assert_held_at(&compose(&facts), None, RECLAIM_TIME);
+/// A `.eth` name wrapped with `wrapETH2LD`: the BaseRegistrar token moves into the NameWrapper,
+/// its `reclaim` writes the record to it and the wrapped token is minted. Past its expiry the
+/// wrapped name reads no fuses, emancipated or locked alike, so the claim registers it, which
+/// ends the NameWrapper authority and hands the name to a registry-only binding. The NameWrapper
+/// is never the holder: the wrapped token's holder is.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246-L279 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L148-L164 @ ens_v2_mainnet_20261002@4f47cbcc)
+fn a_wrapped_eth_name_is_released_to_its_wrapped_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY).handed_off_at(60),
+        &[
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Lease(8, 0, 0, NAME_WRAPPER),
+            Write(8, 0, 1, NAME_WRAPPER),
+            Mint(8, 0, 2, WRAPPED, HOLDER),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (8, 0, 0, Some(HOLDER)),
+            (8, 0, 1, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(HOLDER),
+        60,
+    )
 }
+
+/// A `.eth` name registered wrapped (`registerAndWrapETH2LD`): the BaseRegistrar writes the
+/// record to the NameWrapper and grants it the lease before the NameWrapper mints the wrapped
+/// token, in one transaction, so the write and the mint are one wrap step. Then the claim.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L303 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
+fn a_name_registered_wrapped_is_released_to_its_wrapped_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY).handed_off_at(60),
+        &[
+            Write(5, 0, 1, NAME_WRAPPER),
+            Grant(5, 0, 2, NAME_WRAPPER),
+            Mint(5, 0, 4, WRAPPED, HOLDER),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The live holder writes the record to the Graveyard (`setOwner`), then transfers the
+/// BaseRegistrar token. The token controls nothing until a `reclaim`, so the Graveyard's control
+/// carries and the holder is the one at the write.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+const HOLDERS_OWN_WRITE: [Step; 4] = [
+    Write(5, 0, 1, HOLDER),
+    Grant(5, 0, 2, HOLDER),
+    Write(60, 0, 2, GRAVEYARD),
+    Lease(70, 0, 1, NEXT_OWNER),
+];
+const HOLDERS_OWN_WRITE_TRACE: [(i64, i64, i64, Option<&str>); 4] = [
+    (5, 0, 1, Some(HOLDER)),
+    (5, 0, 2, Some(HOLDER)),
+    (60, 0, 2, IN_GRAVEYARD),
+    (70, 0, 1, IN_GRAVEYARD),
+];
+
+fn then<T: Copy>(first: &[T], rest: &[T]) -> Vec<T> {
+    first.iter().chain(rest).copied().collect()
+}
+
+fn a_token_moved_after_its_holders_own_graveyard_write_keeps_the_holder_at_the_write() -> Row {
+    row(
+        eth(LIVE_EXPIRY),
+        &HOLDERS_OWN_WRITE,
+        &HOLDERS_OWN_WRITE_TRACE,
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// After that, the token's new holder, a contract, calls `reclaim` and then writes the record to
+/// the Graveyard in one transaction. It controlled the record in between, so the Graveyard's
+/// control restarts at the later write, with the reclaimer as the holder.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+fn a_reclaim_and_graveyard_write_in_one_transaction_start_a_new_hold() -> Row {
+    row(
+        eth(LIVE_EXPIRY),
+        &then(
+            &HOLDERS_OWN_WRITE,
+            &[Write(90, 0, 0, NEXT_OWNER), Write(90, 0, 2, GRAVEYARD)],
+        ),
+        &then(
+            &HOLDERS_OWN_WRITE_TRACE,
+            &[(90, 0, 0, Some(NEXT_OWNER)), (90, 0, 2, IN_GRAVEYARD)],
+        ),
+        Some(NEXT_OWNER),
+        90,
+    )
+}
+
+/// The same with the reclaim and the Graveyard write in two transactions.
+fn a_reclaim_then_a_graveyard_write_in_another_transaction_start_a_new_hold() -> Row {
+    row(
+        eth(LIVE_EXPIRY),
+        &then(
+            &HOLDERS_OWN_WRITE,
+            &[Write(90, 0, 0, NEXT_OWNER), Write(90, 1, 0, GRAVEYARD)],
+        ),
+        &then(
+            &HOLDERS_OWN_WRITE_TRACE,
+            &[(90, 0, 0, Some(NEXT_OWNER)), (90, 1, 0, IN_GRAVEYARD)],
+        ),
+        Some(NEXT_OWNER),
+        90,
+    )
+}
+
+/// The token's new holder calls `reclaim` to the Graveyard: the record was already the
+/// Graveyard's, so its control carries from the holder's own write.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+fn a_reclaim_to_the_graveyard_after_a_token_move_keeps_the_first_claim() -> Row {
+    row(
+        eth(LIVE_EXPIRY),
+        &then(&HOLDERS_OWN_WRITE, &[Write(90, 0, 2, GRAVEYARD)]),
+        &then(&HOLDERS_OWN_WRITE_TRACE, &[(90, 0, 2, IN_GRAVEYARD)]),
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The token's new holder wraps the name to itself (`wrapETH2LD`) and unwraps it with the
+/// Graveyard as the registry owner (`unwrapETH2LD`: `_unwrap` writes the record, then the
+/// BaseRegistrar token is returned), in one transaction. The wrapped token's holder controlled
+/// the name in between.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L396 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+fn a_holders_wrap_and_unwrap_to_the_graveyard_in_one_transaction_start_a_new_hold() -> Row {
+    row(
+        eth(LIVE_EXPIRY),
+        &then(
+            &HOLDERS_OWN_WRITE,
+            &[
+                Lease(90, 0, 0, NAME_WRAPPER),
+                Write(90, 0, 1, NAME_WRAPPER),
+                Mint(90, 0, 2, REWRAPPED, NEXT_OWNER),
+                Write(90, 0, 4, GRAVEYARD),
+                Lease(90, 0, 5, NEXT_OWNER),
+            ],
+        ),
+        &then(
+            &HOLDERS_OWN_WRITE_TRACE,
+            &[
+                (90, 0, 0, IN_GRAVEYARD),
+                (90, 0, 1, Some(NEXT_OWNER)),
+                (90, 0, 4, IN_GRAVEYARD),
+                (90, 0, 5, IN_GRAVEYARD),
+            ],
+        ),
+        Some(NEXT_OWNER),
+        90,
+    )
+}
+
+/// The token's new holder wraps the name with the Graveyard as the wrapped owner
+/// (`wrapETH2LD`; the Graveyard is an ERC1155 holder) while the lease is live, and the Graveyard
+/// claims it once it is past its expiry and grace. No one else controlled it in between.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246-L279 @ ens_v1@91c966f)
+fn a_eth_name_wrapped_to_the_graveyard_then_claimed_keeps_the_first_claim() -> Row {
+    row(
+        eth(1_860_000_000),
+        &then(
+            &HOLDERS_OWN_WRITE,
+            &[
+                Lease(80, 0, 0, NAME_WRAPPER),
+                Write(80, 0, 1, NAME_WRAPPER),
+                Mint(80, 0, 2, REWRAPPED, GRAVEYARD),
+                Write(95, 0, 2, GRAVEYARD),
+            ],
+        ),
+        &then(
+            &HOLDERS_OWN_WRITE_TRACE,
+            &[
+                (80, 0, 0, IN_GRAVEYARD),
+                (80, 0, 1, IN_GRAVEYARD),
+                (95, 0, 2, IN_GRAVEYARD),
+            ],
+        ),
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The token's new holder calls `reclaim`, then wraps the name with the Graveyard as the wrapped
+/// owner, and the Graveyard claims it once lapsed. The reclaimer handed it to the Graveyard.
+fn a_reclaim_then_a_wrap_to_the_graveyard_then_a_claim_names_the_reclaimer() -> Row {
+    row(
+        eth(1_865_000_000),
+        &then(
+            &HOLDERS_OWN_WRITE,
+            &[
+                Write(80, 0, 2, NEXT_OWNER),
+                Lease(85, 0, 0, NAME_WRAPPER),
+                Write(85, 0, 1, NAME_WRAPPER),
+                Mint(85, 0, 2, REWRAPPED, GRAVEYARD),
+                Write(90, 0, 2, GRAVEYARD),
+            ],
+        ),
+        &then(
+            &HOLDERS_OWN_WRITE_TRACE,
+            &[
+                (80, 0, 2, Some(NEXT_OWNER)),
+                (85, 0, 0, Some(NEXT_OWNER)),
+                (85, 0, 1, IN_GRAVEYARD),
+                (90, 0, 2, IN_GRAVEYARD),
+            ],
+        ),
+        Some(NEXT_OWNER),
+        90,
+    )
+}
+
+/// The holder sets the record to `NEXT_OWNER` and calls `clear` in one transaction, keeping the
+/// BaseRegistrar token. The lapsed holder of a `.eth` name is the token's holder when someone
+/// controlled the name at the claim.
+fn a_record_set_in_the_claims_transaction_names_the_token_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY),
+        &[
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Write(60, 0, 0, NEXT_OWNER),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 0, Some(NEXT_OWNER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The holder sends the live token to the Graveyard (an ERC721 holder), which leaves its sender
+/// the holder, then the claim once lapsed.
+fn a_token_sent_to_the_graveyard_then_claimed_keeps_its_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY),
+        &[
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Lease(50, 0, 1, GRAVEYARD),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (50, 0, 1, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The holder transfers the token without `reclaim`, and the lease lapses in the new holder's
+/// hands. The token's holder is the lapsed holder.
+fn a_token_moved_without_reclaim_names_its_new_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY),
+        &[
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Lease(30, 0, 1, NEXT_OWNER),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (30, 0, 1, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        60,
+    )
+}
+
+/// The holder sets the registry owner to a manager and keeps the token. The token's holder is
+/// the lapsed holder.
+fn a_manager_set_record_names_the_token_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY),
+        &[
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Write(30, 0, 2, MANAGER),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (30, 0, 2, Some(MANAGER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// A wrapped `.eth` name whose wrapped token was transferred while unexpired, then claimed.
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L138-L152 @ ens_v1@91c966f)
+fn a_wrapped_eth_name_transferred_is_released_to_its_new_wrapped_holder() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY).handed_off_at(60),
+        &[
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Lease(8, 0, 0, NAME_WRAPPER),
+            Write(8, 0, 1, NAME_WRAPPER),
+            Mint(8, 0, 2, WRAPPED, HOLDER),
+            Transfer(30, 0, 1, WRAPPED, NEXT_OWNER),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (8, 0, 0, Some(HOLDER)),
+            (8, 0, 1, Some(HOLDER)),
+            (30, 0, 1, Some(NEXT_OWNER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        60,
+    )
+}
+
+/// A wrapped `.eth` name unwrapped to `NEXT_OWNER` (`unwrapETH2LD`: the record is written, then
+/// the BaseRegistrar token is returned), whose lease then lapses, then claimed.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L396 @ ens_v1@91c966f)
+fn a_wrapped_eth_name_unwrapped_is_released_to_the_unwrapper() -> Row {
+    row(
+        eth(CLAIMABLE_EXPIRY),
+        &[
+            Write(5, 0, 1, HOLDER),
+            Grant(5, 0, 2, HOLDER),
+            Lease(8, 0, 0, NAME_WRAPPER),
+            Write(8, 0, 1, NAME_WRAPPER),
+            Mint(8, 0, 2, WRAPPED, HOLDER),
+            Write(40, 0, 1, NEXT_OWNER),
+            Lease(40, 0, 2, NEXT_OWNER),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 1, Some(HOLDER)),
+            (5, 0, 2, Some(HOLDER)),
+            (8, 0, 0, Some(HOLDER)),
+            (8, 0, 1, Some(HOLDER)),
+            (40, 0, 1, Some(NEXT_OWNER)),
+            (40, 0, 2, Some(NEXT_OWNER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        60,
+    )
+}
+
+/// A subname the Graveyard cleared with `setSubnodeRecord` under a parent it holds.
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L170-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
+fn a_cleared_subname_is_released_to_its_owner() -> Row {
+    row(
+        subname(),
+        &[Write(5, 0, 2, HOLDER), Write(60, 0, 2, GRAVEYARD)],
+        &[(5, 0, 2, Some(HOLDER)), (60, 0, 2, IN_GRAVEYARD)],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The wrap of a subname (`wrap`: the record is written to the NameWrapper, then the token is
+/// minted).
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L375 @ ens_v1@91c966f)
+const WRAP: [Step; 2] = [Write(8, 0, 1, NAME_WRAPPER), Mint(8, 0, 2, WRAPPED, HOLDER)];
+
+/// A wrapped subname cleared with `setSubnodeRecord`: the write names the Graveyard, which ends
+/// the NameWrapper authority (the token survives) and hands the name to a registry-only binding.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1080 @ ens_v1@91c966f)
+fn a_cleared_wrapped_subname_is_released_to_its_wrapped_holder() -> Row {
+    row(
+        subname().handed_off_at(60),
+        &then(&WRAP, &[Write(60, 0, 2, GRAVEYARD)]),
+        &[(8, 0, 1, Some(HOLDER)), (60, 0, 2, IN_GRAVEYARD)],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The same after a transfer of the wrapped token.
+fn a_cleared_wrapped_subname_is_released_to_its_new_wrapped_holder() -> Row {
+    row(
+        subname().handed_off_at(60),
+        &then(
+            &WRAP,
+            &[
+                Transfer(30, 0, 1, WRAPPED, NEXT_OWNER),
+                Write(60, 0, 2, GRAVEYARD),
+            ],
+        ),
+        &[
+            (8, 0, 1, Some(HOLDER)),
+            (30, 0, 1, Some(NEXT_OWNER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        60,
+    )
+}
+
+/// The holder sends the wrapped token to the Graveyard (an ERC1155 holder) while the NameWrapper
+/// owns the record. The Graveyard controls the name from then on, but nothing is released until
+/// a Graveyard registry write, which is the claim. The sender is the holder.
+fn a_wrapped_subname_sent_to_the_graveyard_is_released_at_the_clear_to_its_sender() -> Row {
+    row(
+        subname().handed_off_at(60),
+        &then(
+            &WRAP,
+            &[
+                Transfer(40, 0, 1, WRAPPED, GRAVEYARD),
+                Write(60, 0, 2, GRAVEYARD),
+            ],
+        ),
+        &[
+            (8, 0, 1, Some(HOLDER)),
+            (40, 0, 1, IN_GRAVEYARD),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The Graveyard's re-parent of a wrapped subname without `PARENT_CANNOT_CONTROL` under a locked
+/// parent it holds: the NameWrapper's `setSubnodeRecord` on the wrapped child writes the record
+/// to the NameWrapper and transfers the token to the Graveyard, then `unwrap` burns it and writes
+/// the record to the Graveyard. The wrap's holder is the lapsed holder.
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L621-L628 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L403-L415 @ ens_v1@91c966f)
+const RE_PARENT: [Step; 5] = [
+    Write(8, 0, 1, NAME_WRAPPER),
+    Mint(8, 0, 2, WRAPPED, HOLDER),
+    Write(60, 0, 0, NAME_WRAPPER),
+    Transfer(60, 0, 1, WRAPPED, GRAVEYARD),
+    Write(60, 0, 3, GRAVEYARD),
+];
+const RE_PARENT_TRACE: [(i64, i64, i64, Option<&str>); 4] = [
+    (8, 0, 1, Some(HOLDER)),
+    (60, 0, 0, Some(HOLDER)),
+    (60, 0, 1, IN_GRAVEYARD),
+    (60, 0, 3, IN_GRAVEYARD),
+];
+
+fn a_re_parented_wrapped_subname_is_released_to_its_wrapped_holder() -> Row {
+    row(
+        subname().handed_off_at(60),
+        &RE_PARENT,
+        &RE_PARENT_TRACE,
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// The same re-parent of an unwrapped child: `setSubnodeRecord` writes the record to the
+/// NameWrapper and mints the token to the Graveyard, then `unwrap`.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L611-L619 @ ens_v1@91c966f)
+fn an_unwrapped_subname_re_parented_by_the_graveyard_is_released_to_its_owner() -> Row {
+    row(
+        subname(),
+        &[
+            Write(20, 0, 2, NEXT_OWNER),
+            Write(90, 0, 0, NAME_WRAPPER),
+            Mint(90, 0, 1, REWRAPPED, GRAVEYARD),
+            Write(90, 0, 4, GRAVEYARD),
+        ],
+        &[
+            (20, 0, 2, Some(NEXT_OWNER)),
+            (90, 0, 0, IN_GRAVEYARD),
+            (90, 0, 4, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        90,
+    )
+}
+
+/// A later `clear` re-parents the cleared subname again under a new wrap. The Graveyard's
+/// control carries.
+fn a_re_parented_subname_cleared_again_keeps_the_first_claim_and_its_holder() -> Row {
+    row(
+        subname().handed_off_at(90),
+        &then(
+            &RE_PARENT,
+            &[
+                Write(90, 0, 0, NAME_WRAPPER),
+                Mint(90, 0, 1, REWRAPPED, GRAVEYARD),
+                Write(90, 0, 3, GRAVEYARD),
+            ],
+        ),
+        &then(
+            &RE_PARENT_TRACE,
+            &[(90, 0, 0, IN_GRAVEYARD), (90, 0, 3, IN_GRAVEYARD)],
+        ),
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// A subname the Graveyard holds under a wrapped parent `NEXT_OWNER` owns. In one transaction
+/// `NEXT_OWNER` has the NameWrapper write the record to itself and mint the token to the
+/// Graveyard (`setSubnodeRecord`), moves the token to itself (`setSubnodeOwner` on the now
+/// wrapped child, which writes no record), and unwraps it to the Graveyard. `NEXT_OWNER`
+/// controlled it in between.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L585 @ ens_v1@91c966f)
+fn a_held_child_minted_to_the_graveyard_then_taken_out_starts_a_new_hold() -> Row {
+    row(
+        subname(),
+        &[
+            Write(5, 0, 2, HOLDER),
+            Write(60, 0, 2, GRAVEYARD),
+            Write(90, 0, 0, NAME_WRAPPER),
+            Mint(90, 0, 1, REWRAPPED, GRAVEYARD),
+            Transfer(90, 0, 3, REWRAPPED, NEXT_OWNER),
+            Write(90, 0, 6, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+            (90, 0, 0, IN_GRAVEYARD),
+            (90, 0, 3, Some(NEXT_OWNER)),
+            (90, 0, 6, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        90,
+    )
+}
+
+/// The wrapped parent's owner wraps the held child to itself (`setSubnodeOwner`), sends the
+/// token to the Graveyard, then, owning the unwrapped parent, writes the child's record to the
+/// Graveyard through the registry.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+fn a_held_child_taken_out_then_sent_back_to_the_graveyard_starts_a_new_hold() -> Row {
+    row(
+        subname(),
+        &[
+            Write(5, 0, 2, HOLDER),
+            Write(60, 0, 2, GRAVEYARD),
+            Write(90, 0, 0, NAME_WRAPPER),
+            Mint(90, 0, 1, REWRAPPED, NEXT_OWNER),
+            Transfer(90, 0, 3, REWRAPPED, GRAVEYARD),
+            Write(90, 0, 6, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+            (90, 0, 0, Some(NEXT_OWNER)),
+            (90, 0, 3, IN_GRAVEYARD),
+            (90, 0, 6, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        90,
+    )
+}
+
+/// The first two steps of a re-parent in one transaction (the record written to the NameWrapper
+/// and the token minted to the Graveyard), the write back to the Graveyard in a later one.
+fn a_held_child_minted_to_the_graveyard_and_written_back_later_keeps_the_first_claim() -> Row {
+    row(
+        subname(),
+        &[
+            Write(5, 0, 2, HOLDER),
+            Write(60, 0, 2, GRAVEYARD),
+            Write(90, 0, 0, NAME_WRAPPER),
+            Mint(90, 0, 1, REWRAPPED, GRAVEYARD),
+            Write(95, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+            (90, 0, 0, IN_GRAVEYARD),
+            (95, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// A wrapped subname unwrapped to `NEXT_OWNER` (`unwrap`: the token is burned, then the record
+/// written), which `NEXT_OWNER` writes to the Graveyard.
+const UNWRAPPED_THEN_HELD: [Step; 4] = [
+    Write(8, 0, 1, NAME_WRAPPER),
+    Mint(8, 0, 2, WRAPPED, HOLDER),
+    Write(20, 0, 2, NEXT_OWNER),
+    Write(60, 0, 2, GRAVEYARD),
+];
+const UNWRAPPED_THEN_HELD_TRACE: [(i64, i64, i64, Option<&str>); 3] = [
+    (8, 0, 1, Some(HOLDER)),
+    (20, 0, 2, Some(NEXT_OWNER)),
+    (60, 0, 2, IN_GRAVEYARD),
+];
+
+/// Then the parent writes the held child's record to the NameWrapper through the registry
+/// (`setSubnodeOwner`), which wraps nothing, and to the Graveyard, in one transaction. No one
+/// controlled the name in between.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+fn a_name_wrapper_write_with_no_wrap_starts_a_new_hold_with_no_holder() -> Row {
+    row(
+        subname(),
+        &then(
+            &UNWRAPPED_THEN_HELD,
+            &[Write(90, 0, 0, NAME_WRAPPER), Write(90, 0, 2, GRAVEYARD)],
+        ),
+        &then(
+            &UNWRAPPED_THEN_HELD_TRACE,
+            &[(90, 0, 0, None), (90, 0, 2, IN_GRAVEYARD)],
+        ),
+        None,
+        90,
+    )
+}
+
+/// The same with the bare write and the clear in two transactions: the old wrap's holder lost
+/// control at the unwrap and is no holder.
+fn an_old_wraps_holder_is_not_the_holder_after_a_bare_name_wrapper_write() -> Row {
+    row(
+        subname(),
+        &then(
+            &UNWRAPPED_THEN_HELD,
+            &[Write(80, 0, 2, NAME_WRAPPER), Write(90, 0, 2, GRAVEYARD)],
+        ),
+        &then(
+            &UNWRAPPED_THEN_HELD_TRACE,
+            &[(80, 0, 2, None), (90, 0, 2, IN_GRAVEYARD)],
+        ),
+        None,
+        90,
+    )
+}
+
+/// A wrapped subname unwrapped to `NEXT_OWNER`, who writes the record to the NameWrapper with
+/// `setOwner` in the same transaction, then the clear. The old wrap's holder is not revived.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L403-L415 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+fn an_unwrap_and_a_bare_name_wrapper_write_in_one_transaction_name_no_holder() -> Row {
+    row(
+        subname(),
+        &[
+            Write(8, 0, 1, NAME_WRAPPER),
+            Mint(8, 0, 2, WRAPPED, HOLDER),
+            Write(80, 0, 0, NEXT_OWNER),
+            Write(80, 0, 1, NAME_WRAPPER),
+            Write(90, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (8, 0, 1, Some(HOLDER)),
+            (80, 0, 0, Some(NEXT_OWNER)),
+            (80, 0, 1, None),
+            (90, 0, 2, IN_GRAVEYARD),
+        ],
+        None,
+        90,
+    )
+}
+
+/// The owner writes the subname's record to the NameWrapper with `setOwner`, which wraps
+/// nothing. Later the Graveyard's re-parent finds no wrapped token, writes the record to the
+/// NameWrapper again, mints the token to itself and unwraps it. The owner lost control at its
+/// bare write, so there is no holder.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L611-L619 @ ens_v1@91c966f)
+fn a_bare_name_wrapper_write_then_a_re_parent_names_no_holder() -> Row {
+    row(
+        subname(),
+        &[
+            Write(20, 0, 2, HOLDER),
+            Write(80, 0, 2, NAME_WRAPPER),
+            Write(90, 0, 0, NAME_WRAPPER),
+            Mint(90, 0, 1, REWRAPPED, GRAVEYARD),
+            Write(90, 0, 4, GRAVEYARD),
+        ],
+        &[
+            (20, 0, 2, Some(HOLDER)),
+            (80, 0, 2, None),
+            (90, 0, 0, IN_GRAVEYARD),
+            (90, 0, 4, IN_GRAVEYARD),
+        ],
+        None,
+        90,
+    )
+}
+
+/// The owner wraps the subname with the Graveyard as the wrapped owner (`wrap`), and the
+/// Graveyard, holding the parent, clears it. The owner handed it to the Graveyard.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L375 @ ens_v1@91c966f)
+fn a_subname_its_holder_wrapped_to_the_graveyard_names_that_holder() -> Row {
+    row(
+        subname(),
+        &[
+            Write(20, 0, 2, NEXT_OWNER),
+            Write(80, 0, 2, NAME_WRAPPER),
+            Mint(80, 0, 3, REWRAPPED, GRAVEYARD),
+            Write(90, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (20, 0, 2, Some(NEXT_OWNER)),
+            (80, 0, 2, IN_GRAVEYARD),
+            (90, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        90,
+    )
+}
+
+/// A once-wrapped subname's owner writes its record to the NameWrapper with `setOwner`, which
+/// wraps nothing, and the Graveyard clears it. No one controlled it at the clear.
+fn a_bare_name_wrapper_write_by_the_owner_names_no_holder() -> Row {
+    row(
+        subname(),
+        &[
+            Write(8, 0, 1, NAME_WRAPPER),
+            Mint(8, 0, 2, WRAPPED, HOLDER),
+            Write(20, 0, 2, NEXT_OWNER),
+            Write(80, 0, 2, NAME_WRAPPER),
+            Write(90, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (8, 0, 1, Some(HOLDER)),
+            (20, 0, 2, Some(NEXT_OWNER)),
+            (80, 0, 2, None),
+            (90, 0, 2, IN_GRAVEYARD),
+        ],
+        None,
+        90,
+    )
+}
+
+/// The owner sets the record to `NEXT_OWNER` and calls `clear` in one transaction.
+fn a_record_set_earlier_in_the_claims_transaction_names_the_holder() -> Row {
+    row(
+        subname(),
+        &[
+            Write(5, 0, 2, HOLDER),
+            Write(60, 0, 0, NEXT_OWNER),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 0, Some(NEXT_OWNER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        60,
+    )
+}
+
+/// `clear` writes a subname of a name it holds again each time it runs.
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L170-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
+fn a_repeated_graveyard_write_keeps_the_first_claim_and_its_holder() -> Row {
+    row(
+        subname(),
+        &[
+            Write(5, 0, 2, HOLDER),
+            Write(60, 0, 2, GRAVEYARD),
+            Write(90, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+            (90, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(HOLDER),
+        60,
+    )
+}
+
+/// A wrapped subname unwrapped to `NEXT_OWNER` (or its record overwritten by the parent's
+/// `setSubnodeOwner`, which leaves the same rows), then cleared.
+fn an_unwrapped_subname_cleared_later_keeps_its_registry_owner() -> Row {
+    row(
+        subname().handed_off_at(20),
+        &UNWRAPPED_THEN_HELD,
+        &UNWRAPPED_THEN_HELD_TRACE,
+        Some(NEXT_OWNER),
+        60,
+    )
+}
+
+/// The parent's owner retakes the held child (`setSubnodeOwner`) and surrenders it to the
+/// Graveyard in one transaction. The parent's owner controlled it in between, so the Graveyard's
+/// control restarts.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+fn a_parent_retaking_and_surrendering_a_held_child_starts_a_new_hold() -> Row {
+    row(
+        subname(),
+        &[
+            Write(5, 0, 2, HOLDER),
+            Write(60, 0, 2, GRAVEYARD),
+            Write(90, 0, 0, PARENT_OWNER),
+            Write(90, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 2, Some(HOLDER)),
+            (60, 0, 2, IN_GRAVEYARD),
+            (90, 0, 0, Some(PARENT_OWNER)),
+            (90, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(PARENT_OWNER),
+        90,
+    )
+}
+
+/// The parent deletes the wrapped child (`setSubnodeOwner` to zero: `_updateName` unwraps it to
+/// zero, which burns the token and writes the record to zero), then the clear. No one controlled
+/// it at the clear.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L927-L948 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+fn a_deleted_wrapped_subname_cleared_later_names_no_holder() -> Row {
+    row(
+        subname(),
+        &then(
+            &WRAP,
+            &[Write(30, 0, 2, ZERO_ADDRESS), Write(60, 0, 2, GRAVEYARD)],
+        ),
+        &[
+            (8, 0, 1, Some(HOLDER)),
+            (30, 0, 2, None),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        None,
+        60,
+    )
+}
+
+/// The parent overwrites a wrapped child's record (`setSubnodeOwner` through the registry), which
+/// ends the wrap and leaves its token stale, then writes it to the NameWrapper. On chain the stale
+/// token is live again (`_isWrapped` reads the registry owner), and the Graveyard's re-parent
+/// transfers it to the Graveyard. The adapter records no transfer of a token whose NameWrapper
+/// authority a registry write ended (adapters `state.rs` `transfer_v1_wrapper_owner`,
+/// `wrapper/transfer.rs`), so that transfer has no row and the record names no one before the
+/// clear. This is a known limit (docs/upstream.md): the served holder is none, where on chain the
+/// stale token's holder controlled the name.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1080 @ ens_v1@91c966f)
+fn a_stale_wrap_revived_by_a_bare_name_wrapper_write_names_no_holder() -> Row {
+    row(
+        subname(),
+        &then(
+            &WRAP,
+            &[
+                Write(20, 0, 2, PARENT_OWNER),
+                Write(40, 0, 2, NAME_WRAPPER),
+                Write(60, 0, 0, NAME_WRAPPER),
+                Write(60, 0, 3, GRAVEYARD),
+            ],
+        ),
+        &[
+            (8, 0, 1, Some(HOLDER)),
+            (20, 0, 2, Some(PARENT_OWNER)),
+            (40, 0, 2, None),
+            (60, 0, 0, None),
+            (60, 0, 3, IN_GRAVEYARD),
+        ],
+        None,
+        60,
+    )
+}
+
+/// The parent moves a wrapped child to `NEXT_OWNER` through the NameWrapper (`setSubnodeRecord`
+/// on the wrapped child rewrites the record, then `_updateName` transfers the token), then the
+/// clear.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L621-L628 @ ens_v1@91c966f)
+fn a_wrapped_child_moved_by_its_parent_is_released_to_the_new_holder() -> Row {
+    row(
+        subname().handed_off_at(60),
+        &then(
+            &WRAP,
+            &[
+                Write(30, 0, 1, NAME_WRAPPER),
+                Transfer(30, 0, 2, WRAPPED, NEXT_OWNER),
+                Write(60, 0, 2, GRAVEYARD),
+            ],
+        ),
+        &[
+            (8, 0, 1, Some(HOLDER)),
+            (30, 0, 1, Some(HOLDER)),
+            (30, 0, 2, Some(NEXT_OWNER)),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        Some(NEXT_OWNER),
+        60,
+    )
+}
+
+/// The parent clears the child to zero through the registry, then the clear.
+fn a_subname_cleared_to_zero_names_no_holder() -> Row {
+    row(
+        subname(),
+        &[
+            Write(5, 0, 2, HOLDER),
+            Write(30, 0, 2, ZERO_ADDRESS),
+            Write(60, 0, 2, GRAVEYARD),
+        ],
+        &[
+            (5, 0, 2, Some(HOLDER)),
+            (30, 0, 2, None),
+            (60, 0, 2, IN_GRAVEYARD),
+        ],
+        None,
+        60,
+    )
+}
+
+custody_rows!(
+    a_lapsed_eth_name_is_released_at_the_claim_to_its_holder,
+    a_lapsed_eth_name_cleared_to_zero_has_no_lapsed_holder,
+    a_wrapped_eth_name_is_released_to_its_wrapped_holder,
+    a_name_registered_wrapped_is_released_to_its_wrapped_holder,
+    a_token_moved_after_its_holders_own_graveyard_write_keeps_the_holder_at_the_write,
+    a_reclaim_and_graveyard_write_in_one_transaction_start_a_new_hold,
+    a_reclaim_then_a_graveyard_write_in_another_transaction_start_a_new_hold,
+    a_reclaim_to_the_graveyard_after_a_token_move_keeps_the_first_claim,
+    a_holders_wrap_and_unwrap_to_the_graveyard_in_one_transaction_start_a_new_hold,
+    a_eth_name_wrapped_to_the_graveyard_then_claimed_keeps_the_first_claim,
+    a_reclaim_then_a_wrap_to_the_graveyard_then_a_claim_names_the_reclaimer,
+    a_record_set_in_the_claims_transaction_names_the_token_holder,
+    a_token_sent_to_the_graveyard_then_claimed_keeps_its_holder,
+    a_token_moved_without_reclaim_names_its_new_holder,
+    a_manager_set_record_names_the_token_holder,
+    a_wrapped_eth_name_transferred_is_released_to_its_new_wrapped_holder,
+    a_wrapped_eth_name_unwrapped_is_released_to_the_unwrapper,
+    a_cleared_subname_is_released_to_its_owner,
+    a_cleared_wrapped_subname_is_released_to_its_wrapped_holder,
+    a_cleared_wrapped_subname_is_released_to_its_new_wrapped_holder,
+    a_wrapped_subname_sent_to_the_graveyard_is_released_at_the_clear_to_its_sender,
+    a_re_parented_wrapped_subname_is_released_to_its_wrapped_holder,
+    an_unwrapped_subname_re_parented_by_the_graveyard_is_released_to_its_owner,
+    a_re_parented_subname_cleared_again_keeps_the_first_claim_and_its_holder,
+    a_held_child_minted_to_the_graveyard_then_taken_out_starts_a_new_hold,
+    a_held_child_taken_out_then_sent_back_to_the_graveyard_starts_a_new_hold,
+    a_held_child_minted_to_the_graveyard_and_written_back_later_keeps_the_first_claim,
+    a_name_wrapper_write_with_no_wrap_starts_a_new_hold_with_no_holder,
+    an_old_wraps_holder_is_not_the_holder_after_a_bare_name_wrapper_write,
+    an_unwrap_and_a_bare_name_wrapper_write_in_one_transaction_name_no_holder,
+    a_bare_name_wrapper_write_then_a_re_parent_names_no_holder,
+    a_subname_its_holder_wrapped_to_the_graveyard_names_that_holder,
+    a_bare_name_wrapper_write_by_the_owner_names_no_holder,
+    a_record_set_earlier_in_the_claims_transaction_names_the_holder,
+    a_repeated_graveyard_write_keeps_the_first_claim_and_its_holder,
+    an_unwrapped_subname_cleared_later_keeps_its_registry_owner,
+    a_parent_retaking_and_surrendering_a_held_child_starts_a_new_hold,
+    a_deleted_wrapped_subname_cleared_later_names_no_holder,
+    a_stale_wrap_revived_by_a_bare_name_wrapper_write_names_no_holder,
+    a_wrapped_child_moved_by_its_parent_is_released_to_the_new_holder,
+    a_subname_cleared_to_zero_names_no_holder,
+);

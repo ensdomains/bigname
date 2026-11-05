@@ -405,6 +405,13 @@ fn before(position: &Position, claim: &OwnerEvent) -> bool {
     place(position) < place(&claim.position)
 }
 
+/// The controller after each custody step of the name. This code has no custody pass, so it
+/// names no step.
+#[cfg(test)]
+pub(super) fn trace(_facts: &NameFacts) -> Vec<(Position, Option<String>)> {
+    Vec::new()
+}
+
 #[cfg(test)]
 #[path = "graveyard_tests.rs"]
 mod tests;
