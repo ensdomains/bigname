@@ -258,6 +258,16 @@ async fn mirror_registry_probe_rows_and_oracle_parity() -> Result<()> {
 /// still reads only the pointer index, in both plan modes with statistics off and on.
 #[tokio::test]
 async fn mirror_registry_probe_custom_walk_on_a_pointer_heavy_chain() -> Result<()> {
+    let started = std::time::Instant::now();
+    let result = mirror_registry_probe_custom_walk_inner().await;
+    let _ = std::io::Write::write_fmt(
+        &mut std::io::stderr(),
+        format_args!("timing | custom walk test | {:?}\n", started.elapsed()),
+    );
+    result
+}
+
+async fn mirror_registry_probe_custom_walk_inner() -> Result<()> {
     with_fixture("mirror_registry_custom_walk", async |connection| {
         raw_sql(POINTER_HEAVY_SQL).execute(&mut *connection).await?;
         let published = BTreeMap::from([(MAINNET.to_owned(), BOUND)]);
@@ -680,3 +690,55 @@ VALUES ('class:unpositioned', 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
         'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
         jsonb_build_object('node', pg_temp.node(202), 'resolver', pg_temp.resolver(202)));
 "#;
+
+/// PROBE ONLY (ci/ branch, never merged): the smallest pointer-heavy step that flips the
+/// previous custom plan, with each step's cost.
+#[tokio::test]
+async fn mirror_registry_probe_scale_bisect() -> Result<()> {
+    use std::io::Write;
+    with_fixture("mirror_registry_scale_bisect", async |connection| {
+        let published = BTreeMap::from([(MAINNET.to_owned(), BOUND)]);
+        let mut done = 0;
+        for target in [150_000, 200_000, 250_000, 300_000, 360_000] {
+            let started = std::time::Instant::now();
+            raw_sql(&format!(
+                "INSERT INTO normalized_events(event_identity, namespace, event_kind, source_family,
+                    manifest_version, chain_id, block_hash, block_number, transaction_hash,
+                    transaction_index, log_index, derivation_kind, canonicality_state, after_state)
+                 SELECT 'bisect:pointer:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+                        'ethereum-mainnet', 'block-' || (100 + n % 30000), 100 + n % 30000,
+                        'tx-bisect-' || n, 1, n % 1000, 'ens_v1_unwrapped_authority',
+                        'canonical'::canonicality_state,
+                        jsonb_build_object('node', '0x' || lpad(to_hex(200000 + n % 2000), 64, '0'),
+                                           'resolver', '0x' || lpad(to_hex(9), 40, '0'))
+                 FROM generate_series({}, {}) n",
+                done + 1,
+                target
+            ))
+            .execute(&mut *connection)
+            .await?;
+            let inserted = started.elapsed();
+            Statistics::Off.apply(connection).await?;
+            let analyzed = started.elapsed();
+            for (label, k) in [("old pointer", CHILD_NODE), ("hot node", HOT_NODE)] {
+                let walk = walk(&[(k, &[])]);
+                let (sql, arguments) = render(&walk, &published)?;
+                let previous = previous_sql(&sql)?;
+                for _ in 0..3 {
+                    let plan = explain(connection, &previous, arguments.clone(), false).await?;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "bisect | extra {target} | insert {inserted:?} | analyze {:?} | {label} | exec {} | {}",
+                        analyzed - inserted,
+                        plan[0]["Execution Time"],
+                        json!(registry_reads(&plan[0]["Plan"]))
+                    );
+                    Statistics::Off.apply(connection).await?;
+                }
+            }
+            done = target;
+        }
+        Ok(())
+    })
+    .await
+}
