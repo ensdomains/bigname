@@ -125,6 +125,7 @@ async fn compose_and_stage(
     publication: &FamilyPublication,
     names: &[String],
 ) -> Result<()> {
+    bigname_storage::stack_probe::mark("address_listing::compose_and_stage");
     for chunk in names.chunks(CHUNK) {
         let rows = compose_address_listing(transaction, publication, chunk)
             .await
@@ -155,6 +156,7 @@ pub(crate) async fn refresh(
     block: &input::BlockHeader,
     work: Work<'_>,
 ) -> Result<Refreshed> {
+    bigname_storage::stack_probe::mark("address_listing::refresh");
     let chain_id = publication.chain_id.as_str();
     let extra: Vec<String> = sqlx::query_scalar(EXTRA)
         .bind(work.touched)
@@ -289,6 +291,7 @@ async fn finish(
     parents: &[String],
     heals_only: bool,
 ) -> Result<Refreshed> {
+    bigname_storage::stack_probe::mark("address_listing::finish");
     scope(transaction, REGISTRY_CHILD, children).await?;
     let mut candidates: Vec<String> = sqlx::query_scalar(UNCOMPOSED)
         .fetch_all(&mut **transaction)
@@ -355,6 +358,7 @@ async fn registry_rows(
     parents: &[String],
     narrowed: Option<(&[String], &[String])>,
 ) -> Result<()> {
+    bigname_storage::stack_probe::mark("address_listing::registry_rows");
     let (sql, arguments) = registry_child_listing_statement(
         head,
         listing,

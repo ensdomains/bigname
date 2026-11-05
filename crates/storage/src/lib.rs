@@ -13,6 +13,7 @@ mod children;
 mod evm_primitives;
 mod expiry;
 pub mod families;
+pub mod stack_probe;
 mod history;
 pub use history::catalogue_contract as history_catalogue_contract;
 pub use history::count_contract as history_count_contract;

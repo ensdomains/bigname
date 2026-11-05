@@ -262,6 +262,7 @@ pub(crate) async fn observe(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<Observed> {
+    bigname_storage::stack_probe::mark("children::observe");
     sources::read(transaction, chain_id).await
 }
 
@@ -276,6 +277,7 @@ pub(crate) async fn work(
     after: i64,
     touched: (&[String], &[String]),
 ) -> Result<(Vec<String>, Vec<String>)> {
+    bigname_storage::stack_probe::mark("children::work");
     work::list(transaction, chain_id, block, after, touched).await
 }
 
@@ -289,6 +291,7 @@ pub(crate) async fn refresh(
     (mut children, parents): (Vec<String>, Vec<String>),
     observed: &Observed,
 ) -> Result<Refreshed> {
+    bigname_storage::stack_probe::mark("children::refresh");
     if !observed.holders.is_empty() {
         children.extend(observed.holders.iter().cloned());
         children.sort();
@@ -333,6 +336,7 @@ async fn derive_with(
     (parents, children): (&[String], &[String]),
     heals_only: bool,
 ) -> Result<Refreshed> {
+    bigname_storage::stack_probe::mark("children::derive_with");
     if parents.is_empty() && children.is_empty() {
         return Ok(Refreshed::default());
     }

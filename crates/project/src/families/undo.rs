@@ -28,6 +28,7 @@ pub(crate) async fn undo_block(
     expected: &FamilyMarker,
     attempt: i64,
 ) -> Result<Option<FamilyMarker>> {
+    bigname_storage::stack_probe::mark("undo::undo_block");
     let Some(current) = expected.current.as_ref() else {
         return Ok(None);
     };

@@ -34,6 +34,7 @@ impl ChainInputs {
         clock_seconds: i64,
         roles: RoleHolderLoad<'_>,
     ) -> Result<Self> {
+    crate::stack_probe::mark("storage::ChainInputs::load");
         let composed: Vec<&NameCurrentRow> = composed.into_iter().collect();
         let ids: Vec<String> = composed
             .iter()

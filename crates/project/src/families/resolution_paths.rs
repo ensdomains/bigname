@@ -47,6 +47,7 @@ pub(super) async fn refresh(
     block: &BlockHeader,
     composition: &super::marker::Composition,
 ) -> Result<(u64, u64)> {
+    bigname_storage::stack_probe::mark("resolution_paths::refresh");
     let publication = super::marker::publication(chain, block, composition)?;
     let mut after = String::new();
     let mut written = (0, 0);
