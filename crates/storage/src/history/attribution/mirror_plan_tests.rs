@@ -11,8 +11,11 @@
 //! through a bitmap of the chain-and-block index over every block up to the bound. The plan test
 //! checks that it still does, so the fixture keeps proving something, and that the fenced
 //! statement reads only the pointer index, never the chain-and-block index, in both plan modes
-//! with statistics off and on. The row test pins each input class to its selected pointer and to
-//! the previous statement's rows.
+//! with statistics off and on. A second fixture adds enough unrelated pointers that they are most
+//! of the chain's rows. There the previous statement's custom plan walks the chain's rows newest
+//! first on the chain-and-block index until the walked node's pointer, and the fenced statement
+//! still reads only the pointer index. The row test pins each input class to its selected pointer
+//! and to the previous statement's rows.
 
 use std::collections::BTreeMap;
 
@@ -241,6 +244,78 @@ async fn mirror_registry_probe_rows_and_oracle_parity() -> Result<()> {
         ensure!(
             failures.is_empty(),
             "mirror registry rows:\n{}",
+            failures.join("\n\n")
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// The custom-plan walk itself, on a chain where ENSv1 pointers are most of the rows: 360,000 more
+/// unrelated pointers over 2,000 other nodes. There, with the default selectivity for the node
+/// equality, the previous statement's custom plan walks the chain's rows newest first on the
+/// chain-and-block index and filters them until the walked node's pointer. The fenced statement
+/// still reads only the pointer index, in both plan modes with statistics off and on.
+#[tokio::test]
+async fn mirror_registry_probe_custom_walk_on_a_pointer_heavy_chain() -> Result<()> {
+    with_fixture("mirror_registry_custom_walk", async |connection| {
+        raw_sql(POINTER_HEAVY_SQL).execute(&mut *connection).await?;
+        let published = BTreeMap::from([(MAINNET.to_owned(), BOUND)]);
+        let mut failures = Vec::new();
+        for statistics in [Statistics::Off, Statistics::On] {
+            statistics.apply(connection).await?;
+            for (label, k) in [("old pointer", CHILD_NODE), ("hot node", HOT_NODE)] {
+                let walk = walk(&[(k, &[])]);
+                let (sql, arguments) = render(&walk, &published)?;
+                let previous = previous_sql(&sql)?;
+                for generic in [false, true] {
+                    let mode = if generic {
+                        "generic plan"
+                    } else {
+                        "custom plan"
+                    };
+                    let cell = format!(
+                        "pointer-heavy chain, {}, {mode}, {label}",
+                        statistics.label()
+                    );
+                    let plan = explain(connection, &sql, arguments.clone(), generic).await?;
+                    let reads = registry_reads(&plan[0]["Plan"]);
+                    println!("{cell}: {}", json!(reads));
+                    if reads.is_empty()
+                        || reads
+                            .iter()
+                            .any(|read| read["indexes"] != json!([POINTER_INDEX]))
+                    {
+                        failures.push(format!(
+                            "{cell}: the registry pointer read is not on {POINTER_INDEX} alone: \
+                             {}",
+                            json!(reads)
+                        ));
+                    }
+                    if statistics == Statistics::Off && !generic {
+                        let before =
+                            explain(connection, &previous, arguments.clone(), false).await?;
+                        let before_reads = registry_reads(&before[0]["Plan"]);
+                        println!("{cell}, previous statement: {}", json!(before_reads));
+                        if !before_reads.iter().any(|read| {
+                            read["type"] == "Index Scan"
+                                && read["indexes"]
+                                    == json!(["normalized_events_chain_block_number_desc_idx"])
+                                && read["removed"].as_f64().unwrap_or(0.0) >= 100_000.0
+                        }) {
+                            failures.push(format!(
+                                "{cell}: the previous statement no longer walks the \
+                                 chain-and-block index here, so this fixture proves nothing \
+                                 about it"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "mirror registry plans on a pointer-heavy chain:\n{}",
             failures.join("\n\n")
         );
         Ok(())
@@ -500,6 +575,20 @@ async fn with_fixture(
     database.cleanup().await?;
     result
 }
+
+/// 360,000 more unrelated ENSv1 pointers over 2,000 other nodes, in blocks the fixture's lineage
+/// already has.
+const POINTER_HEAVY_SQL: &str = r#"
+INSERT INTO normalized_events(event_identity, namespace, event_kind, source_family, manifest_version,
+    chain_id, block_hash, block_number, transaction_hash, transaction_index, log_index,
+    derivation_kind, canonicality_state, after_state)
+SELECT 'heavy:pointer:' || n, 'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1, 'ethereum-mainnet',
+       'block-' || (100 + n % 30000), 100 + n % 30000, 'tx-heavy-' || n, 1, n % 1000,
+       'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
+       jsonb_build_object('node', '0x' || lpad(to_hex(200000 + n % 2000), 64, '0'),
+                          'resolver', '0x' || lpad(to_hex(9), 40, '0'))
+FROM generate_series(1, 360000) n;
+"#;
 
 /// Lineage for blocks 1..=30200 with one orphaned block hash at 90. Name k has namehash k as 32
 /// bytes of hex, raw labels `n<k>.eth`, and the resolver k as 20 bytes of hex. Names 0xc1 and
