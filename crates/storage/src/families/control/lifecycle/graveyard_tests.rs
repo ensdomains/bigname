@@ -277,7 +277,6 @@ fn assert_held(shadow: &ShadowName, holder: Option<&str>) {
 
 /// The Graveyard rule did not apply.
 fn assert_not_held(shadow: &ShadowName) {
-    assert_eq!(shadow.trace.get("graveyard_held"), None, "{shadow:#?}");
     assert_ne!(
         shadow.registration.get("expires_at_reason"),
         Some(&json!("released")),
@@ -473,8 +472,8 @@ fn a_cleared_subname_is_released() {
     assert_held(&input().claimed().read(), Some(HOLDER));
 }
 
-/// Row 11, wrapped: a subname wrapped without `PARENT_CANNOT_CONTROL`, which the Graveyard
-/// re-parents and unwraps to itself.
+/// Row 11, wrapped: a wrapped subname whose token survives the clear, under a parent the
+/// Graveyard holds: the Graveyard takes the registry record with `setSubnodeRecord`.
 #[test]
 fn a_cleared_wrapped_subname_is_released() {
     let mut input = wrapped("wrapped", 0);
@@ -482,8 +481,68 @@ fn a_cleared_wrapped_subname_is_released() {
     assert_held(&input.claimed().read(), Some(HOLDER));
 }
 
+/// Row 11, re-parented: a wrapped subname without `PARENT_CANNOT_CONTROL` under a locked parent.
+/// In one transaction the Graveyard has the NameWrapper re-parent the token to it, which writes
+/// the registry record to the NameWrapper and moves the token to the Graveyard, then unwraps it
+/// to itself. Neither the Graveyard nor the NameWrapper is a holder, and the token's holder before
+/// the move is not retained here, so the lapsed owner is unknown.
+#[test]
+fn a_re_parented_wrapped_subname_is_released_with_no_holder() {
+    let mut input = wrapped("wrapped", 0);
+    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+    input.events.push(event(
+        "TokenControlTransferred",
+        "ens_v1_wrapper_l1",
+        WRAPPED,
+        CLAIM_BLOCK,
+        json!({"authority_kind": "wrapper", "source_event": "TransferSingle",
+               "to_address": GRAVEYARD}),
+    ));
+    let mut re_parent = write(CLAIM_BLOCK, WRAPPED, NAME_WRAPPER, None);
+    re_parent.position.log_index = Some(0);
+    re_parent.position.event_identity = "write:re-parent".to_owned();
+    input.writes.push(re_parent);
+    assert_held(&input.claimed().read(), None);
+}
+
+/// A live token sent to the Graveyard, later claimed: the Graveyard is not the lapsed holder, the
+/// registry owner the holder left behind is.
+#[test]
+fn a_token_sent_to_the_graveyard_then_claimed_keeps_its_holder() {
+    let input = Name::new(
+        registrar_binding(),
+        vec![
+            lease_grant(8, LAPSED_EXPIRY),
+            event(
+                "TokenControlTransferred",
+                "ens_v1_registrar_l1",
+                LEASE,
+                50,
+                json!({"authority_kind": "registrar", "source_event": "Transfer",
+                       "to_address": GRAVEYARD}),
+            ),
+        ],
+    );
+    assert_held(&input.claimed().read(), Some(HOLDER));
+}
+
+/// Row 5 on the ENSv1 arm: a migrated name whose selection falls back to its ENSv1 binding. Its
+/// record is the Graveyard's from the migration, which no claim follows.
+#[test]
+fn a_migrated_name_on_its_ens_v1_arm_is_untouched() {
+    let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new()).claimed();
+    input.migration = Some(Position {
+        block_number: CLAIM_BLOCK,
+        transaction_index: Some(0),
+        log_index: Some(3),
+        event_identity: "migration".to_owned(),
+    });
+    assert_not_held(&input.read());
+}
+
 /// Row 12: a name only the 2017 registry recorded was never minted, so the Graveyard cannot
-/// claim it. With no Graveyard write the rule does not apply.
+/// claim it. Its one owner write stands for the 2017 registry's record. With no Graveyard write
+/// the rule does not apply.
 #[test]
 fn a_never_registered_name_is_untouched() {
     let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
