@@ -2558,8 +2558,9 @@ Graveyard is served as an ended registration, whatever its lease or its schedule
 - `expires_at` is `null` with `expires_at_reason: released`, and `grace_ends_at` is `null`;
 - `ens_v1.expires_at` is `null`: the Graveyard's far-future expiry is not a holder's lease;
 - there is no `owner` or `manager`;
-- `lapsed_registration.owner` is the name's holder before the claim, its lease's holder, or for
-  a name with no lease the owner its registry record had. `released_at` is the block time of the
+- `lapsed_registration.owner` is the name's holder before the claim: its lease's holder, for a
+  wrapped name the NameWrapper token's holder before the claim's transaction, or for a name with
+  neither the owner its registry record had. `released_at` is the block time of the
   Graveyard's write, and `release_kind` is `expired`.
 
 `registered_at` and `registration_id` keep the registration that ended. A label later

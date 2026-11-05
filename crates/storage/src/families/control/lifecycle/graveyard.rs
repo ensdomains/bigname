@@ -56,6 +56,7 @@ pub(super) fn apply(
     let graveyard = write.owner_getter.as_deref();
     let holder = registrant
         .filter(|holder| holder != ZERO_ADDRESS && Some(holder.as_str()) != graveyard)
+        .or_else(|| wrapped_holder(facts, write, graveyard))
         .or_else(|| prior_holder(facts, write));
     for field in [
         "expiry",
@@ -79,6 +80,62 @@ pub(super) fn apply(
             *value = Value::Null;
         }
     }
+}
+
+/// The holder a wrapped name's NameWrapper events name last before the claim's transaction: the
+/// wrap's or a renewal's registrant, or a token transfer's recipient. A cleared wrapped subname's
+/// registry write names the Graveyard, which ends the NameWrapper authority and opens a
+/// registry-only binding (adapters `wrapper_custody.rs`), so the registration laterals of that
+/// binding read no NameWrapper event. A re-parent moves the token to the Graveyard in the claim's
+/// own transaction. Zero, the Graveyard and the NameWrapper are no holder.
+fn wrapped_holder(
+    facts: &NameFacts,
+    claim: &OwnerEvent,
+    graveyard: Option<&str>,
+) -> Option<String> {
+    let claim_transaction = (
+        claim.position.block_number,
+        claim.position.transaction_index,
+    );
+    let wrappers: Vec<_> = facts
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.authority_kind.as_deref() == Some("wrapper"))
+        .collect();
+    let holder = facts
+        .events
+        .iter()
+        .filter(|event| {
+            event.source_family == "ens_v1_wrapper_l1"
+                && matches!(
+                    event.event_kind.as_str(),
+                    "RegistrationGranted" | "RegistrationRenewed" | "TokenControlTransferred"
+                )
+                && wrappers.iter().any(|wrapper| {
+                    event.resource_id.as_deref() == Some(wrapper.resource_id.as_str())
+                })
+                && (
+                    event.position.block_number,
+                    event.position.transaction_index,
+                ) < claim_transaction
+        })
+        .max_by(|left, right| left.position.cmp(&right.position))
+        .and_then(|event| {
+            if event.event_kind == "TokenControlTransferred" {
+                event.to_address.clone()
+            } else {
+                event.registrant.clone()
+            }
+        })?;
+    let not_a_holder = |address: Option<&str>| {
+        address.is_some_and(|address| address.eq_ignore_ascii_case(&holder))
+    };
+    (!not_a_holder(Some(ZERO_ADDRESS))
+        && !not_a_holder(graveyard)
+        && !wrappers
+            .iter()
+            .any(|wrapper| not_a_holder(wrapper.emitting_address.as_deref())))
+    .then_some(holder)
 }
 
 /// The holder of a name with no other holder: the owner its newest registry write before the
