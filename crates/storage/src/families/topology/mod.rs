@@ -17,6 +17,7 @@ mod registry_children;
 mod shims;
 
 pub use children::ListingBlock;
+pub(crate) use children::stored_spelling;
 pub use children_page::{
     FamilyChildRow, FamilyChildrenPage, count_children_shadow, load_children_shadow_page,
 };
@@ -45,4 +46,5 @@ pub use pointers::{
 pub(crate) use registry_children::{
     RegistryChildRow, load_owned_registry_children, published_surface_exists,
 };
+pub use registry_children::{registry_child_listing_statement, registry_child_parents};
 pub(crate) use shims::{rendered_lateral_sql, textless_surface_sql, textless_surfaces_exist_sql};

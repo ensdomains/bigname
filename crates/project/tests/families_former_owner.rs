@@ -117,6 +117,19 @@ async fn registered(fixture: &Fixture, name: &str, n: u32) -> Result<(String, St
     Ok((logical_name_id, resource))
 }
 
+/// The stored former-owner rows of `logical_name_id` in the address listing (F18): (address,
+/// former expiry key).
+async fn former_rows(fixture: &Fixture, logical_name_id: &str) -> Result<Vec<(String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT address, former_expires_key::text FROM project_address_listing
+         WHERE chain_id = $1 AND logical_name_id = $2 AND former_owner ORDER BY address",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
 async fn registration(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
     let row = load_family_name(&fixture.pool, logical_name_id)
         .await?
@@ -156,6 +169,13 @@ async fn an_expired_ens_v2_registration_names_its_last_holder_until_it_is_regist
             && released["grace_ends_at"] == json!(EXPIRY.to_string()),
         "{released}"
     );
+    // Rows 15w and 16 of TYR-127: the address listing lists the last holder as the former owner,
+    // keyed by the served expiry.
+    let former = former_rows(&fixture, &name).await?;
+    ensure!(
+        former == [(BOB.to_owned(), EXPIRY.to_string())],
+        "the listing lists the last holder as former owner: {former:?}"
+    );
 
     // CAROL registers it again: no former holder remains.
     fixture
@@ -177,6 +197,11 @@ async fn an_expired_ens_v2_registration_names_its_last_holder_until_it_is_regist
     ensure!(
         again.get("lapsed_registration").is_none_or(Value::is_null),
         "{again}"
+    );
+    let former = former_rows(&fixture, &name).await?;
+    ensure!(
+        former.is_empty(),
+        "the re-registration drops the former owner row: {former:?}"
     );
     fixture.cleanup().await
 }
