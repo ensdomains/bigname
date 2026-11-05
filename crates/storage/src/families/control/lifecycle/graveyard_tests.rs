@@ -104,6 +104,18 @@ fn binding(resource: &str, block: i64, extra: Value) -> BindingCandidate {
     BindingCandidate::from_row(&row).expect("candidate decodes")
 }
 
+/// The registry-only binding a current-registry record opens at `block`, with the state-derived
+/// SurfaceBound that gives the name its `registry_only` authority.
+fn registry_only(block: i64) -> BindingCandidate {
+    binding(
+        REGISTRY_ONLY,
+        block,
+        json!({"state_derived": true,
+               "surface_bound_position": {"block_number": block, "transaction_index": 0,
+                                          "log_index": 0, "event_identity": "surface-bound"}}),
+    )
+}
+
 fn registrar_binding() -> BindingCandidate {
     binding(
         LEASE,
@@ -288,7 +300,7 @@ fn assert_not_held(shadow: &ShadowName) {
 /// binding, serves `active` with its registry owner until the claim.
 #[test]
 fn a_migrated_name_with_no_lease_row_is_released_by_the_claim() {
-    let input = || Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
+    let input = || Name::new(registry_only(HANDOFF), Vec::new());
     let unclaimed = input().read();
     assert_eq!(field(&unclaimed.registration, "lifecycle_status"), "active");
     assert_eq!(field(&unclaimed.control, "owner"), HOLDER);
@@ -301,7 +313,7 @@ fn a_migrated_name_with_no_lease_row_is_released_by_the_claim() {
 fn a_migrated_name_with_its_2020_lease_is_released_with_no_expiry() {
     let input = || {
         Name::new(
-            binding(REGISTRY_ONLY, HANDOFF, json!({})),
+            registry_only(HANDOFF),
             vec![lease_grant(12, MIGRATION_EXPIRY)],
         )
     };
@@ -344,7 +356,7 @@ fn a_released_named_lease_is_released_at_the_claim_with_no_expiry() {
 /// registry-only binding again, and nobody held it when it was claimed.
 #[test]
 fn a_record_cleared_before_the_claim_is_released_with_no_holder() {
-    let mut input = Name::new(binding(REGISTRY_ONLY, CLAIM_BLOCK, json!({})), Vec::new());
+    let mut input = Name::new(registry_only(CLAIM_BLOCK), Vec::new());
     input
         .writes
         .push(write(20, REGISTRY_ONLY, ZERO_ADDRESS, Some("literal_zero")));
@@ -462,7 +474,7 @@ fn a_locked_wrapped_name_is_released_with_its_token_holder_as_the_lapsed_owner()
 #[test]
 fn a_cleared_subname_is_released() {
     let input = || {
-        let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
+        let mut input = Name::new(registry_only(HANDOFF), Vec::new());
         input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
         input
     };
@@ -530,7 +542,7 @@ fn a_token_sent_to_the_graveyard_then_claimed_keeps_its_holder() {
 /// record is the Graveyard's from the migration, which no claim follows.
 #[test]
 fn a_migrated_name_on_its_ens_v1_arm_is_untouched() {
-    let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new()).claimed();
+    let mut input = Name::new(registry_only(HANDOFF), Vec::new()).claimed();
     input.migration = Some(Position {
         block_number: CLAIM_BLOCK,
         transaction_index: Some(0),
@@ -545,7 +557,7 @@ fn a_migrated_name_on_its_ens_v1_arm_is_untouched() {
 /// the rule does not apply.
 #[test]
 fn a_never_registered_name_is_untouched() {
-    let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
+    let mut input = Name::new(registry_only(HANDOFF), Vec::new());
     input.has_old_record = true;
     input.first_current_record_block = None;
     assert_not_held(&input.read());
@@ -606,7 +618,7 @@ fn a_live_token_sent_to_the_graveyard_is_untouched() {
 /// its declared start, carries no Graveyard reason and is an ordinary registry owner.
 #[test]
 fn an_undeclared_graveyard_write_is_an_ordinary_owner() {
-    let mut input = Name::new(binding(REGISTRY_ONLY, HANDOFF, json!({})), Vec::new());
+    let mut input = Name::new(registry_only(HANDOFF), Vec::new());
     input
         .writes
         .push(write(CLAIM_BLOCK, REGISTRY_ONLY, GRAVEYARD, None));
