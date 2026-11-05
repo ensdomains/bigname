@@ -374,11 +374,15 @@ jobs:
 
       # `cargo test` has no per-test time limit. In the log of a run cut off here,
       # a test that never finished has a "has been running for over 60 seconds"
-      # line and no result line.
+      # line and no result line. A filter that matches nothing passes with no
+      # test run, so the step fails unless some binary passed a test.
       - name: cargo test
         if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/')
         timeout-minutes: 20
-        run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support ${{ matrix.test_args }}
+        shell: bash
+        run: |
+          cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support ${{ matrix.test_args }} | tee "$RUNNER_TEMP/cargo-test.log"
+          grep -Eq '^test result: .* [1-9][0-9]* passed;' "$RUNNER_TEMP/cargo-test.log" || { echo "::error::cargo test passed no test. Check the entry's test_args filter."; exit 1; }
 
       - name: Report stalled test databases
         if: always() && (github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/'))
