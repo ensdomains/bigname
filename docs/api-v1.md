@@ -1633,7 +1633,11 @@ Rules:
   `mismatch`.
 - `mismatch` is the verification state where a claimed answer verifies to a
   different value.
-- `completeness` is `full`, `partial`, or `unsupported`.
+- `completeness` is `full`, `partial`, or `unsupported`. On the two `GET` records
+  routes it says whether a record inventory an admitted resolver backs stands
+  behind an indexed answer
+  ([`GET /v1/names/{name}/records`](api-v1-routes.md#get-v1namesnamerecords)).
+  Verified answers and `POST /v1/lookup` do not set it.
 - Empty arrays and empty maps mean known-empty, not unknown.
 
 ### Resolver record answers and values

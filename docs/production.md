@@ -49,6 +49,24 @@ for the health-specific concurrency ceiling. `/v2/*` is not served by the
 binary and not admitted by the edge. Phase-runner and PostgreSQL control
 surfaces are not routed through Caddy.
 
+### Edge rules in force
+
+The production edge also refuses the request shapes below before they reach the
+API. These rules are not in `docker/caddy/Caddyfile`, and a self-hosted deployment
+does not need them. Each one protects the API's database connections from a read
+that runs to the statement timeout. Update this list with every matcher change.
+
+| Refused request | Answer | Reason | Exit condition |
+| --- | --- | --- | --- |
+| `/v1/diagnostics/events` and paths below it | `404` | The route runs to the statement timeout. | The route answers inside the statement timeout. |
+| `/v1/names/eth/subnames`, `/v1/names/base.eth/subnames` and paths below them | `400` | A subnames page of the two largest parents runs to the statement timeout, even with `page_size=1`. | Both pages answer inside the statement timeout. |
+| `/v1/events` with `contract_address` and `include=total_count` | `400` | The count over a busy contract runs to the statement timeout. | Retiring: v0.14.5 caps this count in the API. |
+| `/v1/resolvers/*` with `include=total_count` | `400` | The count over a busy resolver runs to the statement timeout. Small resolvers lose the count too. | Retiring: v0.14.7 bounds this count in the API. |
+
+Matching is case-insensitive on the unescaped path. A query test reads the raw
+query string, so a repeated `include` or a percent-encoded underscore in either
+key is still caught.
+
 ### Internal-only versus public URLs
 
 Not every URL the API process answers is a public one. Keep the two sets

@@ -228,8 +228,8 @@ async fn v2_resolver_records_report_the_resolver_inventory() -> Result<()> {
     database.cleanup().await
 }
 
-/// Row 13 and the diagnostics route: neither gains the field. On `POST /v1/lookup` it keeps its
-/// request-scope meaning, and this request's scope is complete.
+/// Row 13 and the diagnostics route: neither gains the field. `POST /v1/lookup` reports its
+/// request scope in `meta.as_of_completeness`, and each input carries its own record answers.
 #[tokio::test]
 async fn v2_lookup_and_the_records_diagnostic_carry_no_inventory_completeness() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
