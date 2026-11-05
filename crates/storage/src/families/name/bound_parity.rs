@@ -39,7 +39,7 @@ pub async fn assert_bound_name_pages_chain(
     resolver_address: &str,
     namespace: Option<&str>,
 ) -> Result<Vec<String>> {
-    // First, so a name the summary lost fails as a missing summary.
+    // First: the pages below read the summary, so a name it lost fails only here.
     assert_stored_bound_fields_are_fresh(pool, chain_id).await?;
     let mut snapshot = crate::begin_read_snapshot(pool).await?;
     let unasked = load_family_bound_names(

@@ -6310,7 +6310,9 @@ Interpret or Ingest redo.
 The build that deletes the walk the bound-name listing replaced
 (`crates/storage/src/families/name/bound_walk.rs`) changes no code that runs and no stored row.
 The walk was compiled only for tests. Its module line is in
-`crates/storage/src/families/name/mod.rs`, an input of the name summary composition.
+`crates/storage/src/families/name/mod.rs`, an input of the name summary composition. The build
+also edits a comment in `crates/storage/src/families/topology/shims.rs`, an input of the child
+listing composition.
 
 - The [projection content hash](glossary.md#projection-content-hash) rotates for every chain,
   although no derived row changes. The
