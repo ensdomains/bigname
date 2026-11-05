@@ -559,6 +559,11 @@ async fn an_undo_below_later_raw_bytes_heals_the_restored_name() -> Result<()> {
         "the undo spells the restored name from the kept preimage: {restored:?}"
     );
     fixture.assert_address_listing(CHAIN).await?;
+    fixture.assert_rebuild_equal(2).await?;
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
     fixture.cleanup().await
 }
 
