@@ -15,6 +15,7 @@
 //! | R3 | Database error in a required-redo read after a Live cycle | The chain runs again and completes | `a_required_redo_read_blip_after_live_runs_the_chain_again` |
 //! | R4 | Phase lock held at start-up | Retried until the lock is free, then completes | `a_phase_lock_held_at_start_up_is_retried` |
 //! | R5 | Phase lock held by another session once the chain runs | The chain stops with `LockHeld`, no retry | `a_phase_lock_held_once_running_stops_the_chain` |
+//! | R6 | Stop inside an attempt that then meets a lock held at start-up | Clean stop, nothing reported | `a_stop_inside_a_held_start_up_lock_attempt_is_clean` |
 //!
 //! Row S7 (`redo`), S8 (clean stop) and the exit mapping are in `src/main/tests.rs`. A stop during
 //! a required redo is row 9 of `redo_overtaken_by_reorg.rs`.
@@ -460,6 +461,43 @@ async fn a_phase_lock_held_once_running_stops_the_chain() -> Result<()> {
     assert_eq!(logs.count(CHAIN_RETRIED), 0, "{}", logs.text());
     let lock = held.lock().expect("held lock").take();
     lock.expect("the hook took the lock").release().await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_stop_inside_a_held_start_up_lock_attempt_is_clean() -> Result<()> {
+    let chain_id = "stop-held-lock-chain";
+    let scratch = ScratchDatabase::create("phase_runner_stop_held_lock").await?;
+    let (runner, chain) = completing_chain(&scratch, chain_id, "stop-held-lock").await?;
+    let held = PhaseLock::acquire(
+        scratch.writer_connect_options(),
+        chain_id,
+        PhaseName::Ingest,
+    )
+    .await?;
+    let logs = CapturedLogs::default();
+    let _logging = logs.capture();
+    let run = SupervisedRun::start(runner, vec![chain])?;
+    logs.wait_for(CHAIN_RETRIED, 1).await?;
+
+    // Holding the table makes the next attempt wait in start-up `initialize_chain`, so the stop
+    // lands inside an attempt rather than in the delay between two. The attempt then finishes
+    // within the stop budget and meets the held lock.
+    let mut holder = scratch.pool().begin().await?;
+    sqlx::query("LOCK TABLE chain_phase_state IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await?;
+    let (_, query) = waiting_query(scratch.pool()).await?;
+    assert!(
+        query.contains("INSERT INTO chain_phase_state"),
+        "the attempt waited somewhere else: {query}"
+    );
+    run.cancellation.cancel();
+    holder.rollback().await?;
+    let report = run.stop().await?;
+
+    assert_eq!(report, SupervisorReport::default());
+    held.release().await?;
     scratch.cleanup().await
 }
 
