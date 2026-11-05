@@ -1359,7 +1359,9 @@ tracks who controls the record:
 
 A registry write naming anyone but the NameWrapper ends the wrap. A write naming the NameWrapper
 is one wrap step with the mint that follows it in the same transaction, with only BaseRegistrar
-rows between, since every mint path writes the record to the NameWrapper first. Without such a
+rows between, since every mint path writes the record to the NameWrapper first. A registry
+`NewOwner` of the node between them, which Interpret keeps as a `SubregistryChanged` even when
+it names the NameWrapper again, is the mint's own write, and the earlier write is bare. Without such a
 mint it is a bare write, and no one controls the record from it on. Interpret records no write
 that names the record's current owner, so a mint on a record the NameWrapper already owns comes
 with no write, and a transfer of a live wrap needs none. A BaseRegistrar token move controls
@@ -1370,8 +1372,12 @@ holder: a repeated `clear`, a BaseRegistrar move, a wrap minted to it and a wrap
 to it keep it. Any other controller ends it, even inside one transaction. `released_at` is the
 run's first Graveyard registry write. The lapsed holder is the controller just before the run,
 or none when no one controlled the record then. When someone did, a `.eth` second-level name
-whose BaseRegistrar token was outside the NameWrapper names the token's holder at that moment
-instead, the holder it served before.
+names its lease's holder at that moment instead, the holder it served before. That is the
+BaseRegistrar token's holder. While the NameWrapper holds the token it is the live wrapped
+token's holder, unless that is the Graveyard, and otherwise the token's holder before the wrap:
+a wrap moves the token into custody and does not change who holds the lease. A write that ends
+the wrap while the NameWrapper still holds the token (`unwrapETH2LD` writes the record first)
+makes the wrapped token's last holder the lease's holder.
 
 The release itself needs only the registry write. The claim's sentinel `NameRegistered` stays
 the unretained historical cleanup row (`graveyard_cleanup`), never a lease. It applies to a
