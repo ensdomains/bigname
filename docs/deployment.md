@@ -6304,3 +6304,33 @@ catalogue window.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
+
+## Names the ENSv2 Graveyard holds are released
+
+The build that serves a name the admitted ENSv2 Graveyard holds as an ended registration
+([Graveyard-held names](api-v1.md#graveyard-held-names)) changes the lifecycle composition
+(`crates/storage/src/families/control/lifecycle/`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A `.eth` second-level name the Graveyard claimed, and a subname it cleared, serve `status`
+  `released` with `expires_at: null` and `expires_at_reason: released`, no `grace_ends_at`, no
+  `ens_v1.expires_at`, no `owner` and no `manager`. Before, such a name served `active` with no
+  owner and no expiry, or `released` with its old lease expiry.
+- Its `lapsed_registration` names its holder before the claim, released at the claim's block, so
+  that holder lists it under `relation=former_owner`. Before, only a name with a retained
+  release of its lease carried the block.
+- It leaves the expiry listing of `GET /v1/names`. Its parent's subnames page left it out before
+  and still does.
+- A name on the `ens_v2` arm, including a label registered in ENSv2 after a claim, is unchanged.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change rides the next release that redoes
+Project and shares that release's Project redo. Do not mark old rows ready under the new
+hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo. No schema-migration is included.
