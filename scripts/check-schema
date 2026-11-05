@@ -539,6 +539,7 @@ unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
 unnamed_lease_index_migration="$ROOT/migrations/20261016120000_project_lifecycle_event_drop_unnamed_lease_index.sql"
 serving_read_index_migration="$ROOT/migrations/20261028120000_serving_read_indexes.sql"
 search_prefix_index_migration="$ROOT/migrations/20261029120000_search_prefix_bucket_indexes.sql"
+raw_prefix_index_drop_migration="$ROOT/migrations/20261105120000_name_surfaces_drop_raw_prefix_index.sql"
 transfer_node_index_migration="$ROOT/migrations/20261102130000_normalized_events_v1_transfer_node_index.sql"
 registry_roles_index_migration="$ROOT/migrations/20261102140000_normalized_events_registry_roles_index.sql"
 resolver_link_order_index_migration="$ROOT/migrations/20261103130000_project_resolver_link_order_index.sql"
@@ -5130,6 +5131,7 @@ source "$ROOT/scripts/schema-check/history-direct-accounts.sh"
 source "$ROOT/scripts/schema-check/history-transfer-node.sh"
 source "$ROOT/scripts/schema-check/registry-roles.sh"
 source "$ROOT/scripts/schema-check/resolver-link-order.sh"
+source "$ROOT/scripts/schema-check/raw-prefix-index-drop.sh"
 
 # Recreate the registry token index from its preceding schema shape. Compare
 # the resulting catalog definition to the fresh baseline, then prove a rerun
