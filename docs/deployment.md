@@ -5159,6 +5159,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix3_idx
     WHERE spelling_class IN (0, 1);
 ```
 
+Then analyze the table. An expression index has no statistics until the table is analyzed:
+
+```sql
+ANALYZE bigname_phase.name_search_documents;
+```
+
 `IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
 invalid index. The schema-migration checks all three names before its own builds and again
 after them. It refuses a name that is not an index, is on another table, is not valid and

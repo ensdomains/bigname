@@ -49,6 +49,23 @@ for the health-specific concurrency ceiling. `/v2/*` is not served by the
 binary and not admitted by the edge. Phase-runner and PostgreSQL control
 surfaces are not routed through Caddy.
 
+### Edge rules in force
+
+The production edge also refuses the request shapes below before they reach the
+API. These rules are not in `docker/caddy/Caddyfile`, and a self-hosted deployment
+does not need them. Update this list with every matcher change.
+
+| Refused request | Answer | What to call instead | Exit condition |
+| --- | --- | --- | --- |
+| `/v1/diagnostics/events` and paths below it | `404` | `GET /v1/events`, the product event collection. | Goes when the edge drops this matcher. That waits on an API change to this route. |
+| `/v1/names/eth/subnames`, `/v1/names/base.eth/subnames` and paths below them | `400` | `GET /v1/names/{name}/subnames` for any other parent, or `GET /v1/names` with `namespace`, `parent` and an expiry window. | Goes when the edge drops this matcher. That waits on an API change to the subnames route. |
+| `/v1/events` with `contract_address` and `include=total_count` | `400` | The same read without `include=total_count`. | Retiring: the API now caps this count when only a contract anchors the read. Goes when the edge drops this matcher. |
+| `/v1/resolvers/*` with `include=total_count` | `400` | The same read without `include=total_count`. | Retiring: the API now bounds this count. Goes when the edge drops this matcher. |
+
+Matching is case-insensitive on the unescaped path. A query test reads the raw
+query string, so a repeated `include` or a percent-encoded underscore in either
+key is still caught.
+
 ### Internal-only versus public URLs
 
 Not every URL the API process answers is a public one. Keep the two sets
