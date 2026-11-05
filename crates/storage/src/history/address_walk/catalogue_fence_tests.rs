@@ -87,8 +87,15 @@ pub(super) const ROUTE_KINDS: [&str; 26] = [
 
 #[derive(Clone, Copy)]
 enum Statement {
-    Candidate { bucket: i64, limit: i64 },
-    Seek { after: Option<i64> },
+    Candidate {
+        bucket: i64,
+        limit: i64,
+        /// The legacy row-only cursor's selected event.
+        identity: Option<&'static str>,
+    },
+    Seek {
+        after: Option<i64>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,6 +124,13 @@ struct Case {
     window: Option<(i64, i64)>,
     /// Without the published block window, which excludes unpositioned events.
     unbounded: bool,
+    /// A second published chain in the window.
+    second_chain: bool,
+    /// No namespace on the read.
+    all_namespaces: bool,
+    scope: HistoryScope,
+    /// Every probe of the custom plan returns at most a handful of rows.
+    few_rows: bool,
     /// Continue after the row at this index of the first page (limit 3) of the same statement.
     continue_after: Option<usize>,
     statement: Statement,
@@ -133,6 +147,10 @@ fn cases() -> Vec<Case> {
         kinds: None,
         window: None,
         unbounded: false,
+        second_chain: false,
+        all_namespaces: false,
+        scope: HistoryScope::Both,
+        few_rows: false,
         continue_after: None,
         statement,
         next_bucket: None,
@@ -140,6 +158,7 @@ fn cases() -> Vec<Case> {
     let page = Statement::Candidate {
         bucket: DENSE,
         limit: 21,
+        identity: None,
     };
     vec![
         base("dense bucket", page),
@@ -148,6 +167,7 @@ fn cases() -> Vec<Case> {
             Statement::Candidate {
                 bucket: THIN,
                 limit: 21,
+                identity: None,
             },
         ),
         Case {
@@ -192,6 +212,7 @@ fn cases() -> Vec<Case> {
                 Statement::Candidate {
                     bucket: -1,
                     limit: 21,
+                    identity: None,
                 },
             )
         },
@@ -203,6 +224,7 @@ fn cases() -> Vec<Case> {
                 Statement::Candidate {
                     bucket: -1,
                     limit: 21,
+                    identity: None,
                 },
             )
         },
@@ -227,8 +249,59 @@ fn cases() -> Vec<Case> {
         },
         Case {
             address: WALLET_HOT,
+            few_rows: true,
             next_bucket: Some(Some((400 + (HOT_EVENTS - 1) * 80) / 256)),
             ..base("hot source seek", Statement::Seek { after: Some(DENSE) })
+        },
+        // An ascending seek whose window ends before the hot source's tail: the window bound
+        // inside the fence stops each probe at once instead of reading the tail.
+        Case {
+            address: WALLET_HOT,
+            order: HistoryOrder::Asc,
+            window: Some((0, 511)),
+            few_rows: true,
+            next_bucket: Some(None),
+            ..base(
+                "hot source seek asc under a window end",
+                Statement::Seek { after: Some(1) },
+            )
+        },
+        base(
+            "selected event of a row-only cursor",
+            Statement::Candidate {
+                bucket: DENSE,
+                limit: 21,
+                identity: Some("fence:record:2"),
+            },
+        ),
+        Case {
+            order: HistoryOrder::Asc,
+            unbounded: true,
+            next_bucket: Some(Some(0)),
+            ..base(
+                "seek asc after the unpositioned bucket",
+                Statement::Seek { after: Some(-1) },
+            )
+        },
+        Case {
+            unbounded: true,
+            next_bucket: Some(None),
+            ..base(
+                "seek after the unpositioned bucket",
+                Statement::Seek { after: Some(-1) },
+            )
+        },
+        Case {
+            all_namespaces: true,
+            ..base("every namespace", page)
+        },
+        Case {
+            scope: HistoryScope::Surface,
+            ..base("names only", page)
+        },
+        Case {
+            second_chain: true,
+            ..base("two published chains", page)
         },
     ]
 }
@@ -269,9 +342,9 @@ async fn catalogue_probes_read_their_key_index() -> Result<()> {
                     let plan = explain(connection, &sql, arguments.clone(), generic).await?;
                     println!("{cell}: {}", json!(probes(&plan[0]["Plan"])));
                     failures.extend(guard(&cell, &plan, generic));
-                    if case.label == "hot source seek" && !generic {
+                    if case.few_rows && !generic {
                         for probe in probes(&plan[0]["Plan"]) {
-                            if probe["rows"].as_u64().unwrap_or(0) > 4 {
+                            if probe["rows"].as_f64().unwrap_or(0.0) > 4.0 {
                                 failures.push(format!(
                                     "{cell}: the seek read more than the newest rows of the hot source: {probe}"
                                 ));
@@ -298,7 +371,7 @@ async fn catalogue_probes_read_their_key_index() -> Result<()> {
                         println!("{cell}, previous statement: {}", json!(scans));
                         if !scans.iter().any(|scan| {
                             index_names(scan).iter().any(|index| index.contains("chain_block_number"))
-                                && scan["removed"].as_u64().unwrap_or(0) >= 1_000
+                                && scan["removed"].as_f64().unwrap_or(0.0) >= 1_000.0
                         }) {
                             failures.push(format!(
                                 "{cell}: the previous statement no longer scans the dense bucket on \
@@ -395,9 +468,9 @@ fn inputs<'a>(
 ) -> (AddressRead<'a>, EventHistoryReadFilter) {
     let read = AddressRead {
         address: case.address,
-        namespace: Some("ens"),
+        namespace: (!case.all_namespaces).then_some("ens"),
         relations: None,
-        scope: HistoryScope::Both,
+        scope: case.scope,
         canonical_only: true,
         published: Some(published),
         catalogue: true,
@@ -415,11 +488,15 @@ fn inputs<'a>(
             .collect(),
         record_key: case.record_key.map(str::to_owned),
         block_window: (!case.unbounded).then(|| HistoryBlockWindow {
-            ranges: vec![ChainBlockRange {
-                chain_id: CHAIN.to_owned(),
-                from_block,
-                to_block: Some(to_block),
-            }],
+            ranges: [(CHAIN, to_block), ("ethereum-sepolia", 10)]
+                .into_iter()
+                .take(if case.second_chain { 2 } else { 1 })
+                .map(|(chain_id, to_block)| ChainBlockRange {
+                    chain_id: chain_id.to_owned(),
+                    from_block,
+                    to_block: Some(to_block),
+                })
+                .collect(),
         }),
         ..Default::default()
     };
@@ -455,13 +532,17 @@ fn render<'a>(
 ) -> Result<(String, PgArguments)> {
     let mut builder = QueryBuilder::<Postgres>::new("");
     match statement {
-        Statement::Candidate { bucket, limit } => catalogue_source::push_candidate_statement(
+        Statement::Candidate {
+            bucket,
+            limit,
+            identity,
+        } => catalogue_source::push_candidate_statement(
             &mut builder,
             read,
             filter,
             keyset,
             bucket,
-            None,
+            identity,
             limit,
             fence,
         ),
@@ -636,7 +717,7 @@ fn guard(cell: &str, plan: &Value, generic: bool) -> Vec<String> {
                 )),
             }
         }
-        if !generic && probe["removed"].as_u64().unwrap_or(0) > 16 {
+        if !generic && probe["removed"].as_f64().unwrap_or(0.0) > 16.0 {
             failures.push(format!(
                 "{cell}: a probe filtered out more than its key's rows: {probe}"
             ));
@@ -671,6 +752,13 @@ async fn install(connection: &mut PgConnection) -> Result<()> {
     let thin_lo = THIN * 256;
     raw_sql(&format!(r#"
       ALTER TABLE normalized_events SET (autovacuum_enabled = off);
+      INSERT INTO chain_lineage(chain_id,block_hash,block_number,block_timestamp,canonicality_state)
+      SELECT '{CHAIN}','fence-block-'||b,b,to_timestamp(b),'canonical'::canonicality_state
+      FROM (SELECT generate_series({dense_lo},{dense_lo}+255)
+        UNION SELECT {thin_lo}+n*5 FROM generate_series(1,40) n
+        UNION SELECT {thin_lo}+50+n FROM generate_series(1,2) n
+        UNION SELECT 400+n*80 FROM generate_series(0,{HOT_EVENTS}-1) n
+        UNION SELECT 128000) blocks(b);
       INSERT INTO normalized_events(event_identity,namespace,logical_name_id,resource_id,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state)
       SELECT 'fence:dense:'||n,'ens','ens:0x'||lpad(to_hex(k),64,'0'),lpad(to_hex(k),32,'0')::uuid,'RegistrationRenewed','ens_v2_registry_l1',1,'{CHAIN}','fence-block-'||b,b,'fence-tx-'||n,0,n,'ens_v2_registry_resource_surface','canonical'::canonicality_state,'{{}}'::jsonb
       FROM generate_series(1,{DENSE_EVENTS}) n CROSS JOIN LATERAL (SELECT 33 + n % 307 AS k, {dense_lo} + n % 256 AS b) x
@@ -699,8 +787,6 @@ async fn install(connection: &mut PgConnection) -> Result<()> {
       FROM generate_series(1,4) n;
       INSERT INTO normalized_events(event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,chain_id,derivation_kind,canonicality_state)
       VALUES ('fence:unpositioned','ens','ens:0x'||lpad(to_hex(1),64,'0'),'RegistrationRenewed','ens_v1_registrar_l1',1,'{CHAIN}','ens_v1_unwrapped_authority','canonical');
-      INSERT INTO chain_lineage(chain_id,block_hash,block_number,block_timestamp,canonicality_state)
-      SELECT DISTINCT chain_id,block_hash,block_number,to_timestamp(block_number),'canonical'::canonicality_state FROM normalized_events WHERE block_hash LIKE 'fence-block-%';
       INSERT INTO project_history_source(chain_id,source_kind,source_key,first_bucket,last_bucket,bucket_range,event_mask,key_bloom)
       SELECT chain_id,kind,key,min(block_number/256),max(block_number/256),int8range(min(block_number/256),max(block_number/256)+1),9223372036854775807,~B'0'::bit(256)
       FROM (SELECT chain_id,0::smallint AS kind,logical_name_id AS key,block_number FROM normalized_events WHERE logical_name_id IS NOT NULL AND block_number IS NOT NULL

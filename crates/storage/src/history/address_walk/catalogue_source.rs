@@ -5,6 +5,7 @@ use sqlx::{Postgres, QueryBuilder};
 
 use super::{
     AddressRead,
+    catalogue_fence::push_event_rows,
     source::{EVENT_COLUMNS, push_arm_filters},
 };
 use crate::history::{
@@ -93,6 +94,15 @@ pub(super) fn push_summary_filter<'a>(
 }
 
 fn bucket_window(filter: &EventHistoryReadFilter) -> (Option<i64>, Option<i64>) {
+    let (minimum, maximum) = block_window(filter);
+    (
+        minimum.map(|block| block / contract::BUCKET_BLOCKS),
+        maximum.map(|block| block / contract::BUCKET_BLOCKS),
+    )
+}
+
+/// The block bounds every window range and the from/to filters imply together, without the chain.
+pub(super) fn block_window(filter: &EventHistoryReadFilter) -> (Option<i64>, Option<i64>) {
     let window = filter.block_window.as_ref();
     let from = window.and_then(|window| {
         window
@@ -110,16 +120,8 @@ fn bucket_window(filter: &EventHistoryReadFilter) -> (Option<i64>, Option<i64>) 
                 .filter_map(|range| range.to_block)
                 .max()
         });
-    let minimum = from
-        .into_iter()
-        .chain(filter.from_block)
-        .max()
-        .map(|block| block / contract::BUCKET_BLOCKS);
-    let maximum = to
-        .into_iter()
-        .chain(filter.to_block)
-        .min()
-        .map(|block| block / contract::BUCKET_BLOCKS);
+    let minimum = from.into_iter().chain(filter.from_block).max();
+    let maximum = to.into_iter().chain(filter.to_block).min();
     (minimum, maximum)
 }
 
@@ -210,7 +212,11 @@ fn root_enabled(read: &AddressRead<'_>) -> bool {
     read.scope != HistoryScope::Surface && relation_mask(read) & contract::ROLE_HOLDER != 0
 }
 
-fn push_bucket(query: &mut QueryBuilder<'_, Postgres>, bucket: Bucket, order: HistoryOrder) {
+pub(super) fn push_bucket(
+    query: &mut QueryBuilder<'_, Postgres>,
+    bucket: Bucket,
+    order: HistoryOrder,
+) {
     match bucket {
         Bucket::At(contract::NULL_BUCKET) => {
             query.push(" AND ne.block_number IS NULL");
@@ -268,7 +274,9 @@ fn push_root<'a>(
         }
     };
     query.push(format!("SELECT ne.*, 0::integer AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM (SELECT {EVENT_COLUMNS} FROM "));
-    push_event_rows(query, read, filter, bucket, fence, push_key);
+    push_event_rows(
+        query, read, filter, keyset, bucket, identity, fence, push_key,
+    );
     push_arm_filters(query, read, filter, keyset);
     query.push(" AND ");
     push_key(query);
@@ -289,52 +297,23 @@ fn push_account<'a>(
     fence: bool,
 ) {
     query.push(format!("SELECT ne.*, 0::integer AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM (SELECT {EVENT_COLUMNS} FROM "));
-    push_event_rows(query, read, filter, bucket, fence, |query| {
-        participant.push_predicate(query, read.address, read.namespace);
-    });
+    push_event_rows(
+        query,
+        read,
+        filter,
+        keyset,
+        bucket,
+        identity,
+        fence,
+        |query| {
+            participant.push_predicate(query, read.address, read.namespace);
+        },
+    );
     push_arm_filters(query, read, filter, keyset);
     query.push(" AND ");
     participant.push_predicate(query, read.address, read.namespace);
     push_probe_tail(query, filter, bucket, identity, limit);
     query.push(") ne");
-}
-
-/// The `FROM` item of one probe: `normalized_events` itself, or behind the fence.
-///
-/// The planner estimates any block range above the `block_number` histogram of
-/// `normalized_events` at about one row, and the newest blocks are always above it. Unfenced, a
-/// probe of a bucket near the head was planned as a scan of the whole bucket on
-/// `normalized_events_chain_block_number_desc_idx`, with the probe's key only a filter, once per
-/// source. The fence holds the key, the readable terms each key index is partial on, the bucket
-/// range and the order. `OFFSET 0` keeps the outer filters, the `LIMIT` and the outer chain
-/// equality out of it. The chain-and-block index then has no leading key inside, so the probe's
-/// own index is the only cheap path whatever the estimate. The node and record-id keys carry the
-/// chain because their indexes lead with it. The order lets a `LIMIT 1` seek stop at the first
-/// readable row of a source with a long history. The outer statement still applies every filter,
-/// so the rows are the unfenced statement's rows. The line's other fences are in
-/// `history/wrapped_registrar.rs` and `history/attribution/mirror.rs`.
-fn push_event_rows<'a>(
-    query: &mut QueryBuilder<'a, Postgres>,
-    read: &AddressRead<'_>,
-    filter: &EventHistoryReadFilter,
-    bucket: Bucket,
-    fence: bool,
-    push_key: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
-) {
-    if !fence {
-        query.push("normalized_events ne");
-        return;
-    }
-    query.push("(SELECT ne.* FROM normalized_events ne WHERE ne.consumer_visibility = 'activated'");
-    if read.canonical_only {
-        query.push(" AND ne.canonicality_state IN ('canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state)");
-    }
-    query.push(" AND ");
-    push_key(query);
-    push_bucket(query, bucket, filter.order);
-    query.push(" ORDER BY ");
-    push_history_order_terms(query, filter.order);
-    query.push(" OFFSET 0) ne");
 }
 
 fn push_probe_tail<'a>(
@@ -385,12 +364,21 @@ fn push_prefixes<'a>(
             query.push(" UNION ALL ");
         }
         query.push(format!("SELECT ne.*, source.witness_kind, NULL::text AS current_chain, NULL::text AS current_name, source.witness_resource FROM catalogue_sources source CROSS JOIN LATERAL (SELECT {EVENT_COLUMNS} FROM "));
-        push_event_rows(query, read, filter, bucket, fence, |query| {
-            if matches!(kind, 2 | 3) {
-                query.push("ne.chain_id = source.chain_id AND ");
-            }
-            query.push(predicate);
-        });
+        push_event_rows(
+            query,
+            read,
+            filter,
+            keyset,
+            bucket,
+            identity,
+            fence,
+            |query| {
+                if matches!(kind, 2 | 3) {
+                    query.push("ne.chain_id = source.chain_id AND ");
+                }
+                query.push(predicate);
+            },
+        );
         push_arm_filters(query, read, filter, keyset);
         query
             .push(" AND ")

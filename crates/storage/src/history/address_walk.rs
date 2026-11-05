@@ -8,6 +8,7 @@ mod catalogue_count_plans;
 #[cfg(test)]
 mod catalogue_count_tests;
 mod catalogue_direct_count;
+mod catalogue_fence;
 #[cfg(test)]
 mod catalogue_fence_tests;
 #[cfg(test)]
