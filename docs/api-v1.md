@@ -2559,9 +2559,11 @@ Graveyard is served as an ended registration, whatever its lease or its schedule
 - `ens_v1.expires_at` is `null`: the Graveyard's far-future expiry is not a holder's lease;
 - there is no `owner` or `manager`;
 - `lapsed_registration.owner` is the holder who controlled the name when the Graveyard took
-  control of it. For a `.eth` second-level name it is the lease's token holder, unless the token
-  was in the NameWrapper. Otherwise it is the registry owner, or, while the NameWrapper owned the
-  record, the wrapped token's holder: a NameWrapper that wrapped the name is never the holder.
+  control of it. For a `.eth` second-level name it is the lease's holder: the BaseRegistrar
+  token's holder, or, while the token was in the NameWrapper, the wrapped token's holder. When
+  the wrap was minted to the Graveyard it is the token's holder before the wrap, if the name had
+  one. Otherwise it is the registry owner, or, while the NameWrapper owned the record, the
+  wrapped token's holder. A NameWrapper that wrapped the name is never the holder.
   It is `null` when no one controlled the name then, such as a record cleared to zero or a
   registry record written to the NameWrapper with no wrapped token. An earlier write in the same
   transaction counts. Three cases the indexed events cannot show are listed under

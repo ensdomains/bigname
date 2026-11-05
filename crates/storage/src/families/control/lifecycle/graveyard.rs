@@ -117,7 +117,7 @@ impl Custody<'_> {
 /// whose NameWrapper authority a registry write ended (adapters `wrapper/transfer.rs`,
 /// `state.rs` `transfer_v1_wrapper_owner`), and the BaseRegistrar adapter records no transfer to
 /// or from zero (adapters `registrar/token_transfer.rs`).
-fn custody_events(facts: &NameFacts) -> Option<(Vec<Custody<'_>>, BTreeSet<String>)> {
+fn custody_events(facts: &NameFacts) -> Option<Custodies<'_>> {
     let node = facts.registry_node.as_ref()?;
     let registry = node.latest_transfer()?.source_family.as_str();
     let mut wrappers = BTreeSet::new();
@@ -177,7 +177,35 @@ fn custody_events(facts: &NameFacts) -> Option<(Vec<Custody<'_>>, BTreeSet<Strin
         );
     }
     events.sort_by(|left, right| left.position().cmp(right.position()));
-    Some((events, name_wrappers))
+    let owner_logs = node
+        .owner_events
+        .iter()
+        .filter(|event| event.event_kind == "SubregistryChanged" && event.source_family == registry)
+        .map(|event| place(&event.position))
+        .collect();
+    Some(Custodies {
+        events,
+        name_wrappers,
+        owner_logs,
+    })
+}
+
+/// A name's custody events, its NameWrappers' addresses, and the place of every registry
+/// `NewOwner` of its node, which the adapter records as a `SubregistryChanged` even when the
+/// owner it names is unchanged (adapters `registry.rs`).
+struct Custodies<'a> {
+    events: Vec<Custody<'a>>,
+    name_wrappers: BTreeSet<String>,
+    owner_logs: BTreeSet<(i64, Option<i64>, Option<i64>)>,
+}
+
+/// A position's block, transaction and log.
+fn place(position: &Position) -> (i64, Option<i64>, Option<i64>) {
+    (
+        position.block_number,
+        position.transaction_index,
+        position.log_index,
+    )
 }
 
 /// A BaseRegistrar row's recipient: a grant's registrant or a transfer's recipient.
@@ -210,7 +238,7 @@ enum Controller {
 struct Stretch<'a> {
     /// The controller just before the Graveyard took control.
     holder: Option<String>,
-    /// The BaseRegistrar token's holder at that moment.
+    /// The lease's holder at that moment.
     lease: Option<String>,
     /// The first Graveyard registry write of the run.
     claim: Option<&'a OwnerEvent>,
@@ -241,21 +269,27 @@ struct Fold<'a> {
 /// `setSubnodeRecord`). A write naming the NameWrapper with no live wrap is one wrap step with the
 /// mint that follows it in the same transaction, with only BaseRegistrar rows between: every
 /// mint path writes the record to the NameWrapper first (`wrap`, `setSubnodeOwner`,
-/// `setSubnodeRecord`, `wrapETH2LD`, `onERC721Received`, `registerAndWrapETH2LD`). Without such a
-/// mint the write is bare. The adapter records no write that names the record's current owner
-/// (adapters `registry.rs`), so a mint on a record the NameWrapper already owns comes with no
-/// write. A mint makes its recipient the wrap's holder, replacing any older token (`_mint`), and
-/// a transfer moves it. The BaseRegistrar token controls nothing until a `reclaim`, which is a
-/// registry write.
+/// `setSubnodeRecord`, `wrapETH2LD`, `onERC721Received`, `registerAndWrapETH2LD`), and no other
+/// registry owner log of the node sits between that write and its mint. The adapter records no
+/// write that names the record's current owner (adapters `registry.rs`), so a mint on a record
+/// the NameWrapper already owns comes with no write of its own. A registry `NewOwner` still leaves
+/// a `SubregistryChanged` row then. So the write and the mint are one step only when no
+/// `SubregistryChanged` of the node lies strictly between them: one there is the mint's own
+/// `NewOwner`, and the earlier write is bare. A mint makes its recipient the wrap's holder,
+/// replacing any older token (`_mint`), and a transfer moves it. The BaseRegistrar token controls
+/// nothing until a `reclaim`, which is a registry write.
 ///
 /// The Graveyard's control runs while the controller stays the Graveyard, across a repeated
 /// write to it, a BaseRegistrar move, a wrap minted to it and a transfer to it. Any other
 /// controller ends the run, even inside one transaction. The claim is the run's first Graveyard
 /// registry write. A wrapped token sent to the Graveyard begins a run that no write has claimed
 /// yet. The lapsed holder is the controller just before the run. When no one controlled the name
-/// then, there is none, whatever the lease says. Otherwise, for a `.eth` second-level name whose
-/// BaseRegistrar token was outside the NameWrapper, it is the token's holder at that moment, the
-/// holder the name served before.
+/// then, there is none, whatever the lease says. Otherwise, for a `.eth` second-level name, it is
+/// the lease's holder at that moment, the holder the name served before: the BaseRegistrar
+/// token's holder, or, while the NameWrapper holds that token, the live wrapped token's holder
+/// unless it is the Graveyard, else whoever put the token into the NameWrapper. A wrap moves the
+/// token into custody and does not change who holds the lease (`wrapETH2LD` takes it from its
+/// holder).
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L84 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246-L279 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L303 @ ens_v1@91c966f)
@@ -270,7 +304,11 @@ struct Fold<'a> {
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
 fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
-    let (events, name_wrappers) = custody_events(facts)?;
+    let Custodies {
+        events,
+        name_wrappers,
+        owner_logs,
+    } = custody_events(facts)?;
     let graveyard = events.iter().rev().find_map(|event| match event {
         Custody::Write(write) if write.graveyard_held() => write.owner_getter.as_deref(),
         _ => None,
@@ -281,6 +319,7 @@ fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
     let mut record = Record::Nobody;
     let mut wrap: Option<String> = None;
     let mut lease: Option<String> = None;
+    let mut lease_wrapped = false;
     let mut stretch: Option<Stretch<'_>> = None;
     let mut consumed = None;
     #[cfg(test)]
@@ -302,7 +341,10 @@ fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
             Record::Nobody => None,
         };
         let before = controller(&record, &wrap);
-        let lease_before = lease.clone();
+        let lease_before = wrap
+            .clone()
+            .filter(|holder| lease_wrapped && !names(holder.as_str(), graveyard))
+            .or_else(|| lease.clone());
         let mut graveyard_write = None;
         match event {
             Custody::Write(write) => {
@@ -321,18 +363,35 @@ fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
                     }
                 };
                 if record != Record::NameWrapper {
+                    // An unwrap with the BaseRegistrar token still in the NameWrapper: the lease
+                    // is the wrapped token's last holder's until the token comes out.
+                    if lease_wrapped
+                        && let Some(holder) = wrap.take()
+                        && !names(holder.as_str(), graveyard)
+                    {
+                        lease = Some(holder);
+                    }
                     wrap = None;
                 } else if wrap.is_none() {
-                    let place =
+                    let transaction =
                         |position: &Position| (position.block_number, position.transaction_index);
                     let mint = events[index + 1..]
                         .iter()
                         .enumerate()
-                        .take_while(|(_, next)| place(next.position()) == place(&write.position))
+                        .take_while(|(_, next)| {
+                            transaction(next.position()) == transaction(&write.position)
+                        })
                         .find(|(_, next)| !matches!(next, Custody::Lease(_)))
                         .and_then(|(offset, next)| match next {
                             Custody::Mint(mint) => Some((index + 1 + offset, mint)),
                             _ => None,
+                        })
+                        .filter(|(_, mint)| {
+                            !owner_logs.iter().any(|&(block, tx, log)| {
+                                (block, tx) == transaction(&write.position)
+                                    && log > write.position.log_index
+                                    && log < mint.position.log_index
+                            })
                         });
                     if let Some((at, mint)) = mint {
                         consumed = Some(at);
@@ -350,7 +409,12 @@ fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
                 if let Some(holder) = lease_recipient(row).filter(|&holder| {
                     !holder.eq_ignore_ascii_case(ZERO_ADDRESS) && !names(holder, graveyard)
                 }) {
-                    lease = Some(holder.to_owned());
+                    lease_wrapped = name_wrappers.contains(&holder.to_ascii_lowercase());
+                    if !lease_wrapped {
+                        lease = Some(holder.to_owned());
+                    } else if row.event_kind == "RegistrationGranted" {
+                        lease = None;
+                    }
                 }
             }
         }
@@ -384,11 +448,7 @@ fn fold(facts: &NameFacts) -> Option<Fold<'_>> {
         claim: run.as_ref().and_then(|run| run.claim),
         holder: run.and_then(|run| {
             let holder = run.holder?;
-            Some(
-                run.lease
-                    .filter(|lease| !name_wrappers.contains(&lease.to_ascii_lowercase()))
-                    .unwrap_or(holder),
-            )
+            Some(run.lease.unwrap_or(holder))
         }),
         #[cfg(test)]
         trace,
