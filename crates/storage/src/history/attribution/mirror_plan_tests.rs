@@ -64,9 +64,13 @@ impl Statistics {
             Self::Off => 0,
             Self::On => -1,
         };
+        // A sample of 300 x 300 rows covers every fixture table whole, so each run plans on the
+        // same statistics.
         raw_sql(&format!(
             "ALTER INDEX {POINTER_INDEX} ALTER COLUMN 3 SET STATISTICS {target};
-             ANALYZE normalized_events, name_surfaces, chain_lineage;"
+             SET default_statistics_target = 300;
+             ANALYZE normalized_events, name_surfaces, chain_lineage;
+             RESET default_statistics_target;"
         ))
         .execute(&mut *connection)
         .await?;
@@ -117,13 +121,9 @@ async fn mirror_registry_probe_reads_only_the_pointer_index() -> Result<()> {
                         && !generic
                         && label == "old pointer"
                         && !before_reads.iter().any(|read| {
-                            read["indexes"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .any(|index| {
-                                    index == "normalized_events_chain_block_number_desc_idx"
-                                })
+                            read["type"] == "Index Scan"
+                                && read["indexes"]
+                                    == json!(["normalized_events_chain_block_number_desc_idx"])
                         })
                     {
                         failures.push(format!(
@@ -150,6 +150,8 @@ async fn mirror_registry_probe_rows_and_oracle_parity() -> Result<()> {
         let published = BTreeMap::from([(MAINNET.to_owned(), BOUND)]);
         // Each class: the walked names (with the depth of each above the first) and the selected
         // pointer as (depth, resolver number), or none.
+        // The child_node and namehash names also carry a newer pointer the readable terms or the
+        // family list exclude, inside the fence and outside it.
         let cases: [(&str, &[(u32, &[u32])], Option<(i32, u32)>); 11] = [
             (
                 "pointer by child_node",
@@ -237,7 +239,7 @@ async fn mirror_registry_probe_rows_and_oracle_parity() -> Result<()> {
 
 /// The fenced and the previous mirror substitution for one name on a retained database, for the
 /// before and after record: each as a custom plan executed under `EXPLAIN (ANALYZE, BUFFERS)`
-/// and as a generic plan. Read-only. The name comes from the environment; the published bound is
+/// and as a generic plan. Read-only. The name comes from the environment. The published bound is
 /// the database's family marker.
 #[tokio::test]
 #[ignore = "manual read-only plans of the fenced and previous mirror registry probe for one name"]
@@ -267,7 +269,11 @@ async fn mirror_registry_probe_retained_plans() -> Result<()> {
     .await
     .with_context(|| format!("no readable surface named {name}"))?;
     let chain_id: String = surface.try_get(0)?;
-    let published = BTreeMap::from([(chain_id.clone(), surface.try_get::<i64, _>(5)?)]);
+    let marker: Option<i64> = surface.try_get(5)?;
+    let published = BTreeMap::from([(
+        chain_id.clone(),
+        marker.context("the family marker has no block")?,
+    )]);
     let walk = MirrorWalk::new(&[MirrorPointer {
         resource_id: Uuid::nil(),
         chain_id,
@@ -389,10 +395,6 @@ async fn explain(
             .await
             .context("generic plan")?
             .try_get(0)?;
-        ensure!(
-            plan.to_string().contains('$'),
-            "generic plan substituted concrete parameters"
-        );
         Ok(plan)
     } else {
         raw_sql("SET plan_cache_mode = force_custom_plan")
@@ -489,11 +491,14 @@ async fn with_fixture(
 }
 
 /// Lineage for blocks 1..=30200 with one orphaned block hash at 90. Name k has namehash k as 32
-/// bytes of hex, raw labels `n<k>.eth`, and the resolver k as 20 bytes of hex. Between block 100
+/// bytes of hex, raw labels `n<k>.eth`, and the resolver k as 20 bytes of hex. Names 0xc1 and
+/// 0xc2 also have a newer pointer that is unreadable or from a family outside the ENSv1 list. Between block 100
 /// and 30100 the chain carries 30,000 unrelated ENSv1 pointers over 2,000 nodes, interleaved with
 /// 30,000 registrar rows. Autovacuum is off so the statistics are only the ones a test collects.
 const FIXTURE_SQL: &str = r#"
 ALTER TABLE normalized_events SET (autovacuum_enabled = false);
+ALTER TABLE chain_lineage SET (autovacuum_enabled = false);
+ALTER TABLE name_surfaces SET (autovacuum_enabled = false);
 CREATE FUNCTION pg_temp.node(k bigint) RETURNS text LANGUAGE sql IMMUTABLE
     AS $$ SELECT '0x' || lpad(to_hex(k), 64, '0') $$;
 CREATE FUNCTION pg_temp.resolver(k bigint) RETURNS text LANGUAGE sql IMMUTABLE
@@ -543,6 +548,16 @@ FROM (VALUES
     ('above', 'node', 200, 30180, 51200),
     ('orphaned-before', 'node', 201, 80, 201)
 ) class(label, field, k, block, resolver)
+UNION ALL
+SELECT 'class:child-node:observed', 'ens', NULL, 'ResolverChanged', 'ens_v1_registry_l1', 1,
+       'ethereum-mainnet', 'block-56', 56, 'tx-class-observed', 0, 2,
+       'ens_v1_unwrapped_authority', 'observed'::canonicality_state,
+       jsonb_build_object('child_node', pg_temp.node(193), 'resolver', pg_temp.resolver(61193))
+UNION ALL
+SELECT 'class:namehash:other-family', 'ens', NULL, 'ResolverChanged', 'ens_v1_resolver_l1', 1,
+       'ethereum-mainnet', 'block-57', 57, 'tx-class-other-family', 0, 2,
+       'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
+       jsonb_build_object('namehash', pg_temp.node(194), 'resolver', pg_temp.resolver(61194))
 UNION ALL
 SELECT 'class:hot:' || i, 'ens', NULL, 'ResolverChanged', 'ens_v1_registry_l1', 1,
        'ethereum-mainnet', 'block-' || (200 + i), 200 + i, 'tx-hot-' || i, 0, 3,

@@ -243,18 +243,18 @@ pub(super) fn push_exact_node_mirror_writes_for_test(
 }
 
 /// The registry pointer rows of the walked node, as the `FROM` item of the pointer lookup: only
-/// the key and the partial predicate of `normalized_events_project_v1_pointer_addressed_node_idx`
-/// (chain, namespace and the addressed-node expression), behind `OFFSET 0`.
+/// the leading key columns of `normalized_events_project_v1_pointer_addressed_node_idx` (chain,
+/// namespace and the addressed-node expression) and its partial predicate, behind `OFFSET 0`.
 ///
 /// The planner never reads a partial index's expression statistics, so it estimates the node
 /// equality at the default selectivity, a fixed fraction of the table for any node. Unfenced, a
 /// custom plan with the bound's block as a literal then preferred to walk the chain's rows newest
 /// first on `normalized_events_chain_block_number_desc_idx` and stop at the first match for
-/// `LIMIT 1`. For a node whose pointer is old that walk reads most of the chain. Inside the fence there is no
-/// `LIMIT`, so the inner is planned for all its rows, which the exact-fit index serves. The
-/// readability filter, the bound, the order and the `LIMIT` stay outside and still apply every
-/// term, so the selected pointer is the unfenced statement's. The registrar-grant lookup in
-/// `history/wrapped_registrar.rs` is fenced the same way.
+/// `LIMIT 1`. For a node whose pointer is old that walk reads most of the chain. Inside the
+/// fence there is no `LIMIT`, so the inner is planned for all its rows, which the exact-fit
+/// index serves. The readability filter, the bound, the order and the `LIMIT` stay outside and
+/// still apply every term, so the selected pointer is the unfenced statement's. The
+/// registrar-grant lookup in `history/wrapped_registrar.rs` is fenced the same way.
 fn registry_pointer_rows() -> String {
     format!(
         "(SELECT registry.* FROM bigname_phase.normalized_events registry
