@@ -2558,18 +2558,22 @@ Graveyard is served as an ended registration, whatever its lease or its schedule
 - `expires_at` is `null` with `expires_at_reason: released`, and `grace_ends_at` is `null`;
 - `ens_v1.expires_at` is `null`: the Graveyard's far-future expiry is not a holder's lease;
 - there is no `owner` or `manager`;
-- `lapsed_registration.owner` is the name's holder as it stood just before the Graveyard's
-  write: its lease's token holder, or the owner its registry record had, counting an earlier
-  write in the same transaction. When that record was the NameWrapper's, it is the wrapped
-  token's holder: a NameWrapper that wrapped the name is never the holder. A token sent to the
-  Graveyard before the write leaves its sender as the holder, and a token moved after the write
-  does not change it. `released_at` is the block time of the
-  write that gave the Graveyard the record. A later `clear` that writes it again changes neither.
-  Anyone else taking control of the record between two Graveyard writes starts a new hold, even
-  within one transaction: a token holder's `reclaim` or a parent's `setSubnodeOwner` naming anyone
-  but the Graveyard, or the wrapped token reaching anyone but the Graveyard. The holder is then
-  the one before the later write, and `released_at` is that write's block time. `release_kind`
-  is `expired`.
+- `lapsed_registration.owner` is the holder who controlled the name when the Graveyard took
+  control of it. For a `.eth` second-level name it is the lease's token holder, unless the token
+  was in the NameWrapper. Otherwise it is the registry owner, or, while the NameWrapper owned the
+  record, the wrapped token's holder: a NameWrapper that wrapped the name is never the holder.
+  It is `null` when no one controlled the name then, such as a record cleared to zero or a
+  registry record written to the NameWrapper with no wrapped token. An earlier write in the same
+  transaction counts.
+- `released_at` is the block time of the Graveyard's registry write that began its control.
+  That control carries while the Graveyard controls the record, directly or as the wrapped
+  token's holder. A later `clear` that writes it again, a BaseRegistrar token move, a wrap
+  minted to the Graveyard and a wrapped token sent to it change neither field. A wrapped token
+  sent to the Graveyard is released at the Graveyard's next registry write, with its sender as
+  the holder. Anyone else taking control in between starts a new hold, even within one
+  transaction: a token holder's `reclaim`, a parent's `setSubnodeOwner` naming anyone but the
+  Graveyard, or the wrapped token reaching anyone but the Graveyard.
+- `release_kind` is `expired`.
 
 `registered_at` and `registration_id` keep the registration that ended. A label later
 registered in ENSv2 serves that registration, as does a migrated name, whose ENSv1 record the

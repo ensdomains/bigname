@@ -284,7 +284,14 @@ migration correlation or path changes.
 > `expires_at: null` and `expires_at_reason: released`, `ens_v1.expires_at: null`, no owner,
 > manager or registrant, and a `lapsed_registration` naming its holder before the claim and the
 > claim's block time (see [Graveyard-held names](api-v1.md#graveyard-held-names)). A subname the
-> Graveyard cleared is served the same way. See [projections](projections.md).
+> Graveyard cleared is served the same way. The hold carries while the Graveyard controls the
+> record, directly or as the wrapped token's holder. Any other controller, even inside one
+> transaction, ends it. One limit follows from the adapter: it records no transfer of a wrapped
+> token whose NameWrapper authority a registry write ended. When a later registry write naming
+> the NameWrapper makes such a stale token live again on chain (`_isWrapped` reads the registry
+> owner), its holder's control is not visible, and a name the Graveyard then clears has no
+> lapsed holder. See [projections](projections.md).
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1080 @ ens_v1@91c966f)
 > **Since**: `2026-09-29`; widened `2026-11-05`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —

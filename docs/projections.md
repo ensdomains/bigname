@@ -1344,36 +1344,36 @@ schedule. For a name on the `ens_v1` arm whose node's newest current-registry
 `AuthorityTransferred` carries `owner_getter_reason` `graveyard`, it serves
 `lifecycle_status` and `status` `released`, a null expiry with `expires_at_reason` `released`,
 no grace deadline, no `ens_v1_expiry`, no registrant and no control owner, registry owner or
-expiry. Its `lapsed_registration` names the holder before the claim, with `released_at` the
-block time of that write and `release_kind` `expired`. The write is the first of the node's
-trailing run of Graveyard writes, since `clear` writes a subname of a name it holds again each time
-it runs. Two Graveyard writes are one hold only when no one else controlled the record between
-them. The record's controller is its registry owner, or, while the NameWrapper owns it, the
-wrapped token's holder. So every write between them must name the name's NameWrapper, and from
-the first of those to the later Graveyard write every transfer of the name's wrapped token must
-go to the Graveyard, with at least one. That is the Graveyard's repeated re-parent of a held
-subname, in one transaction, or a parent or token holder wrapping the name to the Graveyard,
-across transactions. Any other write between them ends the hold, such as a token holder's
-`reclaim` or a parent's `setSubnodeOwner` naming anyone but the Graveyard, and so does any
-wrapped token transfer to anyone else, even one the same transaction reverses. The holder is then the one before the later write, and a NameWrapper's holder counts
-only from the NameWrapper's current run of registry writes. When that run wrapped the token to
-the Graveyard and moved it nowhere else, the holder is whoever handed it over: the lease's last
-holder outside the NameWrapper, else the registry owner before the run. A bare registry write to
-the NameWrapper wraps nothing and names no holder. A BaseRegistrar token move writes no record
-and neither ends nor carries the hold.
-The holder is the one as it stood just before that write, by position, so an earlier write of the
-claim's own transaction counts. It is the registrant the lease laterals found, before
-the NameWrapper expiry mask, when that was found before the write and is not zero, the
-Graveyard or the NameWrapper. Otherwise it is the BaseRegistrar token's last grant or transfer
-recipient before the write that is not zero or the Graveyard, unless the token is in the
-NameWrapper.
-Otherwise it is the owner reported by the newest registry write before it. When that owner is
-the NameWrapper, it is the recipient of the wrapped token's last NameWrapper transfer before the
-write that is not the Graveyard: a cleared wrapped subname's registry write ends the NameWrapper
-authority and selects a registry-only binding, whose laterals read no NameWrapper event. The
-release itself needs only the registry write. The claim's sentinel `NameRegistered` stays the
-unretained historical cleanup row (`graveyard_cleanup`), never a lease. It applies to a claimed `.eth` second-level
-name and to a cleared subname alike. A name on the `ens_v2` arm is not read by it: a label
+expiry. Its `lapsed_registration` names the holder before the Graveyard took control, with
+`released_at` the block time of the Graveyard's registry write that began that control and
+`release_kind` `expired`.
+
+Both come from one pass over the name's custody events in (block, transaction, log) order: its
+current-registry owner writes, its NameWrapper mints and transfers on every wrapped resource of
+the name, and, for a `.eth` second-level name, its BaseRegistrar grants and transfers. The pass
+tracks who controls the record:
+
+- a registry owner other than the NameWrapper controls it;
+- while the NameWrapper owns the record and its wrap is live, the wrapped token's holder does;
+- no one does when the record is zero, or when the NameWrapper owns it with no live wrap.
+
+A registry write naming anyone but the NameWrapper ends the wrap. A write naming the NameWrapper
+is one wrap step with the mint that follows it in the same transaction, with only BaseRegistrar
+rows between, since every mint path writes the record to the NameWrapper first. Without such a mint it is a bare write, and no one
+controls the record from it on. A BaseRegistrar token move controls nothing until a `reclaim`
+writes the record.
+
+The Graveyard's control runs while it controls the record, directly or as the wrapped token's
+holder: a repeated `clear`, a BaseRegistrar move, a wrap minted to it and a wrapped token sent
+to it keep it. Any other controller ends it, even inside one transaction. `released_at` is the
+run's first Graveyard registry write. The lapsed holder is the controller just before the run,
+or none when no one controlled the record then. When someone did, a `.eth` second-level name
+whose BaseRegistrar token was outside the NameWrapper names the token's holder at that moment
+instead, the holder it served before.
+
+The release itself needs only the registry write. The claim's sentinel `NameRegistered` stays
+the unretained historical cleanup row (`graveyard_cleanup`), never a lease. It applies to a
+claimed `.eth` second-level name and to a cleared subname alike. A name on the `ens_v2` arm is not read by it: a label
 registered in ENSv2, before or after the claim, and a migrated name, whose ENSv1 record the
 migration hands to the Graveyard, are served by their ENSv2 registration. The stored name
 summary takes `registration_status` `released` and no finite expiry from the composed row, so
