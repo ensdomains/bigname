@@ -2059,7 +2059,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   page reports the filtered total, counted with the same child-name and
   expiry predicates as its list, before the cursor; that count stops after
   10,001. Either total is exact up to 10,000 children and `null` above. The
-  rows and cursors do not depend on it.
+  rows and cursors do not depend on either total.
 - Snapshot behavior: the parent, child rows and filtered count are read on one
   database snapshot of the captured publication, disclosed in `meta.as_of`. The
   cursor holds only its sort position and query filters; expiry uses each page's
@@ -5316,10 +5316,9 @@ For a registrar lease first identified by a later readable observation, registra
   name `name` selects, the earliest name whose current subregistry pointer
   targets the registry. Labels the registry holds under another name that also
   points at it are not counted. It is `0` when no name points at the registry.
-  It is exact when the registry holds at most 10,000 registrations under that
-  name, and `null` otherwise: the count stops reading after 10,001 of them,
-  because a registry such as the `.eth` one holds more than an exact count
-  composes within the request deadline. `counts.events` is present only with
+  It is read from the label count Project stores for that name, and is exact
+  when the registry holds at most 10,000 labels under it and `null` otherwise.
+  `counts.events` is present only with
   `include=counts` and counts the product-visible events the contract emitted
   on this chain up to the selected position, in any namespace. For an ENSv2
   registry, whose events are all in `ens`, it equals the `total_count` of
@@ -5460,9 +5459,9 @@ For a registrar lease first identified by a later readable observation, registra
   ascending, compared byte by byte, then by child identity, as the `name` sort
   of `GET /v1/names/{name}/subnames` orders them. `page.total_count` is the
   exact number of labels the owner filter admits, counted before paging;
-  unfiltered, it is the same number as `counts.labels` on the registry route
-  whenever that count is not `null`, read from the label count Project stores
-  for the registry's name. So `exclude_owner=<address>&page_size=1`
+  unfiltered, it is read from the label count Project stores for the
+  registry's name, and equals `counts.labels` on the registry route whenever
+  that count is not `null`. So `exclude_owner=<address>&page_size=1`
   answers whether the registry holds any label that address does not own from
   `total_count` alone. The cursor binds the chain, the registry and the owner
   filter.
