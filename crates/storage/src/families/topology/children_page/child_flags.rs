@@ -14,7 +14,7 @@ use crate::families::name::rendered::composed_surface_sql;
 /// every transaction of that block, so a re-registration there is newer. A child with a name
 /// surface serves its name row's own registration. The probe reads
 /// `project_lifecycle_event_namehash_idx`.
-pub(super) fn released_lease() -> String {
+pub(crate) fn released_lease() -> String {
     format!(
         "CASE WHEN {composed}
               AND child_surface.block_number <= clock.block_number THEN FALSE
@@ -43,7 +43,7 @@ pub(super) fn released_lease() -> String {
 /// token moves without the registry record until `reclaim`
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
 /// The probe reads `project_lifecycle_event_namehash_idx`.
-pub(super) fn token_holder() -> String {
+pub(crate) fn token_holder() -> String {
     format!(
         "CASE WHEN {composed}
               AND child_surface.block_number <= clock.block_number THEN NULL
@@ -75,7 +75,7 @@ pub(super) fn token_holder() -> String {
 /// (crates/adapters/src/schema_v2/identity.rs, `materialize`), and the surface row keeps only the
 /// earliest observation's provenance, so the events, not the row, tell the observers apart. The
 /// lookup reads `normalized_events_name_history_idx`.
-pub(super) const LIFECYCLE_SHADOW: &str = "COALESCE(child_surface.visibility_state = 'shadow'
+pub(crate) const LIFECYCLE_SHADOW: &str = "COALESCE(child_surface.visibility_state = 'shadow'
          AND child_surface.block_number <= clock.block_number
          AND EXISTS (
              SELECT 1 FROM bigname_phase.normalized_events observed
@@ -95,7 +95,7 @@ pub(super) const LIFECYCLE_SHADOW: &str = "COALESCE(child_surface.visibility_sta
 /// an unwrap or a parent's registry `setSubnodeOwner` moves it out again
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
-pub(super) const WRAPPER_HELD: &str = "COALESCE(child_surface.visibility_state = 'shadow'
+pub(crate) const WRAPPER_HELD: &str = "COALESCE(child_surface.visibility_state = 'shadow'
          AND child_surface.block_number <= clock.block_number
          AND EXISTS (
              SELECT 1 FROM bigname_phase.normalized_events observed

@@ -12,8 +12,10 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
+mod child_listing;
 pub mod ens_v2_path;
 mod expiry_policy;
+pub mod listing_cases;
 pub use expiry_policy::expected_registration_expiry;
 
 pub const CHAIN: &str = "ethereum-sepolia";
@@ -22,13 +24,15 @@ pub const CHAIN: &str = "ethereum-sepolia";
 pub const CONTENT_HASH: &str = bigname_test_support::PROJECTION_CONTENT_HASH;
 
 /// The tables a rebuild composes in its composition pass rather than in its ranges.
-pub const COMPOSED_TABLES: [&str; 14] = [
+pub const COMPOSED_TABLES: [&str; 16] = [
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
     "project_lookup_record",
     "project_lookup_dependency",
     "project_name_summary",
+    "project_child_listing",
+    "project_child_listing_count",
     "project_address_history_anchor",
     "project_history_source",
     "project_history_source_edge",
@@ -98,6 +102,9 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_address_record_id_index",
     "project_name_history",
     "project_name_summary",
+    "project_child_listing",
+    "project_child_listing_count",
+    "project_child_preimage_watermark",
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
@@ -108,6 +115,8 @@ pub const FAMILY_TABLES: &[&str] = &[
 pub struct Fixture {
     pub database: TestDatabase,
     pub pool: PgPool,
+    /// The child listing checks of this fixture's publications (`child_listing.rs`).
+    listing_checks: child_listing::Checks,
 }
 
 impl Fixture {
@@ -158,7 +167,11 @@ impl Fixture {
             .execute(&mut *connection)
             .await?;
         drop(connection);
-        let fixture = Self { database, pool };
+        let fixture = Self {
+            database,
+            pool,
+            listing_checks: child_listing::Checks::default(),
+        };
         fixture.lineage(CHAIN, blocks).await?;
         Ok(fixture)
     }
@@ -214,20 +227,25 @@ impl Fixture {
             &FamilyOptions::new(CONTENT_HASH),
         )
         .await?;
-        self.check_expiry_selector(&outcome, target).await;
+        self.check_publication(chain, &outcome, target).await;
         Ok(outcome)
     }
 
-    /// Every publication a family test makes must leave an exact expiry selector.
-    async fn check_expiry_selector(&self, outcome: &FamilyOutcome, target: i64) {
+    /// Every publication a family test makes must leave an exact expiry selector, and a child
+    /// listing equal to the children relation at the published block.
+    async fn check_publication(&self, chain: &str, outcome: &FamilyOutcome, target: i64) {
         if outcome.marker.is_some() {
             self.assert_expiry_selector()
                 .await
                 .unwrap_or_else(|error| panic!("expiry selector at {target}: {error:#}"));
+            self.assert_child_listing(chain)
+                .await
+                .unwrap_or_else(|error| panic!("child listing at {target}: {error:#}"));
         }
     }
 
     pub async fn cleanup(self) -> Result<()> {
+        self.listing_checks.require()?;
         self.database.cleanup().await
     }
 
@@ -250,7 +268,7 @@ impl Fixture {
         let token = families::input_token(&self.pool, CHAIN).await?;
         let outcome =
             families::apply(&self.pool, CHAIN, &marker(target), mode, &token, options).await?;
-        self.check_expiry_selector(&outcome, target).await;
+        self.check_publication(CHAIN, &outcome, target).await;
         Ok(outcome)
     }
 
@@ -712,10 +730,21 @@ impl Fixture {
     /// The Interpret row of `chain_phase_state` with its content hash and redo attempt, inside an
     /// open redo of blocks 0 to 1 when `in_redo`.
     pub async fn interpret_row(&self, hash: &str, attempt: i64, in_redo: bool) -> Result<()> {
+        self.interpret_row_on(CHAIN, hash, attempt, in_redo).await
+    }
+
+    /// The Interpret row of `chain`, as `interpret_row` writes `CHAIN`'s.
+    pub async fn interpret_row_on(
+        &self,
+        chain: &str,
+        hash: &str,
+        attempt: i64,
+        in_redo: bool,
+    ) -> Result<()> {
         sqlx::query(
             "DELETE FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'interpret'",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .execute(&self.pool)
         .await?;
         sqlx::query(
@@ -728,7 +757,7 @@ impl Fixture {
                      CASE WHEN $4 THEN 0 END, CASE WHEN $4 THEN 1 END,
                      CASE WHEN $4 THEN now() END)",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .bind(hash)
         .bind(attempt)
         .bind(in_redo)

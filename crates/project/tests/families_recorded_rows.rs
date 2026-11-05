@@ -13,10 +13,11 @@
 //! names, resolver changes and a created registry.
 //!
 //! The digest covers every family table. The test requires rows in the tables the path history
-//! is there to fill, and the lookup and summary rows of the subname. Eight tables are empty in
+//! is there to fill, and the lookup and summary rows of the subname. Nine tables are empty in
 //! this history and the digest says nothing about them: the two hydration work tables, the two
 //! address record indexes, the record values by record id, the resolver links, the account
-//! approvals and the Universal Resolver proxies.
+//! approvals, the Universal Resolver proxies and the child listing's preimage watermarks, which
+//! need a second chain.
 //!
 //! Project clears obsolete hydration retry scheduling while it applies each Ethereum Mainnet
 //! block, and only there (`docs/projections.md`, "Follow-only hydration"). So the same seed is
@@ -37,10 +38,10 @@ const TARGET: i64 = 300;
 /// family marker and the history catalogue marker are taken without their generation and
 /// without the content hash of the build that wrote them, which differs between builds by
 /// design.
-const RECORDED: &str = "9026cd3b9498a2d751393aaa5efe8617e8c8a9f7e60b3634715c822b4434758a";
+const RECORDED: &str = "62716c498e555fceff4a6d59f0315d5bba9b101997ebf567002eab32821145b7";
 const MAINNET: &str = "ethereum-mainnet";
 /// The same digest for the seed alone on `MAINNET`.
-const RECORDED_MAINNET: &str = "39b29f015ef1ae23aa6839379dc891725f60cf1dda3ddfd61b675dd0204c382f";
+const RECORDED_MAINNET: &str = "fc34c36093c2ba60464d85f0b7d20a9ccbb502f410798136af86f16aaa6a0d14";
 
 /// The tables the ENSv2 path history fills. The digest holds a selection change to account
 /// only where they have rows.

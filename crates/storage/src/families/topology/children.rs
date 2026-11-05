@@ -4,16 +4,23 @@
 //! (`project_wrapper_state`) and the parent's migration state (`project_name_state`), with the
 //! identity tables, label preimages and the children's name summaries
 //! (`project_name_summary`: selected arm, serving resource, zero-owner transfer). It builds the
-//! served child relation (the edge candidates, then the arm selection) and the read filter of
-//! crates/storage/src/children/page.rs, evaluated at read against the family marker's block: no
-//! stored eligibility and no maintained count.
+//! served child relation (the edge candidates, then the arm selection) and each listed child's
+//! row. Project writes that row into the child listing family (`project_child_listing`, F17) at
+//! every publication, from the publication's own block ([`Relation::Stored`]); the readers that
+//! still compose children, a page's healed names and an address's surface-less registry
+//! children, read it at the family marker's block ([`Relation::Served`]).
 use sqlx::{Postgres, QueryBuilder};
 
+mod spelling;
+mod wanted;
+
 use super::{
-    name_summary::{serving, zero_owner},
-    shims::{effective_child_fuses, row_position},
+    children_page::child_flags::{LIFECYCLE_SHADOW, WRAPPER_HELD, released_lease, token_holder},
+    name_summary::{CHILD_SUMMARY_JOIN, serving, zero_owner},
+    shims::{effective_child_fuse_expiry, effective_child_fuses, row_position},
 };
-use crate::families::name::rendered::rendered_name_sql;
+pub(super) use spelling::CHILD_DISPLAY_NAME;
+use spelling::{CHILD_UNHEALED_LABELHASHES, label_decoded_name, label_raw_name};
 
 pub(super) const READABLE: &str = "('canonical', 'safe', 'finalized')";
 const ZERO_ADDRESS: &str = "'0x0000000000000000000000000000000000000000'";
@@ -50,6 +57,37 @@ pub(super) enum Parents<'a> {
     Many(&'a [String]),
 }
 
+/// The publication a stored child row is composed for: its chain, block number and block time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ListingBlock<'a> {
+    pub chain_id: &'a str,
+    pub number: i64,
+    pub timestamp_seconds: i64,
+}
+
+/// Which clock and which label spelling the relation reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Relation<'a> {
+    /// The servable family marker of each parent's chain is the clock, and a label is spelled
+    /// from any verified preimage, the rainbow import's included: the served name.
+    Served,
+    /// The block Project publishes is the clock, and a label is spelled from chain-observed
+    /// preimages only. An imported preimage has no block, so a stored row that read one would
+    /// change with no block and differ between a block-by-block run and a rebuild; the served
+    /// name applies imports at read instead (`families::name::rendered`, `enrich`).
+    Stored(ListingBlock<'a>),
+}
+
+impl Relation<'_> {
+    /// The extra join condition that keeps a `label_preimages` row aliased `preimage`.
+    fn preimage_rule(self) -> &'static str {
+        match self {
+            Self::Served => "",
+            Self::Stored(_) => " AND preimage.source_kind <> 'ens_rainbow_import'",
+        }
+    }
+}
+
 /// Push `clock`, `parent`, `parent_migration`, `candidates` and `selected` CTE definitions (each
 /// followed by a comma) for `parents`. `clock` holds one row per chain of the parents, and
 /// `selected` one row per served child with `pair_rank = 1`, before the page read filter, with
@@ -69,65 +107,103 @@ pub(super) fn push_selected<'a>(
     registry: Option<&'a str>,
     children: Option<&'a [String]>,
     registration_limit: Option<i64>,
+    relation: Relation<'a>,
 ) {
-    builder.push(
-        "parent_surface AS (
-            SELECT surface.* FROM bigname_phase.name_surfaces surface
-            WHERE surface.logical_name_id = ",
-    );
     match parents {
         Parents::One(parent) => {
+            builder.push(
+                "parent_surface AS (
+                    SELECT surface.* FROM bigname_phase.name_surfaces surface
+                    WHERE surface.logical_name_id = ",
+            );
             builder.push_bind(parent);
         }
         Parents::Many(parents) => {
-            builder.push("ANY(");
+            // Each parent's surface is probed by its key, one parent at a time (`OFFSET 0`), so
+            // the read follows the parents given, never the planner's count of them: the Project
+            // writer's parents include names surfaced in its own block.
+            builder.push(
+                "parent_surface AS MATERIALIZED (
+                    SELECT surface.*
+                    FROM (SELECT DISTINCT wanted.id FROM unnest(",
+            );
             builder.push_bind(parents);
-            builder.push(")");
+            builder.push(
+                "::text[]) wanted (id)) wanted
+                    CROSS JOIN LATERAL (
+                        SELECT surface.* FROM bigname_phase.name_surfaces surface
+                        WHERE surface.logical_name_id = wanted.id
+                        OFFSET 0
+                    ) surface",
+            );
         }
     }
-    builder.push(
-        "
-        ), clock AS (
-            -- The clock: the family marker's block of each parent's chain, never NOW(), when
-            -- the marker is servable by the fence's rule (`servable_family_marker`,
-            -- snapshot_selection/project.rs): live, written by this build, on a readable block.
-            -- The readers check that first (`children_page::require_publication`); without a
-            -- servable marker there is no clock and no child.
-            SELECT DISTINCT marker.chain_id, marker.current_block_number AS block_number,
-                   marker.block_timestamp,
-                   extract(epoch FROM marker.block_timestamp) AS epoch_seconds
-            FROM bigname_phase.project_family_marker marker
-            JOIN parent_surface ON parent_surface.chain_id = marker.chain_id
-            JOIN bigname_phase.chain_lineage marker_lineage
-              ON marker_lineage.chain_id = marker.chain_id
-             AND marker_lineage.block_number = marker.current_block_number
-             AND marker_lineage.block_hash = marker.current_block_hash
-             AND marker_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            WHERE marker.state = 'live' AND marker.input_content_hash = ",
-    );
-    builder.push_bind(bigname_content_hash::PROJECTION_CONTENT_HASH);
+    match relation {
+        Relation::Served => {
+            builder.push(
+                "
+                ), clock AS (
+                    -- The clock: the family marker's block of each parent's chain, never NOW(), when
+                    -- the marker is servable by the fence's rule (`servable_family_marker`,
+                    -- snapshot_selection/project.rs): live, written by this build, on a readable block.
+                    -- The readers check that first (`children_page::require_publication`); without a
+                    -- servable marker there is no clock and no child.
+                    SELECT DISTINCT marker.chain_id, marker.current_block_number AS block_number,
+                           marker.block_timestamp,
+                           extract(epoch FROM marker.block_timestamp) AS epoch_seconds
+                    FROM bigname_phase.project_family_marker marker
+                    JOIN parent_surface ON parent_surface.chain_id = marker.chain_id
+                    JOIN bigname_phase.chain_lineage marker_lineage
+                      ON marker_lineage.chain_id = marker.chain_id
+                     AND marker_lineage.block_number = marker.current_block_number
+                     AND marker_lineage.block_hash = marker.current_block_hash
+                     AND marker_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    WHERE marker.state = 'live' AND marker.input_content_hash = ",
+            );
+            builder.push_bind(bigname_content_hash::PROJECTION_CONTENT_HASH);
+        }
+        Relation::Stored(block) => {
+            // The clock: the block Project is publishing, which its marker records once the
+            // block commits.
+            builder.push("), clock AS (SELECT CAST(");
+            builder.push_bind(block.chain_id);
+            builder.push(" AS text) AS chain_id, CAST(");
+            builder.push_bind(block.number);
+            builder.push(" AS bigint) AS block_number, to_timestamp(");
+            builder.push_bind(block.timestamp_seconds);
+            builder.push(") AS block_timestamp, CAST(");
+            builder.push_bind(block.timestamp_seconds);
+            builder.push(" AS numeric) AS epoch_seconds");
+        }
+    }
     builder.push(format!(
         "
         ), parent AS (
             -- `raw_name` is the parent's served name: its stored name, or the name built from
             -- its label hashes when it stores no raw bytes. A child's name ends in it.
             SELECT surface.logical_name_id, surface.namespace, surface.chain_id,
-                   {parent_name} AS raw_name,
+                   {parent_name} AS raw_name, {parent_unhealed} AS unhealed_labelhashes,
                    lower(surface.namehash) AS node, surface.labelhashes
-            FROM parent_surface surface JOIN clock ON clock.chain_id = surface.chain_id
+            FROM parent_surface surface JOIN clock ON clock.chain_id = surface.chain_id{parent_spelling}
             WHERE surface.visibility_state = 'active' AND {parent_readable}
-        ), parent_migration AS (
+        ), parent_migration AS MATERIALIZED (
             -- The ENSv1 migration gate: a migrated parent's migration path and migration
-            -- registry, which decide below which ENSv1 edges the parent still lists.
+            -- registry, which decide below which ENSv1 edges the parent still lists. It is
+            -- derived once per parent, its name state probed by key (`OFFSET 0`), so its cost
+            -- follows the parents and never the planner's count of them or of the edges.
             SELECT parent.logical_name_id AS parent_logical_name_id, state.migration_path,
                    registry.registry_contract_instance_id::text
                        AS migration_registry_contract_instance_id
             FROM parent JOIN clock ON clock.chain_id = parent.chain_id
-            JOIN bigname_phase.project_name_state state
-              ON state.chain_id = parent.chain_id
-             AND state.namespace = parent.namespace
-             AND state.logical_name_id = parent.logical_name_id
-             AND state.migration_position IS NOT NULL
+            CROSS JOIN LATERAL (
+                SELECT state.chain_id, state.migration_path, state.migration_evidence
+                FROM bigname_phase.project_name_state state
+                WHERE state.chain_id = parent.chain_id
+                  AND state.namespace = parent.namespace
+                  AND state.logical_name_id = parent.logical_name_id
+                  AND state.migration_position IS NOT NULL
+                OFFSET 0
+            ) state
             LEFT JOIN bigname_phase.project_parent_subregistry subregistry
               ON subregistry.chain_id = parent.chain_id
              AND subregistry.logical_name_id = parent.logical_name_id
@@ -177,6 +253,30 @@ pub(super) fn push_selected<'a>(
                          association.migration_correlation_id DESC
                 LIMIT 1
             ) registry ON TRUE
+",
+        parent_name = relation.parent_name("surface"),
+        parent_unhealed = relation.parent_unhealed("surface"),
+        parent_spelling = relation.parent_spelling("surface"),
+        parent_readable = readable_surface("surface"),
+        migration_address = active_instance(
+            "address",
+            "subregistry.chain_id",
+            "subregistry.subregistry_address"
+        ),
+    ));
+    if let Some(children) = children {
+        wanted::push(builder, children);
+    }
+    let (child_table, registration_table) = if children.is_some() {
+        ("wanted_child", "wanted_registration")
+    } else {
+        (
+            "bigname_phase.name_surfaces",
+            "bigname_phase.project_child_registration_state",
+        )
+    };
+    builder.push(format!(
+        "
         ), v2_candidates AS (
             SELECT parent.logical_name_id AS parent_logical_name_id, parent.chain_id,
                    child.logical_name_id AS child_logical_name_id, child.namespace,
@@ -188,19 +288,20 @@ pub(super) fn push_selected<'a>(
                    registration.event_identity,
                    lower(registration_event.raw_fact_ref ->> 'emitting_address')
                        AS registry_address,
-                   NULL::text AS registry_authority
+                   NULL::text AS registry_authority,
+                   subregistry.subregistry_address, NULL::numeric AS recompose_at
             FROM parent JOIN clock ON clock.chain_id = parent.chain_id
             JOIN bigname_phase.project_parent_subregistry subregistry
               ON subregistry.chain_id = parent.chain_id
              AND subregistry.logical_name_id = parent.logical_name_id
              AND subregistry.subregistry_address NOT IN ('', {ZERO_ADDRESS})
             JOIN bigname_phase.contract_instance_addresses address ON {v2_address}
-            JOIN bigname_phase.project_child_registration_state registration
+            JOIN {registration_table} registration
               ON registration.chain_id = parent.chain_id
              AND registration.registry_contract_instance_id = address.contract_instance_id::text
              AND registration.event_kind IS NOT NULL
              AND registration.event_kind <> 'RegistrationReleased'
-            JOIN bigname_phase.name_surfaces child
+            JOIN {child_table} child
               ON child.logical_name_id = registration.logical_name_id
              AND child.namespace = parent.namespace AND child.chain_id = parent.chain_id
              AND child.visibility_state = 'active'
@@ -208,20 +309,14 @@ pub(super) fn push_selected<'a>(
              AND child.labelhashes[2:cardinality(child.labelhashes)] = parent.labelhashes
              AND {child_readable}
             LEFT JOIN bigname_phase.label_preimages preimage
-              ON preimage.labelhash = lower(child.labelhashes[1])
+              ON preimage.labelhash = lower(child.labelhashes[1]){preimage_rule}
             -- The registry a registry's labels read is the registration's emitter, as the
             -- served labels read `raw_fact_refs[0].registration.emitting_address`.
             LEFT JOIN bigname_phase.normalized_events registration_event
               ON registration_event.event_identity = registration.event_identity
             WHERE parent.raw_name <> ''",
-        parent_name = rendered_name_sql("surface"),
-        parent_readable = readable_surface("surface"),
+        preimage_rule = relation.preimage_rule(),
         child_readable = readable_surface("child"),
-        migration_address = active_instance(
-            "address",
-            "subregistry.chain_id",
-            "subregistry.subregistry_address"
-        ),
         v2_address = active_instance(
             "address",
             "subregistry.chain_id",
@@ -235,11 +330,6 @@ pub(super) fn push_selected<'a>(
         // subregistry names, so only that subregistry can hold the registry's labels.
         builder.push(" AND subregistry.subregistry_address = ");
         builder.push_bind(registry);
-    }
-    if let Some(children) = children {
-        builder.push(" AND lower(child.namehash) = ANY(");
-        builder.push_bind(children);
-        builder.push(")");
     }
     if let Some(limit) = registration_limit {
         builder.push(" LIMIT ");
@@ -281,7 +371,7 @@ pub(super) fn push_selected<'a>(
                             AND node_state.first_current_record_block IS NULL, FALSE)
                        AS old_registry_only
             FROM parent JOIN clock ON clock.chain_id = parent.chain_id
-            JOIN bigname_phase.project_child_edge_candidate edge
+            JOIN {edge_table} edge
               ON edge.chain_id = parent.chain_id AND edge.namespace = parent.namespace
              AND edge.parent_node = parent.node
             LEFT JOIN bigname_phase.project_registry_node_state node_state
@@ -296,6 +386,11 @@ pub(super) fn push_selected<'a>(
                   AND (other.parent_node, other.authority_arm)
                       <> (edge.parent_node, edge.authority_arm)
                   AND {other_position} > {edge_position})",
+        edge_table = if children.is_some() {
+            "wanted_edge"
+        } else {
+            "bigname_phase.project_child_edge_candidate"
+        },
         zero_owner = zero_owner("edge.chain_id", "edge.namespace || ':' || edge.child_node"),
         other_position = row_position("other"),
         edge_position = row_position("edge"),
@@ -303,12 +398,6 @@ pub(super) fn push_selected<'a>(
     if registry.is_some() {
         // Another arm decides only children that also have an ENSv2 candidate here.
         builder.push(" AND edge.child_node IN (SELECT lower(v2.namehash) FROM v2_candidates v2)");
-    }
-    if let Some(children) = children {
-        // `project_child_edge_candidate_child_idx` serves this by chain, namespace and node.
-        builder.push(" AND edge.child_node = ANY(");
-        builder.push_bind(children);
-        builder.push(")");
     }
     builder.push(format!(
         "
@@ -328,11 +417,21 @@ pub(super) fn push_selected<'a>(
                    CASE WHEN edge.source_family = 'basenames_base_registry'
                              OR COALESCE(edge.served_owner, '') IN ('', {ZERO_ADDRESS}) THEN NULL
                         WHEN edge.old_registry_only THEN 'ens_v0'
-                        ELSE 'ens_v1' END AS registry_authority
+                        ELSE 'ens_v1' END AS registry_authority,
+                   NULL::text AS subregistry_address,
+                   -- A child the migration gate keeps leaves the parent once its wrapper expiry
+                   -- passes, with no block of its own: the first second at which the gate's fuse
+                   -- word reads as zero, when the gate applies and that second is still ahead of
+                   -- the clock (a passed one would recompose the row at every block).
+                   CASE WHEN edge.source_family = 'ens_v1_registry_l1'
+                             AND migration.migration_path IS NOT NULL
+                             AND floor({fuse_expiry}) + 1 > clock.epoch_seconds
+                        THEN floor({fuse_expiry}) + 1 END AS recompose_at
             FROM v1_edges edge
             JOIN parent ON parent.logical_name_id = edge.edge_parent_logical_name_id
             JOIN clock ON clock.chain_id = parent.chain_id
-            LEFT JOIN bigname_phase.label_preimages preimage ON preimage.labelhash = edge.labelhash
+            LEFT JOIN bigname_phase.label_preimages preimage
+              ON preimage.labelhash = edge.labelhash{preimage_rule}
             LEFT JOIN parent_migration migration
               ON migration.parent_logical_name_id = parent.logical_name_id
             WHERE (COALESCE(edge.served_owner, '') NOT IN ('', {ZERO_ADDRESS})
@@ -384,46 +483,63 @@ pub(super) fn push_selected<'a>(
             "edge.child_logical_name_id",
             "clock.epoch_seconds"
         ),
+        fuse_expiry = effective_child_fuse_expiry("edge.chain_id", "edge.child_logical_name_id"),
+        preimage_rule = relation.preimage_rule(),
         v1_raw_name = label_raw_name("parent.raw_name = ''"),
         v1_decoded_name = label_decoded_name("parent.raw_name = ''"),
     ));
 }
 
-/// The child's raw name from its label preimage: null for no preimage and for a decoded label
-/// that fails normalization; the label alone under the root.
-fn label_raw_name(under_root: &str) -> String {
-    format!(
-        "CASE WHEN preimage.raw_label IS NULL THEN NULL
-              WHEN preimage.decoded_label IS NOT NULL
-                   AND NOT preimage.normalized_under_version THEN NULL
-              WHEN {under_root} THEN preimage.raw_label
-              ELSE preimage.raw_label || decode('2e', 'hex') || convert_to(parent.raw_name, 'UTF8')
-         END"
-    )
+/// [`push_selected`] then the `children` CTE, left open after its `WHERE` for the caller's
+/// filters: one row per child the parent lists, with the served fields and the fields the
+/// listing family stores beside them (the label registry, the summary's owner, status and
+/// timestamps, and the gate's recompose time). The summary is joined as `summary`.
+///
+/// `label_registry` is the registration's emitter while it is the parent's current
+/// subregistry, the registry whose labels the child is; `recompose_at` is set only for a child
+/// the migration gate keeps.
+pub(super) fn push_listed<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    parents: Parents<'a>,
+    registry: Option<&'a str>,
+    children: Option<&'a [String]>,
+    registration_limit: Option<i64>,
+    relation: Relation<'a>,
+) {
+    push_selected(
+        builder,
+        parents,
+        registry,
+        children,
+        registration_limit,
+        relation,
+    );
+    builder.push(format!(
+        " children AS (
+            SELECT clock.chain_id, selected.parent_logical_name_id,
+                   selected.child_logical_name_id, selected.namespace,
+                   {CHILD_DISPLAY_NAME} AS canonical_display_name,
+                   selected.namehash, selected.labelhash, selected.owner, selected.registrant,
+                   selected.registry_authority, selected.registry_address,
+                   {LIFECYCLE_SHADOW} AS lifecycle_shadow, {WRAPPER_HELD} AS wrapper_held,
+                   {released_lease} AS released_lease, {token_holder} AS token_holder,
+                   CASE WHEN selected.registry_address = selected.subregistry_address
+                        THEN selected.registry_address END AS label_registry,
+                   summary.owner AS summary_owner, summary.registration_status,
+                   summary.expires_at, EXTRACT(EPOCH FROM summary.registered_at) AS registered_at,
+                   selected.recompose_at,
+                   {CHILD_UNHEALED_LABELHASHES} AS unhealed_labelhashes
+            FROM selected
+            JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
+            JOIN clock ON clock.chain_id = parent.chain_id
+            LEFT JOIN bigname_phase.name_surfaces child_surface
+              ON child_surface.logical_name_id = selected.child_logical_name_id
+            {CHILD_SUMMARY_JOIN}
+            WHERE selected.pair_rank = 1{CHILD_SURFACE_FILTER}",
+        released_lease = released_lease(),
+        token_holder = token_holder(),
+    ));
 }
-
-fn label_decoded_name(under_root: &str) -> String {
-    format!(
-        "CASE WHEN preimage.decoded_label IS NULL THEN NULL
-              WHEN NOT preimage.normalized_under_version THEN NULL
-              WHEN {under_root} THEN preimage.decoded_label
-              ELSE preimage.decoded_label || '.' || parent.raw_name
-         END"
-    )
-}
-
-/// The served child name: decoded, else the escaped raw bytes, else the labelhash placeholder
-/// under the parent's spelling (crates/storage/src/children/reads.rs,
-/// `CHILD_DISPLAY_NAME_EXPR`). A child whose surface at the clock stores no raw bytes has a name
-/// row, which never serves the escaped form (`name::rendered`), so this one skips it too and the
-/// two routes name the child alike.
-pub(super) const CHILD_DISPLAY_NAME: &str = "COALESCE(
-    selected.decoded_name,
-    CASE WHEN child_surface.logical_name_id IS NOT NULL AND child_surface.raw_name IS NULL
-              AND child_surface.block_number <= clock.block_number THEN NULL
-         ELSE encode(selected.raw_name, 'escape') END,
-    '[' || substring(lower(selected.labelhash) FROM 3) || '].' || parent.raw_name
-)";
 
 /// A child without a surface passes. A surfaced child requires both its surface and
 /// stored block to be canonical, safe, or finalized.
