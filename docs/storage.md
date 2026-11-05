@@ -782,8 +782,7 @@ Family indexes serve these concrete readers:
 
 
 Three read-only indexes serve other API reads. The baselines and
-`20261028120000_serving_read_indexes.sql` install them, with `name_surfaces_name_prefix_idx`
-below. They change no row:
+`20261028120000_serving_read_indexes.sql` install them. They change no row:
 
 | Index | Table and writer | Serves |
 | --- | --- | --- |
@@ -808,20 +807,12 @@ The owned key families add six, named for their reader:
 | `project_families_discovery_edges_resolver_destination_idx` | `project:families.classification.activated`: whether an address that starts or stops at the block is any resolver edge's destination, deactivated edges included. `project:families.input.work_blocks`: the same test, one probe for each address that starts or stops in the requested range |
 | `project_families_discovery_edges_resolver_admission_idx` | `project:families.classification.classify`: one active resolver edge per active manifest to each touched resolver's contract instance |
 
-Interpret also writes `name_surfaces`. The API's name-ordered readers add two read-only
-indexes on it, installed by the identity baseline and their own schema-migrations and changing
-no row:
+Interpret also writes `name_surfaces`. The API's name-ordered reader adds a read-only index on
+it, installed by the identity baseline and its own schema-migration and changing no row:
 
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates`: readable surfaces in name order after the keyset cursor |
-| `name_surfaces_name_prefix_idx` | `storage:families.name.search_candidates`, raw-name statement: the surfaces whose raw name has the searched prefix, as one range |
-
-`name_surfaces_name_prefix_idx` keys the raw name with the `text_pattern_ops` operator class,
-so a `LIKE` prefix becomes a range on it under any database collation. The name order index
-gives that range only under the C collation. The prefix index has the name order index's
-predicate, and the reader carries the same bounds. Its order is byte order, so the reader
-sorts the matched rows into name order.
 
 Interpret and the verified label-preimage importer write `name_search_documents`. The
 API's prefix search adds three read-only indexes on it, installed by the identity baseline
