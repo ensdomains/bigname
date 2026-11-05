@@ -17,7 +17,7 @@ fn stack_probe_future_sizes() {
     let mut out: Vec<String> = Vec::new();
     size!(out, "families::apply", crate::families::apply(unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!()));
     size!(out, "families::undo_to", crate::families::undo_to(unreachable!(), unreachable!(), unreachable!()));
-    size!(out, "block::publish", super::super::block::publish(unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!()));
+    size!(out, "block::publish", super::super::block::publish(unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!()));
     size!(out, "derived::refresh_block", super::refresh_block(unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!()));
     size!(out, "derived::refresh", super::refresh(unreachable!(), unreachable!(), unreachable!(), unreachable!()));
     size!(out, "summary::refresh", super::summary::refresh(unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!(), unreachable!()));
