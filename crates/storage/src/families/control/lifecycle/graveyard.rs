@@ -22,9 +22,12 @@ use crate::families::control::registry::{OwnerEvent, ZERO_ADDRESS};
 
 /// The admitted Graveyard's registry write that holds the name's current ENSv1 record: the node's
 /// newest current-registry owner write, when it names the Graveyard. An ENSv2 name has its own
-/// registry, so a label registered in ENSv2 after the claim serves that registration instead.
+/// registry, so a label registered in ENSv2 after the claim serves that registration instead. A
+/// migrated name's record is the Graveyard's from its migration, which `clear` never claims, so
+/// that write is no claim even where the name falls back to its ENSv1 arm.
 pub(super) fn claim(facts: &NameFacts) -> Option<&OwnerEvent> {
-    if facts.input.selection.authority_arm.as_deref() != Some("ens_v1") {
+    if facts.input.selection.authority_arm.as_deref() != Some("ens_v1") || facts.migration.is_some()
+    {
         return None;
     }
     facts
@@ -34,8 +37,9 @@ pub(super) fn claim(facts: &NameFacts) -> Option<&OwnerEvent> {
         .filter(|write| write.graveyard_held())
 }
 
-/// Serve a Graveyard-held name's registration as ended. `registrant` is the lease holder the
-/// registration laterals found, before any mask: the name's holder when the Graveyard claimed it.
+/// Serve a Graveyard-held name's registration as ended. `registrant` is the holder the
+/// registration laterals found, before any mask: the name's holder when the Graveyard claimed it,
+/// unless that is the Graveyard itself, which a wrapped subname's token reaches as it is cleared.
 pub(super) fn apply(
     facts: &NameFacts,
     registrant: Option<String>,
@@ -49,7 +53,10 @@ pub(super) fn apply(
         .block_seconds
         .get(&write.position.block_number)
         .map_or(Value::Null, |seconds| json!(seconds));
-    let holder = registrant.or_else(|| prior_holder(facts, write));
+    let graveyard = write.owner_getter.as_deref();
+    let holder = registrant
+        .filter(|holder| holder != ZERO_ADDRESS && Some(holder.as_str()) != graveyard)
+        .or_else(|| prior_holder(facts, write));
     for field in [
         "expiry",
         "ens_v1_expiry",
@@ -74,19 +81,15 @@ pub(super) fn apply(
     }
 }
 
-/// The holder of a name with no lease holder: the owner its newest registry write before the
-/// claim reported, the owner a registry-only name serves. A NameWrapper-selected name's registry
-/// owner is the NameWrapper, never a holder.
+/// The holder of a name with no other holder: the owner its newest registry write before the
+/// claim's transaction reported, the owner a registry-only name serves. A write naming the
+/// NameWrapper names no holder, so a wrapped name whose token holder is unknown has none.
 fn prior_holder(facts: &NameFacts, claim: &OwnerEvent) -> Option<String> {
-    let wrapped = facts.candidates.iter().any(|candidate| {
-        candidate.is_wrapper()
-            && facts.input.selection.surface_binding_id.as_deref()
-                == Some(candidate.surface_binding_id.as_str())
-    });
-    if wrapped {
-        return None;
-    }
-    facts
+    let claim_transaction = (
+        claim.position.block_number,
+        claim.position.transaction_index,
+    );
+    let owner = facts
         .registry_node
         .as_ref()
         .into_iter()
@@ -94,11 +97,19 @@ fn prior_holder(facts: &NameFacts, claim: &OwnerEvent) -> Option<String> {
         .filter(|event| {
             event.event_kind == "AuthorityTransferred"
                 && event.source_family == "ens_v1_registry_l1"
-                && event.position < claim.position
+                && (
+                    event.position.block_number,
+                    event.position.transaction_index,
+                ) < claim_transaction
         })
         .max_by(|left, right| left.position.cmp(&right.position))
         .and_then(OwnerEvent::reported_owner)
-        .filter(|owner| owner != ZERO_ADDRESS)
+        .filter(|owner| owner != ZERO_ADDRESS)?;
+    let name_wrapper = facts.candidates.iter().any(|candidate| {
+        candidate.authority_kind.as_deref() == Some("wrapper")
+            && candidate.emitting_address.as_deref() == Some(owner.as_str())
+    });
+    (!name_wrapper).then_some(owner)
 }
 
 #[cfg(test)]

@@ -1354,7 +1354,8 @@ name and to a cleared subname alike. A name on the `ens_v2` arm is not read by i
 registered in ENSv2, before or after the claim, and a migrated name, whose ENSv1 record the
 migration hands to the Graveyard, are served by their ENSv2 registration. The stored name
 summary takes `registration_status` `released` and no finite expiry from the composed row, so
-subname lists, their expiry fence and the expiry listing need no rule of their own.
+the expiry listing needs no rule of its own. The subnames route already leaves such a child out,
+since its record names no owner (above).
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
 (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
 

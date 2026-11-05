@@ -1,7 +1,6 @@
 // A `.eth` name the admitted ENSv2 Graveyard holds is served `released` with no expiry, no owner
 // and no manager, with its holder before the claim as `lapsed_registration.owner`, on name
-// detail, on its parent's subnames page and its filters, in the expiry listing and in address
-// lists (crates/storage/src/families/control/lifecycle/graveyard.rs).
+// detail, in address lists and out of the expiry listing and its parent's subnames page (crates/storage/src/families/control/lifecycle/graveyard.rs).
 
 const GH_HOLDER: &str = "0x00000000000000000000000000000000000000e1";
 /// The admitted Graveyard. The fixture's registry writes carry the adapter's
@@ -50,7 +49,8 @@ fn gh_registry_write(
 
 /// `eth` and four second-level names, each with its registry edge under `eth` and a name row:
 /// - `held.eth`: a lease of GH_HOLDER that lapsed past its grace, which the Graveyard claims;
-/// - `parked.eth`: a registry-only name of GH_HOLDER with no lease, which the Graveyard claims;
+/// - `parked.eth`: a registry-only name of GH_HOLDER with no lease, served with its owner and no
+///   expiry, which the Graveyard claims;
 /// - `lapsed.eth`: a lease of GH_HOLDER past its grace, not claimed;
 /// - `live.eth`: a live lease of GH_HOLDER.
 ///
@@ -123,8 +123,16 @@ async fn seed_graveyard_fixture(database: &TestDatabase) -> Result<(String, Stri
         "{held:#}"
     );
     let parked = served_child(&subnames, &nodes["parked"].2);
-    assert_eq!(parked["status"], json!("active"), "{parked:#}");
+    assert_ne!(parked["status"], json!("released"), "{parked:#}");
     assert_eq!(parked["owner"], json!(GH_HOLDER), "{parked:#}");
+    let listing = rows_of(
+        &read_family_pages(
+            database,
+            "/v1/names?namespace=ens&parent=eth&expires_after=0&page_size=10",
+        )
+        .await?,
+    );
+    served_child(&listing, &nodes["held"].2);
 
     let claims = ["held", "parked"]
         .into_iter()
@@ -189,39 +197,36 @@ async fn v2_graveyard_held_name_detail_is_released_with_no_expiry() -> Result<()
     database.cleanup().await
 }
 
-/// Row 17: on its parent's subnames page a held name is a released row with no expiry, and
-/// `include_expired=false` drops it like every other released child.
-/// Row 18: the expiry fence and the expiry listing treat it as a released name with no finite
-/// expiry. The unfiltered total counts it, `include_expired=false` drops it with the lapsed
-/// sibling, and the expiry listing of `eth`'s children, which needs a finite expiry, leaves it
-/// out while it still lists the live sibling.
+/// Rows 17 and 18: a held child is not on its parent's subnames page, whatever the fence, as for
+/// any record the Graveyard holds. The unfiltered total and the `include_expired=false` total
+/// both leave it out, and the fence drops the lapsed sibling only. The expiry listing of `eth`'s
+/// children, which needs a finite expiry, leaves the held names out while it lists the live
+/// sibling. Before the claim it listed `held.eth` with its old lease expiry.
 #[tokio::test]
-async fn v2_graveyard_held_child_is_released_on_lists_and_fences() -> Result<()> {
+async fn v2_graveyard_held_child_leaves_the_lists_and_the_expiry_listing() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let (held, parked) = seed_graveyard_fixture(&database).await?;
     let lapsed = bigname_lookup::ens_namehash_hex("lapsed.eth")?;
     let live = bigname_lookup::ens_namehash_hex("live.eth")?;
 
     let (subnames, total) = eth_subnames(&database, "").await?;
-    for node in [&held, &parked] {
-        assert_gh_held_row(served_child(&subnames, node));
+    let (fenced, fenced_total) = eth_subnames(&database, "&include_expired=false").await?;
+    for rows in [&subnames, &fenced] {
+        for node in [&held, &parked] {
+            assert!(
+                rows.iter().all(|row| row["namehash"] != json!(node)),
+                "{node}: {rows:#?}"
+            );
+        }
+        served_child(rows, &live);
     }
     served_child(&subnames, &lapsed);
-    served_child(&subnames, &live);
-
-    let (fenced, fenced_total) = eth_subnames(&database, "&include_expired=false").await?;
-    for node in [&held, &parked, &lapsed] {
-        assert!(
-            fenced.iter().all(|row| row["namehash"] != json!(node)),
-            "{node}: {fenced:#?}"
-        );
-    }
-    served_child(&fenced, &live);
-    assert_eq!(
-        fenced_total.as_u64().map(|count| count + 3),
-        total.as_u64(),
+    assert!(
+        fenced.iter().all(|row| row["namehash"] != json!(lapsed)),
         "{fenced:#?}"
     );
+    assert_eq!(total, json!(2), "{subnames:#?}");
+    assert_eq!(fenced_total, json!(1), "{fenced:#?}");
 
     let listing = rows_of(
         &read_family_pages(

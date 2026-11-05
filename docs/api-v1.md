@@ -2565,8 +2565,9 @@ Graveyard is served as an ended registration, whatever its lease or its schedule
 `registered_at` and `registration_id` keep the registration that ended. A label later
 registered in ENSv2 serves that registration, as does a migrated name, whose ENSv1 record the
 migration hands to the Graveyard. A live token sent to the Graveyard writes no registry record
-and is served as the chain holds it. Subname lists, their `include_expired=false` fence and the
-expiry listing treat a Graveyard-held name as any other released name with no finite expiry.
+and is served as the chain holds it. A Graveyard-held name has no finite expiry, so the expiry
+listing of `GET /v1/names` leaves it out. Its parent's subnames page does not list it, as for any
+record the Graveyard holds (see [upstream divergences](upstream.md)).
 
 ### Registration identity of wrapped names
 

@@ -6322,8 +6322,8 @@ What changes for names:
 - Its `lapsed_registration` names its holder before the claim, released at the claim's block, so
   that holder lists it under `relation=former_owner`. Before, only a name with a retained
   release of its lease carried the block.
-- It leaves the expiry listing of `GET /v1/names`, and `include_expired=false` drops it from its
-  parent's subnames.
+- It leaves the expiry listing of `GET /v1/names`. Its parent's subnames page left it out before
+  and still does.
 - A name on the `ens_v2` arm, including a label registered in ENSv2 after a claim, is unchanged.
 
 These rows arrive through re-derivation. Every chain needs one full-range Project redo and no

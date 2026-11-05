@@ -285,7 +285,7 @@ migration correlation or path changes.
 > manager or registrant, and a `lapsed_registration` naming its holder before the claim and the
 > claim's block time (see [Graveyard-held names](api-v1.md#graveyard-held-names)). A subname the
 > Graveyard cleared is served the same way. See [projections](projections.md).
-> **Since**: `2026-09-29`, widened `2026-11-05`
+> **Since**: `2026-09-29`; widened `2026-11-05`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
 > `ERC1155Fuse._transfer` runs `_beforeTransfer`, which deletes the per-token
