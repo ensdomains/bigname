@@ -25,8 +25,8 @@ use uuid::Uuid;
 
 use super::ManifestSets;
 use super::sql::{
-    CLEARED, ENS_V1_POINTER_FAMILIES, ENS_V2_POINTER_FAMILIES, position, push_declaration_manifest,
-    push_pointer_ctes, push_readable_event, push_readable_surface,
+    CLEARED, ENS_V1_POINTER_FAMILIES, ENS_V2_POINTER_FAMILIES, READABLE, position,
+    push_declaration_manifest, push_pointer_ctes, push_readable_event, push_readable_surface,
 };
 
 struct MirrorPointer {
@@ -242,6 +242,36 @@ pub(super) fn push_exact_node_mirror_writes_for_test(
     push_mirror_writes(builder, walk, published, None, None);
 }
 
+/// The registry pointer rows of the walked node, as the `FROM` item of the pointer lookup: only
+/// the key and the partial predicate of `normalized_events_project_v1_pointer_addressed_node_idx`
+/// (chain, namespace and the addressed-node expression), behind `OFFSET 0`.
+///
+/// The planner never reads a partial index's expression statistics, so it estimates the node
+/// equality at the default selectivity, thousands of rows for any node. Unfenced, a custom plan
+/// with the bound's block as a literal then preferred to walk the chain's rows newest first on
+/// `normalized_events_chain_block_number_desc_idx` and stop at the first match for `LIMIT 1`. For
+/// a node whose pointer is old that walk reads most of the chain. Inside the fence there is no
+/// `LIMIT`, so the inner is planned for all its rows, which the exact-fit index serves. The
+/// readability filter, the bound, the order and the `LIMIT` stay outside and still apply every
+/// term, so the selected pointer is the unfenced statement's. The registrar-grant lookup in
+/// `history/wrapped_registrar.rs` is fenced the same way.
+fn registry_pointer_rows() -> String {
+    format!(
+        "(SELECT registry.* FROM bigname_phase.normalized_events registry
+                      WHERE registry.chain_id = walk.chain_id
+                        AND registry.namespace = surface.namespace
+                        AND lower(COALESCE(registry.after_state ->> 'child_node', registry.after_state ->> 'namehash',
+                                           registry.after_state ->> 'node')) = lower(surface.namehash)
+                        AND registry.event_kind = 'ResolverChanged'
+                        AND registry.source_family IN {ENS_V1_POINTER_FAMILIES}
+                        AND COALESCE(registry.after_state ->> 'child_node', registry.after_state ->> 'namehash',
+                                     registry.after_state ->> 'node') IS NOT NULL
+                        AND registry.consumer_visibility = 'activated'
+                        AND registry.canonicality_state IN {READABLE}
+                      OFFSET 0) registry"
+    )
+}
+
 /// `SELECT resource_id, normalized_event_id`: one row with a null id for every followed mirror,
 /// and one per node-keyed write of the ENSv1 resolver it follows for the queried node.
 fn push_mirror_writes<'a>(
@@ -294,14 +324,15 @@ fn push_mirror_writes<'a>(
     builder.push(SAME_LABELS);
     push_readable_surface(builder, "surface", published);
     // The ENSv1 registry's resolver for the node at the bound: its latest registry-side pointer,
-    // clears included, so a cleared node falls through to its ancestors.
+    // clears included, so a cleared node falls through to its ancestors. The pointer rows are read
+    // behind `REGISTRY_POINTER_FENCE`.
     builder.push(format!(
         "
             JOIN LATERAL (
                 SELECT registry.namespace AS mirrored_pointer_namespace,
                        lower(registry.after_state ->> 'resolver') AS mirrored_resolver_address,
                        {} AS mirrored_pointer_position
-                FROM bigname_phase.normalized_events registry
+                FROM {}
                 WHERE registry.chain_id = walk.chain_id
                   AND registry.event_kind = 'ResolverChanged'
                   AND registry.source_family IN {ENS_V1_POINTER_FAMILIES}
@@ -310,7 +341,8 @@ fn push_mirror_writes<'a>(
                   AND lower(COALESCE(registry.after_state ->> 'child_node', registry.after_state ->> 'namehash',
                                      registry.after_state ->> 'node')) = lower(surface.namehash)
                   AND registry.namespace = surface.namespace",
-        position("registry")
+        position("registry"),
+        registry_pointer_rows()
     ));
     push_readable_event(builder, "registry", published);
     builder.push(format!(
@@ -395,6 +427,9 @@ fn push_mirror_writes<'a>(
     }
 }
 
+#[cfg(test)]
+#[path = "mirror_plan_tests.rs"]
+mod plan_tests;
 #[cfg(test)]
 #[path = "mirror_tests.rs"]
 mod tests;
