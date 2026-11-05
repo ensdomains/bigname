@@ -6304,3 +6304,22 @@ catalogue window.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
+
+## The bound-name walk leaves the test build
+
+The build that deletes the walk the bound-name listing replaced
+(`crates/storage/src/families/name/bound_walk.rs`) changes no code that runs and no stored row.
+The walk was compiled only for tests. Its module line is in
+`crates/storage/src/families/name/mod.rs`, an input of the name summary composition.
+
+- The [projection content hash](glossary.md#projection-content-hash) rotates for every chain,
+  although no derived row changes. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next release that redoes Project and shares that release's
+  Project redo.
+- It adds no schema-migration, table or setting.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo.
