@@ -208,10 +208,9 @@ pub fn address_listing_statement(
                   effective_controller_block bigint, role_holder_block bigint)
            ON rel.logical_name_id = nc.logical_name_id
          -- A name the publication reads without raw bytes is composed under its placeholder
-         -- labels, and served under each label the preimages spell (`name::rendered`,
-         -- `enrich`), though Interpret may since have filled the surface's raw bytes from a
-         -- later observation (`name::loaders::surfaces_at`). The stored spelling reads the
-         -- chain-observed preimages only.
+         -- labels, even when Interpret has since filled the surface's raw bytes from a later
+         -- observation (`name::loaders::surfaces_at`). The stored spelling spells each label
+         -- from its chain-observed preimage.
          LEFT JOIN bigname_phase.name_surfaces surface
            ON nc.bracketed AND surface.logical_name_id = nc.logical_name_id{spelling}
          CROSS JOIN LATERAL (
@@ -251,11 +250,12 @@ pub fn address_listing_statement(
 }
 
 /// A statement that spells again each row of the subquery `target` (rows of
-/// `project_address_listing` whose name was spelled from label hashes, as a publication read the
-/// surface without raw bytes) from that surface's chain-observed preimages, and yields `(address, logical_name_id, before_image,
-/// after_image)` for each row it spells further: fewer labels left as `[labelhash]`. Only the
-/// name and the columns read from it change; a preimage observation can do nothing else to a
-/// stored row. `target` is read first and on its own, so its own index bounds the read.
+/// `project_address_listing` whose name was spelled from label hashes, as a publication read
+/// the surface without raw bytes) from that surface's chain-observed preimages, and yields
+/// `(address, logical_name_id, before_image, after_image)` for each row it spells further:
+/// fewer labels left as `[labelhash]`. Only the name and the columns read from it change; a
+/// preimage observation can do nothing else to a stored row. `target` is read first and on its
+/// own, so its own index bounds the read.
 pub fn address_listing_respell_sql(target: &str) -> String {
     format!(
         "/* storage:families.records.address_listing_respell */

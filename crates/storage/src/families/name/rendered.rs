@@ -37,16 +37,7 @@ pub fn rendered_name_sql_unqualified(surface: &str) -> String {
 
 fn name_sql(surface: &str, schema: &str) -> String {
     format!(
-        "COALESCE({surface}.raw_name, {labels})",
-        labels = labels_sql(surface, schema)
-    )
-}
-
-/// SQL for the name built from the label hashes of the `name_surfaces` row aliased `surface`,
-/// whatever raw bytes it stores.
-fn labels_sql(surface: &str, schema: &str) -> String {
-    format!(
-        "(
+        "COALESCE({surface}.raw_name, (
             SELECT string_agg(
                        CASE WHEN preimage.decoded_label IS NOT NULL
                                  AND preimage.normalized_under_version
@@ -55,7 +46,7 @@ fn labels_sql(surface: &str, schema: &str) -> String {
                        '.' ORDER BY path.position)
             FROM unnest({surface}.labelhashes) WITH ORDINALITY AS path(labelhash, position)
             LEFT JOIN {schema}label_preimages preimage
-              ON preimage.labelhash = lower(path.labelhash))"
+              ON preimage.labelhash = lower(path.labelhash)))"
     )
 }
 
@@ -164,9 +155,7 @@ pub fn parse(name: &str) -> normalization::Result<RenderedName> {
 
 /// Give the composed rows of surfaces without raw bytes the name the serving readers show:
 /// placeholder labels become label text wherever a usable preimage exists. Rows of surfaces
-/// with bytes carry no bracketed label, so a batch of them issues no statement. A row composed
-/// at a publication below the observation that filled its surface's raw bytes in place
-/// (`loaders::surfaces_at`) is bracketed, and is spelled from its label hashes like any other.
+/// with bytes carry no bracketed label, so a batch of them issues no statement.
 pub(crate) async fn enrich(
     conn: &mut PgConnection,
     rows: &mut BTreeMap<String, NameCurrentRow>,
@@ -187,8 +176,8 @@ pub(crate) async fn enrich(
         "/* storage:families.name.rendered_names */
          SELECT surface.logical_name_id, {name}
          FROM bigname_phase.name_surfaces surface
-         WHERE surface.logical_name_id = ANY($1::text[])",
-        name = labels_sql("surface", "bigname_phase.")
+         WHERE surface.logical_name_id = ANY($1::text[]) AND surface.raw_name IS NULL",
+        name = rendered_name_sql("surface")
     ))
     .bind(&ids)
     .fetch_all(&mut *conn)
