@@ -893,9 +893,10 @@ fn a_repeated_graveyard_write_keeps_the_first_claim_and_its_holder() {
     assert_held(&input.read(), Some(HOLDER));
 }
 
-/// The production `.eth` claim: in the claim's transaction, before its registry write, the
-/// BaseRegistrar burns the lapsed token (a transfer to zero) and mints it to the Graveyard. Neither
-/// names a holder: the lapsed owner is the lease's holder before them.
+/// A guard: the `.eth` claim's BaseRegistrar burn of the lapsed token and its mint to the Graveyard
+/// come before the registry write in the claim's transaction. Interpret records no transfer to or
+/// from zero, so no such rows arise; if a transfer to zero or the Graveyard were recorded there,
+/// neither would name a holder, and the lapsed owner stays the lease's holder before them.
 #[test]
 fn a_claimed_lease_burned_and_minted_to_the_graveyard_keeps_its_holder() {
     let transfer = |log: i64, to: &str| {
@@ -920,4 +921,26 @@ fn a_claimed_lease_burned_and_minted_to_the_graveyard_keeps_its_holder() {
         ],
     );
     assert_held(&input.claimed().read(), Some(HOLDER));
+}
+
+/// A re-parented subname cleared again: each later `clear` through it re-parents it once more,
+/// writing the record to the NameWrapper and then to the Graveyard in one transaction. That
+/// custody write does not end the Graveyard's hold: `released_at` stays at the first claim and
+/// the holder is the one before it.
+#[test]
+fn a_re_parented_subname_cleared_again_keeps_the_first_claim_and_its_holder() {
+    let mut input = wrapped("wrapped", 0);
+    input.place = NamePlace::BelowEthSecondLevel("ens:0x02".to_owned());
+    input.events.push(wrapper_transfer(8, HOLDER));
+    for block in [CLAIM_BLOCK, 90] {
+        let mut re_parent = write(block, WRAPPED, NAME_WRAPPER, None);
+        re_parent.position.log_index = Some(0);
+        re_parent.position.event_identity = format!("write:re-parent:{block}");
+        input.writes.push(re_parent);
+    }
+    let mut repeat = write(90, WRAPPED, GRAVEYARD, Some("graveyard"));
+    repeat.position.event_identity = "write:repeat".to_owned();
+    let mut input = input.claimed();
+    input.writes.push(repeat);
+    assert_held(&input.read(), Some(HOLDER));
 }

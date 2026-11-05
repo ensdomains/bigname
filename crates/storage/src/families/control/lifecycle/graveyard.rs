@@ -15,6 +15,8 @@
 //! (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
 //! (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L104 @ ens_v1@91c966f)
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value, json};
 
 use super::NameFacts;
@@ -41,33 +43,46 @@ pub(super) fn claim(facts: &NameFacts) -> Option<&OwnerEvent> {
 /// The write that gave the Graveyard the node's record, when it still holds it: the first of the
 /// trailing run of current-registry owner writes naming it. `clear` writes a subname of a name it
 /// holds again each time it runs, for that subname or any name below it, and a holder's own write
-/// to the Graveyard can precede a clear. The registration ended at the first of them, and its
+/// to the Graveyard can precede a clear. A repeated re-parent of a held subname writes the record
+/// to the NameWrapper and then to the Graveyard in one transaction: that custody write between two
+/// Graveyard writes does not end the run. The registration ended at the first of them, and its
 /// holder is the one before that.
 /// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
 pub(super) fn first_held(node: &RegistryNode) -> Option<&OwnerEvent> {
-    let latest = node
-        .latest_transfer()
-        .filter(|write| write.graveyard_held())?;
+    let registry = node.latest_transfer()?.source_family.as_str();
     let writes: Vec<&OwnerEvent> = node
         .owner_events
         .iter()
         .filter(|event| {
-            event.event_kind == "AuthorityTransferred"
-                && event.source_family == latest.source_family
+            event.event_kind == "AuthorityTransferred" && event.source_family == registry
         })
+        .map(|event| (&event.position, event))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
         .collect();
-    let before_run = writes
-        .iter()
-        .copied()
-        .filter(|write| !write.graveyard_held())
-        .map(|write| &write.position)
-        .max();
-    writes
-        .into_iter()
-        .filter(|write| {
-            write.graveyard_held() && before_run.is_none_or(|last| write.position > *last)
-        })
-        .min_by(|left, right| left.position.cmp(&right.position))
+    let mut first = None;
+    for (index, write) in writes.iter().enumerate().rev() {
+        if write.graveyard_held() {
+            first = Some(*write);
+            continue;
+        }
+        let custody = index
+            .checked_sub(1)
+            .is_some_and(|before| writes[before].graveyard_held())
+            && writes.get(index + 1).is_some_and(|next| {
+                next.graveyard_held()
+                    && (next.position.block_number, next.position.transaction_index)
+                        == (
+                            write.position.block_number,
+                            write.position.transaction_index,
+                        )
+            });
+        if !custody {
+            break;
+        }
+    }
+    first
 }
 
 /// Serve a Graveyard-held name's registration as ended. The lapsed owner is the holder as it
