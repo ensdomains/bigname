@@ -8,8 +8,12 @@ use super::{
 };
 use crate::history::{
     EventHistoryReadFilter, HistoryOrder, catalogue_contract as contract,
+    direct_accounts::ANCHORED_EVENT,
+    duplicates::push_fixed_product_history_duplicate_filter,
     keyset::{HistoryKeyset, push_history_cursor_block_bound},
-    paging::push_history_order_terms,
+    paging::{push_history_filters, push_history_order_terms},
+    resolver_source::ResolverSource,
+    source::push_history_lineage_join,
 };
 
 /// The `FROM` item of one probe: `normalized_events` itself, or behind the fence.
@@ -27,22 +31,36 @@ use crate::history::{
 /// source with a long history. Every term inside is also outside, and the outer statement still
 /// applies every filter, so the rows are the unfenced statement's rows. The registrar-grant
 /// lookup in `history/wrapped_registrar.rs` is fenced the same way.
+///
+/// A seek (`seek_limit`) reads only a source's first row in order, but `OFFSET 0` alone plans the
+/// fence for every row: the probe above it has a join and an order, so its `LIMIT` never reaches
+/// the fence. With fresh statistics a source with a long history was then read whole into a sort.
+/// A seek's fence therefore holds every term of the probe and its own `LIMIT`, so the first row
+/// it returns is the probe's. The probe's terms other than the key, the readable terms and the
+/// block bounds sit inside one `IS TRUE` test, which no index can serve: the window's and the
+/// source's chain equalities there give the chain-and-block index no leading key.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_event_rows<'a>(
     query: &mut QueryBuilder<'a, Postgres>,
     read: &AddressRead<'_>,
-    filter: &EventHistoryReadFilter,
+    filter: &'a EventHistoryReadFilter,
     keyset: Option<&HistoryKeyset<'_>>,
     bucket: Bucket,
     identity: Option<&'a str>,
     fence: bool,
+    seek_limit: Option<i64>,
+    anchored: bool,
     push_key: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
 ) {
     if !fence {
         query.push("normalized_events ne");
         return;
     }
-    query.push("(SELECT ne.* FROM normalized_events ne WHERE ne.consumer_visibility = 'activated'");
+    query.push("(SELECT ne.* FROM normalized_events ne");
+    if seek_limit.is_some() {
+        push_history_lineage_join(query);
+    }
+    query.push(" WHERE ne.consumer_visibility = 'activated'");
     if read.canonical_only {
         query.push(" AND ne.canonicality_state IN ('canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state)");
     }
@@ -72,7 +90,34 @@ pub(super) fn push_event_rows<'a>(
     if let Some(identity) = identity {
         query.push(" AND ne.event_identity = ").push_bind(identity);
     }
+    if seek_limit.is_some() {
+        // As `push_arm_filters` writes them for a probe without a keyset, plus the anchored
+        // probe's event-kind and chain terms.
+        query.push(" AND (TRUE");
+        push_history_filters(
+            query,
+            filter,
+            read.canonical_only,
+            ResolverSource::Condition,
+        );
+        push_fixed_product_history_duplicate_filter(query);
+        if anchored {
+            query
+                .push(" AND ")
+                .push(ANCHORED_EVENT)
+                .push(" AND ne.chain_id = source.chain_id");
+        }
+        query.push(") IS TRUE");
+    }
     query.push(" ORDER BY ");
     push_history_order_terms(query, filter.order);
-    query.push(" OFFSET 0) ne");
+    match seek_limit {
+        Some(limit) => {
+            query.push(" LIMIT ").push_bind(limit);
+        }
+        None => {
+            query.push(" OFFSET 0");
+        }
+    }
+    query.push(") ne");
 }

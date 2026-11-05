@@ -275,7 +275,16 @@ fn push_root<'a>(
     };
     query.push(format!("SELECT ne.*, 0::integer AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM (SELECT {EVENT_COLUMNS} FROM "));
     push_event_rows(
-        query, read, filter, keyset, bucket, identity, fence, push_key,
+        query,
+        read,
+        filter,
+        keyset,
+        bucket,
+        identity,
+        fence,
+        seek_limit(bucket, limit),
+        false,
+        push_key,
     );
     push_arm_filters(query, read, filter, keyset);
     query.push(" AND ");
@@ -305,6 +314,8 @@ fn push_account<'a>(
         bucket,
         identity,
         fence,
+        seek_limit(bucket, limit),
+        false,
         |query| {
             participant.push_predicate(query, read.address, read.namespace);
         },
@@ -314,6 +325,11 @@ fn push_account<'a>(
     participant.push_predicate(query, read.address, read.namespace);
     push_probe_tail(query, filter, bucket, identity, limit);
     query.push(") ne");
+}
+
+/// A seek probe's `LIMIT`, which its fence holds too; a candidate probe's fence has none.
+fn seek_limit(bucket: Bucket, limit: i64) -> Option<i64> {
+    matches!(bucket, Bucket::After(_) | Bucket::Any).then_some(limit)
 }
 
 fn push_probe_tail<'a>(
@@ -372,6 +388,8 @@ fn push_prefixes<'a>(
             bucket,
             identity,
             fence,
+            seek_limit(bucket, limit),
+            true,
             |query| {
                 if matches!(kind, 2 | 3) {
                     query.push("ne.chain_id = source.chain_id AND ");
