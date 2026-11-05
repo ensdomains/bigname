@@ -109,6 +109,7 @@ impl ProjectPhase {
             bigname_project::families::run(&self.pool, chain_id, &target, mode, &token, &options)
                 .await;
         self.report_families(chain_id, &outcome);
+        self.statistics.record(&context.mode, &outcome.rows);
         if let Some(error) = error {
             return Err(self.family_error(chain_id, &target, &outcome, &error));
         }

@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use bigname_project::{
@@ -10,6 +11,7 @@ use bigname_project::{
 use sqlx::PgPool;
 
 mod family_batch;
+mod statistics;
 #[cfg(test)]
 mod tests;
 
@@ -17,7 +19,7 @@ use crate::{
     error::{ErrorKind, RunnerError},
     heads::BlockMarker,
     metrics::RunnerMetricsFeed,
-    phase::{Phase, PhaseContext, PhaseFuture, PhaseName},
+    phase::{AfterProgressFuture, Phase, PhaseContext, PhaseFuture, PhaseName},
 };
 
 /// Bounds and retry policy for Project's family publication loop.
@@ -56,6 +58,7 @@ pub struct ProjectPhase {
     families: FamilySettings,
     /// A budgeted family batch resumes after the runner records its progress.
     family_continuations: Arc<Mutex<BTreeMap<String, family_batch::Continuation>>>,
+    statistics: statistics::Schedule,
 }
 
 impl ProjectPhase {
@@ -66,6 +69,7 @@ impl ProjectPhase {
             metrics_feed: None,
             families: FamilySettings::default(),
             family_continuations: Arc::default(),
+            statistics: statistics::Schedule::default(),
         }
     }
 
@@ -135,6 +139,22 @@ impl Phase for ProjectPhase {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(self.run_family_batch(context))
+    }
+
+    /// Project refreshes the planner statistics of the tables the permission reads join here,
+    /// between batches, one table per call. A failed refresh is logged and never fails the phase
+    /// run.
+    fn after_progress_recorded(&self, _chain_id: &str) -> AfterProgressFuture<'_> {
+        Box::pin(async move {
+            Ok(self
+                .statistics
+                .refresh(&self.pool, statistics::TIMEOUTS, Instant::now())
+                .await)
+        })
+    }
+
+    fn has_after_progress_work(&self, _chain_id: &str) -> bool {
+        self.statistics.due(Instant::now())
     }
 }
 
