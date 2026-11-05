@@ -3,15 +3,16 @@
 //!
 //! The pointer index's key is an expression and the index is partial. The planner never reads a
 //! partial index's expression statistics, so it estimates the node equality at the default
-//! selectivity whatever the node. The previous statement put that equality beside the bound's
-//! literal block under `ORDER BY … LIMIT 1`, and against the estimate a custom plan walked the
-//! chain's rows newest first on the chain-and-block index until the first match. The fixture
-//! reproduces that: unrelated ENSv1 pointer and registrar rows interleaved as on a live chain,
-//! and pointers of the walked names that are old. The plan test checks that the previous
-//! statement still takes that walk here with statistics off, so the fixture keeps proving
-//! something, and that the fenced statement reads only the pointer index, never the
-//! chain-and-block index, in both plan modes with statistics off and on. The row test pins each
-//! input class to its selected pointer and to the previous statement's rows.
+//! selectivity whatever the node. The previous statement put that equality beside the chain and
+//! the bound's block under `ORDER BY … LIMIT 1`, and against the estimate the planner could read
+//! the chain's rows up to the bound on the chain-and-block index. The fixture has unrelated ENSv1
+//! pointer and registrar rows interleaved as on a live chain, and pointers of the walked names
+//! that are old. There the previous statement's generic plan reads the walked node's pointers
+//! through a bitmap of the chain-and-block index over every block up to the bound. The plan test
+//! checks that it still does, so the fixture keeps proving something, and that the fenced
+//! statement reads only the pointer index, never the chain-and-block index, in both plan modes
+//! with statistics off and on. The row test pins each input class to its selected pointer and to
+//! the previous statement's rows.
 
 use std::collections::BTreeMap;
 
@@ -42,6 +43,14 @@ const ORPHANED: u32 = 0xc9;
 const UNPOSITIONED: u32 = 0xca;
 const NAME_ONLY: u32 = 0xcb;
 const ETH: u32 = 0xe7;
+
+/// One row class: its label, the walked names (each with its ancestors, one depth further each)
+/// and the selected pointer as (depth, resolver number), or none.
+type RowCase = (
+    &'static str,
+    &'static [(u32, &'static [u32])],
+    Option<(i32, u32)>,
+);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Statistics {
@@ -117,17 +126,21 @@ async fn mirror_registry_probe_reads_only_the_pointer_index() -> Result<()> {
                     let before = explain(connection, &previous, arguments.clone(), generic).await?;
                     let before_reads = registry_reads(&before[0]["Plan"]);
                     println!("{cell}, previous statement: {}", json!(before_reads));
-                    if statistics == Statistics::Off
-                        && !generic
-                        && label == "old pointer"
+                    // Here the previous statement's generic plan reads the walked node's pointers
+                    // through a bitmap of the chain-and-block index over every block up to the
+                    // bound, for every class and either statistics setting.
+                    if generic
                         && !before_reads.iter().any(|read| {
-                            read["type"] == "Index Scan"
-                                && read["indexes"]
-                                    == json!(["normalized_events_chain_block_number_desc_idx"])
+                            read["type"] == "Bitmap Heap Scan"
+                                && read["indexes"].as_array().is_some_and(|indexes| {
+                                    indexes.iter().any(|index| {
+                                        index == "normalized_events_chain_block_number_desc_idx"
+                                    })
+                                })
                         })
                     {
                         failures.push(format!(
-                            "{cell}: the previous statement no longer walks the chain-and-block \
+                            "{cell}: the previous statement no longer reads the chain-and-block \
                              index, so this fixture proves nothing about it"
                         ));
                     }
@@ -148,11 +161,9 @@ async fn mirror_registry_probe_reads_only_the_pointer_index() -> Result<()> {
 async fn mirror_registry_probe_rows_and_oracle_parity() -> Result<()> {
     with_fixture("mirror_registry_rows", async |connection| {
         let published = BTreeMap::from([(MAINNET.to_owned(), BOUND)]);
-        // Each class: the walked names (with the depth of each above the first) and the selected
-        // pointer as (depth, resolver number), or none.
         // The child_node and namehash names also carry a newer pointer the readable terms or the
         // family list exclude, inside the fence and outside it.
-        let cases: [(&str, &[(u32, &[u32])], Option<(i32, u32)>); 11] = [
+        let cases: [RowCase; 11] = [
             (
                 "pointer by child_node",
                 &[(CHILD_NODE, &[])],
