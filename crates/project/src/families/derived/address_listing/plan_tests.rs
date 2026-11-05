@@ -15,11 +15,11 @@
 //! - W3, a touched (address, resource) group (`LEADS`): `project_address_listing_resource_idx`
 //!   on all three of its columns;
 //! - W4, the address index gate of a composed row (`address_listing_statement`): the index's
-//!   primary key on (address, name);
+//!   primary key on (address, name), or its name index, bounded by the name's holders;
 //! - W5, the registry children of a parent derived whole (`CHANGES`):
 //!   `project_address_listing_registry_parent_idx`.
 //!
-//! The respell over `KEY_TARGET` (an undo's restored keys) probes the primary key. The tests pin
+//! The respell over `KEY_TARGET` (an undo's restored keys) probes either key index. The tests pin
 //! access paths only: no row or buffer assertions. The write statements (`DELETE`, `INSERT`) join
 //! the change table by the primary key, as the child listing's do, and are not pinned here.
 use anyhow::{Context, Result, ensure};
@@ -63,6 +63,10 @@ const GROUP: Probe = (
 const INDEX_GATE: Probe = (
     "project_address_name_index_pkey",
     &["(address = ", "(logical_name_id = "],
+);
+const INDEX_GATE_BY_NAME: Probe = (
+    "project_address_name_index_name_idx",
+    &["(chain_id = ", "(logical_name_id = "],
 );
 
 #[tokio::test]
@@ -183,7 +187,11 @@ async fn check_plans(connection: &mut PgConnection) -> Result<()> {
             &plan,
             "stage",
             mode,
-            &[("project_address_name_index", "indexed", &[INDEX_GATE])],
+            &[(
+                "project_address_name_index",
+                "indexed",
+                &[INDEX_GATE, INDEX_GATE_BY_NAME],
+            )],
         )?);
     }
     ensure!(
@@ -216,8 +224,11 @@ fn failures_of(
     mode: &str,
     checks: &[(&str, &str, &[Probe])],
 ) -> Result<Vec<String>> {
+    // The planner numbers the aliases of a statement's repeated subqueries (`listing_1`, ...).
+    let mut unnumbered = plan[0]["Plan"].clone();
+    strip_alias_numbers(&mut unnumbered);
     let mut scans = Vec::new();
-    collect_scans(&plan[0]["Plan"], &mut scans);
+    collect_scans(&unnumbered, &mut scans);
     let mut failures: Vec<String> = checks
         .iter()
         .filter_map(|(relation, alias, probes)| probe_failure(&scans, relation, alias, probes))
@@ -243,6 +254,19 @@ fn failures_of(
         failures.push(serde_json::to_string_pretty(plan)?);
     }
     Ok(failures)
+}
+
+fn strip_alias_numbers(node: &mut Value) {
+    if let Some(alias) = node["Alias"].as_str()
+        && let Some((base, number)) = alias.rsplit_once('_')
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        node["Alias"] = Value::String(base.to_owned());
+    }
+    if let Some(children) = node.get_mut("Plans").and_then(Value::as_array_mut) {
+        children.iter_mut().for_each(strip_alias_numbers);
+    }
 }
 
 fn name(n: i64) -> String {

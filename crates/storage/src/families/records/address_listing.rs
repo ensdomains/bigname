@@ -254,10 +254,11 @@ pub fn address_listing_statement(
 /// surface's chain-observed preimages, and yields `(address, logical_name_id, before_image,
 /// after_image)` for each row it spells further: fewer labels left as `[labelhash]`. Only the
 /// name and the columns read from it change; a preimage observation can do nothing else to a
-/// stored row.
+/// stored row. `target` is read first and on its own, so its own index bounds the read.
 pub fn address_listing_respell_sql(target: &str) -> String {
     format!(
         "/* storage:families.records.address_listing_respell */
+         WITH target AS MATERIALIZED ({target})
          SELECT target.address, target.logical_name_id, to_jsonb(target),
                 to_jsonb(target) || jsonb_build_object(
                     'display_key',
@@ -269,7 +270,7 @@ pub fn address_listing_respell_sql(target: &str) -> String {
                     CASE WHEN strpos(spelling.name, '.') > 1
                          THEN substr(spelling.name, strpos(spelling.name, '.') + 1) END,
                     'unhealed_labelhashes', to_jsonb(spelling.unhealed))
-         FROM ({target}) target
+         FROM target
          JOIN bigname_phase.name_surfaces surface
            ON surface.logical_name_id = target.logical_name_id AND surface.raw_name IS NULL{spelling}
          WHERE spelling.name IS NOT NULL

@@ -11,8 +11,7 @@ use bigname_project::families::{self, FamilyMode};
 use families_support::{
     CHAIN, Event, Fixture, ens_v2_path, hash,
     listing_cases::{
-        OWNER, REGISTRY, edge, ensure_equal_but_listing, journalled, label_state, name, node,
-        preimage,
+        OWNER, REGISTRY, ensure_equal_but_listing, journalled, label_state, name, node, preimage,
     },
     uuid,
 };
@@ -20,6 +19,10 @@ use serde_json::json;
 
 const V1_REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const FAMILY: &str = "project_address_listing";
+
+/// A stored registry child row: (address, token holder, effective controller, registry child,
+/// registry parent, expiry key, listed).
+type ChildRow = (String, bool, bool, bool, Option<String>, String, bool);
 
 /// The label hash of `label`.
 fn labelhash(label: &str) -> String {
@@ -146,9 +149,23 @@ fn placeholder(labelhash: &str) -> String {
 async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<()> {
     let fixture = Fixture::new("families_address_listing_registry_child", 20).await?;
     fixture.surface(&name(1), &node(1)).await?;
-    edge(&fixture, (10, 0), 1, 11, &labelhash("kid"), OWNER).await?;
+    // setSubnodeOwner(parent 1, kid, OWNER) on the child's registry-only resource.
+    fixture
+        .write(
+            10,
+            0,
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            None,
+            Some(&uuid(0x4200)),
+            json!({"source_event": "NewOwner", "node": node(1), "child_node": node(11),
+                   "labelhash": labelhash("kid"), "owner": OWNER, "owner_getter": OWNER,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
     fixture.apply(10, FamilyMode::Normal).await?;
-    let child: Vec<(String, bool, bool, bool, Option<String>, String, bool)> = sqlx::query_as(
+    let child: Vec<ChildRow> = sqlx::query_as(
         "SELECT address, token_holder, effective_controller, registry_child,
                 registry_parent_logical_name_id, expires_key::text, listed
          FROM project_address_listing WHERE chain_id = $1 AND logical_name_id = $2",
@@ -203,6 +220,10 @@ async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<(
         "the child's surface ends its registry child row"
     );
     fixture.assert_rebuild_equal(12).await?;
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
     fixture.cleanup().await
 }
 
@@ -239,6 +260,10 @@ async fn the_registration_lead_moves_with_the_smallest_alias() -> Result<()> {
         "the moved alias leads its own resource and b.box leads again: {moved:?}"
     );
     fixture.assert_rebuild_equal(5).await?;
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
     fixture.cleanup().await
 }
 
@@ -270,6 +295,10 @@ async fn an_observed_label_respells_its_holders() -> Result<()> {
     );
     ensure!(journalled(&fixture, 3, FAMILY).await? == (1, 1));
     fixture.assert_rebuild_equal(3).await?;
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
     fixture.cleanup().await
 }
 
@@ -297,6 +326,10 @@ async fn an_imported_preimage_changes_no_stored_spelling() -> Result<()> {
     ensure!(before.1 == [y, tld]);
     ensure!(journalled(&fixture, 3, FAMILY).await? == (0, 0));
     ensure!(journalled(&fixture, 4, FAMILY).await? == (0, 0));
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
     fixture.cleanup().await
 }
 
@@ -331,5 +364,9 @@ async fn an_undo_keeps_the_healed_spelling() -> Result<()> {
         "the block applied again changes no row"
     );
     fixture.assert_rebuild_equal(3).await?;
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
     fixture.cleanup().await
 }

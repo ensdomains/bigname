@@ -256,7 +256,6 @@ impl Fixture {
 
     pub async fn cleanup(self) -> Result<()> {
         self.listing_checks.require()?;
-        self.address_listing_checks.require()?;
         self.database.cleanup().await
     }
 
