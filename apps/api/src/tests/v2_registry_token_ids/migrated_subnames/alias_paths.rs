@@ -187,6 +187,8 @@ pub(super) async fn assert_alias(
             records["data"], expected,
             "{alias} records under {canonical} with {query}"
         );
+        assert_eq!(records["meta"]["completeness"], "full", "{records:#}");
+        assert_eq!(records["meta"]["source"], "indexed", "{records:#}");
     }
     Ok(served)
 }
@@ -825,6 +827,8 @@ async fn a_verified_alias_read_resolves_the_requested_path() -> Result<()> {
         body["data"]["records"]["addr:60"]["value"], GRANTEE,
         "{body:#}"
     );
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(body["meta"].get("completeness").is_none(), "{body:#}");
     let requests = join_primary_name_mock_rpc_requests(handle).await?;
     assert_eq!(requests.len(), 1, "{requests:#?}");
     let calldata = requests[0]["params"][0]["data"]
