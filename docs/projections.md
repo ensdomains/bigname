@@ -1347,8 +1347,11 @@ no grace deadline, no `ens_v1_expiry`, no registrant and no control owner, regis
 expiry. Its `lapsed_registration` names the holder before the claim, with `released_at` the
 block time of that write and `release_kind` `expired`. The write is the first of the node's
 trailing run of Graveyard writes, since `clear` writes a subname of a name it holds again each time
-it runs. A non-Graveyard write between two Graveyard writes, followed by the later one in its
-own transaction, does not end the run: that is a repeated re-parent's write to the NameWrapper.
+it runs. Only the Graveyard's repeated re-parent of a held subname keeps the run going: a write
+naming the NameWrapper between two Graveyard writes, followed by the later one in its own
+transaction, which also moves the name's wrapped token to the Graveyard. Any other write between
+them ends the run, such as a token holder's `reclaim` followed by its own write to the Graveyard
+in one transaction.
 The holder is the one as it stood just before that write, by position, so an earlier write of the
 claim's own transaction counts. It is the registrant the lease laterals found, before
 the NameWrapper expiry mask, when that was found before the write and is not zero or the

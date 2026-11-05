@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 use super::NameFacts;
 use crate::families::control::{
     position::Position,
-    registry::{OwnerEvent, RegistryNode, ZERO_ADDRESS},
+    registry::{OwnerEvent, ZERO_ADDRESS},
     rows::{BindingCandidate, LifecycleEvent},
 };
 
@@ -37,19 +37,22 @@ pub(super) fn claim(facts: &NameFacts) -> Option<&OwnerEvent> {
     {
         return None;
     }
-    first_held(facts.registry_node.as_ref()?)
+    first_held(facts)
 }
 
 /// The write that gave the Graveyard the node's record, when it still holds it: the first of the
 /// trailing run of current-registry owner writes naming it. `clear` writes a subname of a name it
 /// holds again each time it runs, for that subname or any name below it, and a holder's own write
 /// to the Graveyard can precede a clear. A repeated re-parent of a held subname writes the record
-/// to the NameWrapper and then to the Graveyard in one transaction: that custody write between two
-/// Graveyard writes does not end the run. The registration ended at the first of them, and its
-/// holder is the one before that.
+/// to the NameWrapper and then to the Graveyard in one transaction ([`re_parent`]): that custody
+/// write between two Graveyard writes does not end the run. Any other write between them does,
+/// such as a token holder's `reclaim` followed by its own write to the Graveyard in one
+/// transaction. The registration ended at the first write of the run, and its holder is the one
+/// before that.
 /// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
 /// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
-pub(super) fn first_held(node: &RegistryNode) -> Option<&OwnerEvent> {
+fn first_held(facts: &NameFacts) -> Option<&OwnerEvent> {
+    let node = facts.registry_node.as_ref()?;
     let registry = node.latest_transfer()?.source_family.as_str();
     let writes: Vec<&OwnerEvent> = node
         .owner_events
@@ -61,6 +64,7 @@ pub(super) fn first_held(node: &RegistryNode) -> Option<&OwnerEvent> {
         .collect::<BTreeMap<_, _>>()
         .into_values()
         .collect();
+    let wrappers = name_wrappers(facts);
     let mut first = None;
     for (index, write) in writes.iter().enumerate().rev() {
         if write.graveyard_held() {
@@ -71,18 +75,63 @@ pub(super) fn first_held(node: &RegistryNode) -> Option<&OwnerEvent> {
             .checked_sub(1)
             .is_some_and(|before| writes[before].graveyard_held())
             && writes.get(index + 1).is_some_and(|next| {
-                next.graveyard_held()
-                    && (next.position.block_number, next.position.transaction_index)
-                        == (
-                            write.position.block_number,
-                            write.position.transaction_index,
-                        )
+                next.graveyard_held() && re_parent(facts, &wrappers, write, next)
             });
         if !custody {
             break;
         }
     }
     first
+}
+
+/// Whether `write`, followed in its own transaction by the Graveyard's write `next`, is the
+/// Graveyard's re-parent of a subname it holds under a locked parent: the NameWrapper's
+/// `setSubnodeRecord` with the Graveyard as owner writes the record to the NameWrapper and mints
+/// the wrapped token to the Graveyard, then `unwrap` writes the record to the Graveyard. So
+/// `write` names one of the name's NameWrappers, and that transaction moves the name's wrapped
+/// token to the Graveyard. A holder's own wrap and unwrap to the Graveyard in one transaction
+/// mints the token to the holder, and a `reclaim` names the token holder: neither is custody.
+/// (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596-L630 @ ens_v1@91c966f)
+fn re_parent(
+    facts: &NameFacts,
+    wrappers: &[&BindingCandidate],
+    write: &OwnerEvent,
+    next: &OwnerEvent,
+) -> bool {
+    let transaction = |position: &Position| (position.block_number, position.transaction_index);
+    let names = |address: Option<&str>, holder: &str| {
+        address.is_some_and(|address| address.eq_ignore_ascii_case(holder))
+    };
+    let (Some(owner), Some(graveyard)) = (write.reported_owner(), next.owner_getter.as_deref())
+    else {
+        return false;
+    };
+    transaction(&write.position) == transaction(&next.position)
+        && wrappers
+            .iter()
+            .any(|wrapper| names(wrapper.emitting_address.as_deref(), &owner))
+        && facts.events.iter().any(|event| {
+            event.source_family == "ens_v1_wrapper_l1"
+                && event.event_kind == "TokenControlTransferred"
+                && transaction(&event.position) == transaction(&write.position)
+                && wrappers.iter().any(|wrapper| {
+                    event.resource_id.as_deref() == Some(wrapper.resource_id.as_str())
+                })
+                && names(event.to_address.as_deref(), graveyard)
+        })
+}
+
+/// The name's NameWrapper candidates that record their NameWrapper's address.
+fn name_wrappers(facts: &NameFacts) -> Vec<&BindingCandidate> {
+    facts
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.authority_kind.as_deref() == Some("wrapper")
+                && candidate.emitting_address.is_some()
+        })
+        .collect()
 }
 
 /// Serve a Graveyard-held name's registration as ended. The lapsed owner is the holder as it
@@ -198,14 +247,7 @@ fn prior_holder(facts: &NameFacts, claim: &OwnerEvent, graveyard: Option<&str>) 
         .max_by(|left, right| left.position.cmp(&right.position))
         .and_then(OwnerEvent::reported_owner)
         .filter(|owner| owner != ZERO_ADDRESS)?;
-    let wrappers: Vec<&BindingCandidate> = facts
-        .candidates
-        .iter()
-        .filter(|candidate| {
-            candidate.authority_kind.as_deref() == Some("wrapper")
-                && candidate.emitting_address.is_some()
-        })
-        .collect();
+    let wrappers = name_wrappers(facts);
     if wrappers
         .iter()
         .any(|wrapper| wrapper.emitting_address.as_deref() == Some(owner.as_str()))
