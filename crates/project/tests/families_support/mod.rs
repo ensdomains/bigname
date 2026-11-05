@@ -12,7 +12,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
-mod address_listing;
+pub mod address_listing;
 mod child_listing;
 pub mod ens_v2_path;
 mod expiry_policy;

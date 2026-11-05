@@ -19,7 +19,7 @@ use super::{
     event_counts, history_catalogue,
     input::BlockHeader,
     lookup, marker,
-    tables::{CHILD_LISTING, NAME_SUMMARY},
+    tables::{ADDRESS_LISTING, CHILD_LISTING, NAME_SUMMARY},
 };
 use crate::{ProjectError, Result};
 
@@ -341,8 +341,9 @@ pub(crate) async fn window_end(
 }
 
 /// Compose one chunk of the names stream at `block`, the pass block's publication with the
-/// marker's composition: the address name index of every id, the summaries and the catalogue of
-/// the composed ones, then the lookup names and inventories of those that reach the lookup.
+/// marker's composition: the address name index of every id, the summaries, the address listing
+/// rows and the catalogue of the composed ones with the registry children among the rest, then
+/// the lookup names and inventories of those that reach the lookup.
 pub(crate) async fn names_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -358,9 +359,17 @@ pub(crate) async fn names_chunk(
             .collect::<Vec<_>>()
     };
     let (every, looked_up, composed) = (reaching(0), reaching(LOOKUP), reaching(COMPOSED));
+    // The ids the summaries do not compose: each can be a surface-less registry child, whose
+    // address listing rows the children relation derives.
+    let others: Vec<String> = ids
+        .iter()
+        .filter(|(_, _, reach)| *reach < COMPOSED)
+        .map(|(_, id, _)| id.clone())
+        .collect();
     let keys = Touched::keys(every, Default::default(), Default::default());
     derived::refresh(transaction, chain_id, &keys, composition).await?;
     let publication = marker::publication(chain_id, block, composition)?;
+    derived::prepare_address_listing(transaction).await?;
     let mut current: Vec<CurrentHistoryRelation> = Vec::new();
     for chunk in composed.chunks(derived::SUMMARY_CHUNK) {
         let fresh = derived::compose_summaries(transaction, &publication, chunk).await?;
@@ -370,11 +379,24 @@ pub(crate) async fn names_chunk(
             &fresh.null_resolver_names,
         )
         .await?;
+        derived::stage_address_listing(transaction, chain_id, chunk, &fresh.address_listing)
+            .await?;
         current.extend(fresh.current_history_relations);
         let (rows, _) =
             derived::replace_summary_chunk(transaction, chain_id, block, chunk, &fresh.rows)
                 .await?;
         *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;
+    }
+    // Boxed, so the chunk's future does not carry the derivation's state on the caller's stack.
+    let listing = Box::pin(derived::address_listing_pass_chunk(
+        transaction,
+        chain_id,
+        block,
+        &others,
+    ))
+    .await?;
+    if listing.rows > 0 {
+        *stats.rows.entry(ADDRESS_LISTING.name).or_default() += listing.rows;
     }
     history_catalogue::refresh(
         transaction,

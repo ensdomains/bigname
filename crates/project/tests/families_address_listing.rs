@@ -9,7 +9,9 @@ use std::collections::BTreeSet;
 use anyhow::{Result, ensure};
 use bigname_project::families::{self, FamilyMode};
 use families_support::{
-    CHAIN, Event, Fixture, ens_v2_path, hash,
+    CHAIN, Event, Fixture,
+    address_listing::q_read,
+    ens_v2_path, hash,
     listing_cases::{
         OWNER, REGISTRY, ensure_equal_but_listing, journalled, label_state, name, node, preimage,
     },
@@ -189,12 +191,13 @@ async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<(
     );
     ensure!(journalled(&fixture, 10, FAMILY).await? == (1, 0));
 
+    let spelled = bigname_domain::normalization::normalize_name("kid.parent.eth")?;
     sqlx::query(
-        "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, namehash, labelhashes,
-             normalizer_version, visibility_state, chain_id, block_hash, block_number,
-             canonicality_state)
-         VALUES ($1, 'ens', 'kid.parent.eth', $2, ARRAY[$3, $4, $5], $6, 'active', $7, $8, 12,
-                 'canonical')",
+        "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, 'ens', 'kid.parent.eth', $9, $10, $2, ARRAY[$3, $4, $5], $6, 'active', $7,
+                 $8, 12, 'canonical')",
     )
     .bind(name(11))
     .bind(node(11))
@@ -204,6 +207,8 @@ async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<(
     .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
     .bind(CHAIN)
     .bind(hash(12))
+    .bind(spelled.normalized_labels)
+    .bind(spelled.dns_encoded_name)
     .execute(&fixture.pool)
     .await?;
     fixture.apply(12, FamilyMode::Normal).await?;
@@ -220,6 +225,98 @@ async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<(
         "the child's surface ends its registry child row"
     );
     fixture.assert_rebuild_equal(12).await?;
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
+    fixture.cleanup().await
+}
+
+// Row "Basenames child" of TYR-127: the route reads a surface-less registry child only under a
+// parent an ENSv1 registry NewOwner named for it (`registry_child_parents`). The same NewOwner
+// from the Basenames registry gives the children relation a child, and the address listing no
+// row for it.
+#[tokio::test]
+async fn a_basenames_registry_child_lists_no_row() -> Result<()> {
+    let fixture = Fixture::new("families_address_listing_basenames_child", 20).await?;
+    fixture.surface(&name(1), &node(1)).await?;
+    fixture
+        .write(
+            10,
+            0,
+            "SubregistryChanged",
+            "basenames_base_registry",
+            None,
+            Some(&uuid(0x4200)),
+            json!({"source_event": "NewOwner", "node": node(1), "child_node": node(11),
+                   "labelhash": labelhash("kid"), "owner": OWNER, "owner_getter": OWNER,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await?;
+    let edges: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_child_edge_candidate
+         WHERE chain_id = $1 AND child_node = lower($2) AND authority_arm = 'basenames'",
+    )
+    .bind(CHAIN)
+    .bind(node(11))
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        edges == 1,
+        "the children relation reads the Basenames child: {edges} edges"
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_address_listing WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(name(11))
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(rows == 0, "the Basenames child lists {rows} rows");
+    fixture.assert_rebuild_equal(10).await?;
+    ensure!(
+        fixture.address_listing_checks().0 > 0,
+        "the route oracle compared a publication"
+    );
+    fixture.cleanup().await
+}
+
+// Row "100 boundary" of TYR-127: the q key is the first 100 characters of the normalized name. A
+// name of exactly 100 characters and a longer one that starts with it share that key; a reader
+// takes the q's first 100 characters as the index range and checks the whole q against the name,
+// so each q finds exactly the names it starts.
+#[tokio::test]
+async fn a_q_finds_the_names_it_starts_across_the_100_character_key() -> Result<()> {
+    let fixture = Fixture::new("families_address_listing_q_cut", 8).await?;
+    let label = "a".repeat(96);
+    let (exact, longer) = (format!("{label}.box"), format!("{label}.boxy"));
+    ensure!(exact.chars().count() == 100 && longer.chars().count() == 101);
+    let exact_id = owned(&fixture, &exact, 1, &uuid(0x4301), 1, None).await?;
+    let longer_id = owned(&fixture, &longer, 2, &uuid(0x4302), 1, None).await?;
+    fixture.apply(2, FamilyMode::Normal).await?;
+    let both = BTreeSet::from([exact_id.clone(), longer_id.clone()]);
+    for (q, expected) in [
+        (exact[..99].to_owned(), both.clone()),
+        (exact.clone(), both),
+        (longer.clone(), BTreeSet::from([longer_id])),
+        (format!("{label}.boxz"), BTreeSet::new()),
+    ] {
+        let found: BTreeSet<String> = fixture
+            .listing_read(&q_read(CHAIN, OWNER, &q))
+            .await?
+            .into_iter()
+            .collect();
+        ensure!(found == expected, "q {q} finds {found:?}, not {expected:?}");
+    }
+    fixture
+        .ensure_index_serves(
+            &q_read(CHAIN, OWNER, &longer),
+            "project_address_listing_q_idx",
+            "normalized_name, 100)",
+        )
+        .await?;
     ensure!(
         fixture.address_listing_checks().0 > 0,
         "the route oracle compared a publication"

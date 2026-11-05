@@ -262,22 +262,6 @@ pub fn registry_child_listing_statement(
     }
     builder.push(" AND NOT ");
     push_published_surface_exists(&mut builder, "children.child_logical_name_id", block.number);
-    // The route reads a child only under a parent an `ens_v1_registry_l1` NewOwner named for it
-    // (`registry_child_parents`), never a Basenames registry's child.
-    builder.push(
-        " AND EXISTS (
-              SELECT 1 FROM bigname_phase.normalized_events event
-              WHERE event.chain_id = children.chain_id
-                AND (event.namespace || ':' || lower(event.after_state ->> 'child_node'))
-                    = children.child_logical_name_id
-                AND event.event_kind = 'SubregistryChanged'
-                AND event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-                AND event.source_family = 'ens_v1_registry_l1'
-                AND event.consumer_visibility = 'activated'
-                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-                AND event.namespace || ':' || lower(event.after_state ->> 'node')
-                    = children.parent_logical_name_id)",
-    );
     builder.push(format!(
         "
         ), related AS (
