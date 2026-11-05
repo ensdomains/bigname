@@ -7,6 +7,8 @@ use alloy_primitives::B256;
 
 #[path = "node_identity/dense_prefix.rs"]
 mod dense_prefix;
+#[path = "node_identity/graveyard_held.rs"]
+mod graveyard_held;
 #[path = "node_identity/never_registered.rs"]
 mod never_registered;
 
