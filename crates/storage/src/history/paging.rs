@@ -6,6 +6,7 @@ use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
     HistorySummaryMode,
     columns::{push_history_select, push_history_select_for_page},
+    count_contract,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
     filters::{push_history_block_window, push_selector_filter, push_string_filter},
@@ -314,7 +315,7 @@ pub(super) fn push_history_filters<'a>(
     }
 
     if let Some(contract_address) = filter.contract_address.as_ref() {
-        builder.push(" AND lower(ne.raw_fact_ref ->> 'emitting_address') = ");
+        builder.push(format!(" AND {} = ", count_contract::emitter("ne")));
         builder.push_bind(contract_address);
     }
 
@@ -350,19 +351,22 @@ pub(super) fn push_history_filters<'a>(
     }
 
     // A source that took the resolver arms holds only the resolver's rows.
-    // Every other resolver read is narrowed by this condition.
+    // Every other resolver read is narrowed by this condition. The stored event counts mirror
+    // it in the handoff of `count_contract.rs`, and `stored_counts_equal_the_reads_they_count`
+    // pins the two together.
     if resolver_source == ResolverSource::Condition
         && let Some(resolver) = filter.resolver.as_ref()
     {
         builder.push(" AND ne.chain_id = ");
         builder.push_bind(&resolver.chain_id);
-        builder.push(" AND (lower(ne.raw_fact_ref ->> 'emitting_address') = ");
+        builder.push(format!(" AND ({} = ", count_contract::emitter("ne")));
         builder.push_bind(&resolver.address);
-        builder.push(
-            " OR (ne.event_kind = 'ResolverChanged' AND (lower(ne.after_state ->> 'resolver') = ",
-        );
+        builder.push(format!(
+            " OR (ne.event_kind = 'ResolverChanged' AND ({} = ",
+            count_contract::set_resolver("ne")
+        ));
         builder.push_bind(&resolver.address);
-        builder.push(" OR lower(ne.before_state ->> 'resolver') = ");
+        builder.push(format!(" OR {} = ", count_contract::cleared_resolver("ne")));
         builder.push_bind(&resolver.address);
         builder.push(")))");
     }

@@ -398,9 +398,12 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
 - `BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` — optional, 0 (default) to 3; see [Live publication lag](#live-publication-lag)
+- `BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM` — optional `maintenance_work_mem` for the walk index rebuild; see [The phase runner rebuilds the indexes drop.sql drops before Project](#the-phase-runner-rebuilds-the-indexes-dropsql-drops-before-project)
+- `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS` — optional `max_parallel_maintenance_workers` for the same rebuild
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
+The two rebuild settings follow the same rule: unset keeps the server's value.
 A configured ceiling must parse as an unsigned 64-bit integer; zero is a limit,
 not a way to disable it. The floor must also parse as an unsigned 64-bit integer.
 Operational admission rejects floor zero: Compose only enforces presence, and
@@ -1647,6 +1650,28 @@ with the reserved readiness connection, one API process can open at most
 collection request holds one request-pool connection while its read snapshot is
 open.
 
+Before either pool hands out an idle connection, the API asks the server in one
+statement whether the session is still inside a transaction. That statement
+takes the place of the empty ping the database driver sends otherwise. A request
+dropped while its `BEGIN` was in flight, as when its client disconnects, can
+return its connection with that transaction still open. The API rolls such a
+transaction back, logs a warning that it did, and then hands the connection out.
+A connection the server has already ended is closed and replaced. After a
+server restart this happens once per pooled connection and logs at info. A
+request's shared read snapshot that still meets such a transaction when it pins
+its isolation level rolls it back, logs the same warning and starts again once,
+rather than failing with `500`.
+
+Each API connection also sets `idle_in_transaction_session_timeout` to
+`BIGNAME_API_REQUEST_TIMEOUT_MS` plus 5 seconds. A request never holds a
+transaction past its deadline, so the server only ends a session whose
+transaction was left open and that no request has taken again. The API logs a
+warning with SQLSTATE `25P03` when it then replaces that connection. A
+transaction left open holds its locks and, after a snapshot pin, its snapshot.
+On a hot standby either can hold up WAL replay that conflicts with it, until the
+standby cancels the session. The request timeout may be at most 2147478647 ms,
+so that this setting stays within PostgreSQL's limit.
+
 ### Database connection budget
 
 `BIGNAME_DATABASE_MAX_CONNECTIONS` is an API-only setting. The phase runner does
@@ -2359,6 +2384,39 @@ publication trails the head within the
 at the publication instead of `409 stale`, and its verified-only `meta.as_of`
 reports the publication's block rather than the head. The lookup RPC provider
 needs the same `eth_call`-by-hash depth as verified record lookups.
+
+### ENSv1 registry clear on an auto records read
+
+The build that answers a `source=auto` records read of an ENSv1 registry clear
+`not_found` from the index
+([records route](api-v1-routes.md#ensv1-registry-clear-on-an-auto-read))
+changes only the API's records route, which is not a hashed source, so neither
+the [interpreter content hash](glossary.md#interpreter-content-hash) nor the
+[projection content hash](glossary.md#projection-content-hash) rotates and no
+redo is needed. It adds no schema-migration and no manifest change, so an API
+image swap deploys it. Those reads stop calling the RPC provider, and they
+answer the same when the provider is down. `source=verified` reads of the same
+names still call it.
+
+### CCIP-Read gateway destination filter
+
+The build that refuses CCIP-Read gateway fetches to loopback, private,
+link-local and the other refused ranges
+([CCIP-Read gateway transport](execution.md#ccip-read-gateway-transport))
+changes only the lookup crate's gateway client and the API's startup
+configuration and metrics, none of them hashed sources, so neither the
+[interpreter content hash](glossary.md#interpreter-content-hash) nor the
+[projection content hash](glossary.md#projection-content-hash) rotates and no
+redo is needed. It adds no schema-migration and no manifest change, so an API
+image swap deploys it.
+
+It adds `BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS`, an operator deny list that is
+empty by default ([API request bounds](production.md#api-request-bounds)). An
+API with an entry that is not a CIDR range refuses to start. A deployment whose
+resolvers point at a gateway on a private or local address now serves those
+records as `failed` with `failure_reason=gateway_destination_refused`. The
+gateway client no longer reads `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`.
+Refusals are counted in `ccip_gateway_destination_refused_total{class}`.
 
 ### Lookahead loader on Base
 
@@ -3323,8 +3381,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 37 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 54, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 35 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 52, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -5222,7 +5280,7 @@ it), the child-registration arm (`child_arm.rs`), the resolver page arms
   and `registry_handoffs.rs`.
 - The fork walk of a non-canonical read in `lineage.rs` keeps its plain joins too. It is off
   the request path, because no route makes a non-canonical read.
-- The address-pair lookup (`pair_lineage` in `address_pairs.rs`) stays as it is, because
+- The address-pair lookup (`pair_lineage` in `count_contract.rs`) stays as it is, because
   outer parameters bind its key.
 - The history source is an input of the
   [projection content hash](glossary.md#projection-content-hash) only, because Project's
@@ -5733,6 +5791,424 @@ pair with its other hash-rotating changes. Do not mark old rows ready under the 
 
 It adds no schema-migration, table or setting.
 
+## Prefix bucket indexes for search
+
+The build that bounds a short-prefix `GET /v1/search` by its page changes how a dense class
+reads its candidates. A dense class is a [search document](storage.md#durable-search-data)
+class whose postings exceed 1,024 for every term of the prefix.
+
+- Before, such a class walked the whole name order from its first entry, or from the
+  cursor, and filtered each entry by the prefix. A one- or two-character prefix read every
+  name that sorts before it on the first page.
+- It now reads the bucket of the first one, two or three characters of the prefix, from
+  the cursor, in page order, and stops at the page limit. A longer prefix reads the
+  three-character bucket and filters it. The statements are
+  `storage:families.name.search_candidates.prefix1` to `prefix3`
+  ([table ownership](storage.md#table-ownership)).
+- Contains and exact searches, and prefixes with a term of 1,024 postings or fewer, read
+  as before. Responses, their order and their cursors do not change.
+- Neither content hash rotates. `crates/storage/src/families/search_dictionary.rs` and
+  `search_dictionary/candidates.rs` are serving reads outside both hashes, and the baselines
+  and schema-migrations are inputs of neither. No redo is needed. The change ships as an
+  API image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261029120000_search_prefix_bucket_indexes.sql` installs three read-only
+btree indexes on `name_search_documents`. An index that already exists under its name, with
+the reviewed definition, is adopted without a build and without a lock on the table. A
+missing index is built with an ordinary `CREATE INDEX`, which holds a SHARE lock on
+`name_search_documents` until the schema-migration commits and blocks Interpret's writes to
+it. Apply the schema-migration with the phase runner, redo processes and API stopped, with
+the same `lock_timeout`, `statement_timeout` and retry procedure as the other index
+schema-migrations and `--target-version 20261029120000`.
+
+On a large initialized database, prebuild the indexes concurrently first, outside a
+transaction. The phase runner and API can keep running while they build, and the new API
+image reads them as soon as it serves. The schema-migration then finds them by name and
+skips the builds:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix1_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 1), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix2_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 2), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix3_idx
+    ON bigname_phase.name_search_documents
+    (spelling_class, left(name, 3), name, namespace, namehash)
+    WHERE spelling_class IN (0, 1);
+```
+
+`IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
+invalid index. The schema-migration checks all three names before its own builds and again
+after them. It refuses a name that is not an index, is on another table, is not valid and
+ready, or has another definition, and its error names the index. Check the same things
+yourself after each concurrent build, so the schema-migration does not stop inside the
+maintenance window:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relname, c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname IN (
+      'name_search_documents_prefix1_idx',
+      'name_search_documents_prefix2_idx',
+      'name_search_documents_prefix3_idx');
+RESET search_path;
+```
+
+It must return three rows. Each has `relkind` `i`, `indrelid`
+`bigname_phase.name_search_documents`, and `indisvalid` and `indisready` true. The
+definitions must be exactly these lines, which are the text the schema-migration compares:
+
+```text
+CREATE INDEX name_search_documents_prefix1_idx ON bigname_phase.name_search_documents USING btree (spelling_class, "left"(name, 1), name, namespace, namehash) WHERE (spelling_class = ANY (ARRAY[0, 1]))
+CREATE INDEX name_search_documents_prefix2_idx ON bigname_phase.name_search_documents USING btree (spelling_class, "left"(name, 2), name, namespace, namehash) WHERE (spelling_class = ANY (ARRAY[0, 1]))
+CREATE INDEX name_search_documents_prefix3_idx ON bigname_phase.name_search_documents USING btree (spelling_class, "left"(name, 3), name, namespace, namehash) WHERE (spelling_class = ANY (ARRAY[0, 1]))
+```
+
+A missing index has no row. The schema-migration then builds it under the SHARE lock, so
+build it concurrently first.
+
+The remedy depends on the refusal:
+
+- A name that is not an index: remove or rename that relation, then build the index.
+- An index of the name on another table, or one that is not valid and ready: drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, then build it again with the
+  statement above.
+- Another definition: the error prints the definition it found and the one it expects.
+  Drop the index the same way and build it again with the statement above.
+
+Before any drop, confirm in `pg_stat_progress_create_index` that no build of the index is
+still running. Then run the schema-migrations again.
+
+Interpret and the verified label-preimage importer write three more btree entries for each
+raw-backed or structural search document of at most 2000 bytes they insert or change.
+
+## A partial index for the Transfer arm of the history handoff probe
+
+The build that adds `normalized_events_v1_transfer_node_idx` changes how history's registry
+handoff read finds a name's registry `Transfer` events. The read runs for history pages with
+`include=data` ([table ownership](storage.md#table-ownership)).
+
+- Before, its two `Transfer` arms read `normalized_events_project_name_node_idx`. Under a
+  top-level node such as `eth` that index holds every second-level name's `NewOwner` events,
+  none of which is a `Transfer`, so the arms read all of them. On a large database the history
+  of such a node failed at the API's statement timeout.
+- The arms now read the new partial index, which holds `Transfer` events only. Responses do
+  not change. The statement in `crates/storage/src/history/registry_handoffs.rs` is unchanged.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and no hashed file changes. No redo is needed. The change ships as an image swap plus the
+  schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261102130000_normalized_events_v1_transfer_node_index.sql` installs the
+index. Where an index of that name already exists, valid and ready, with the reviewed
+definition, the schema-migration adopts it without a build and without a lock, so it is a
+no-op on a database where the index was already built by hand with the statement below. An
+empty `normalized_events` builds it directly. A populated table without it is refused, so on
+an initialized database prebuild it concurrently first, outside a transaction. The phase
+runner and API can keep running while it builds, and the API reads it as soon as it is
+valid:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v1_transfer_node_idx
+    ON bigname_phase.normalized_events (chain_id, (namespace || ':' || lower(after_state ->> 'node')), block_number)
+    INCLUDE (normalized_event_id)
+    WHERE event_kind = 'AuthorityTransferred'
+      AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+      AND after_state ->> 'source_event' = 'Transfer'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+ANALYZE bigname_phase.normalized_events;
+```
+
+`IF NOT EXISTS` matches the index name only, and an interrupted concurrent build leaves an
+invalid index. Check the index after the build:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'normalized_events_v1_transfer_node_idx';
+RESET search_path;
+```
+
+It must return one row with `relkind` `i`, `indrelid` `bigname_phase.normalized_events`, and
+`indisvalid` and `indisready` true. The definition must be exactly this line, which is the
+text the schema-migration compares:
+
+```text
+CREATE INDEX normalized_events_v1_transfer_node_idx ON bigname_phase.normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'node'::text)))), block_number) INCLUDE (normalized_event_id) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])) AND ((after_state ->> 'source_event'::text) = 'Transfer'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))
+```
+
+The schema-migration refuses a name that is not an index, an index on another table or one
+that is not valid and ready, and another definition. Its error names the index and, for
+another definition, prints the definition it found and the one it expects. The recovery
+steps:
+
+- A name that is not an index: remove or rename that relation, then build the index with the
+  statement above.
+- Any other refusal: confirm in `pg_stat_progress_create_index` that no build of the index is
+  still running, drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.normalized_events_v1_transfer_node_idx`, then build
+  it again with the statement above.
+
+Then run the schema-migrations again. `ops/walk-index-set/drop.sql` drops the index with the
+other Project and API indexes, and its `install.sql` rebuilds it.
+
+## A partial index for the registry role counts
+
+The build that adds `normalized_events_registry_roles_idx` changes how a registry's role
+counts are read. The registry detail route and its labels route read them with
+`include=counts` ([table ownership](storage.md#table-ownership)).
+
+- Before, the statement in `apps/api/src/v2/registries/role_counts.rs` read
+  `normalized_events_emitter_history_idx`, which holds every event a registry emitted, and
+  dropped every row that was not a role change. For a registry with a long history the counts
+  could fail at the API's statement timeout.
+- The statement now reads the new partial index, which holds the registry role changes only.
+  Responses do not change. The statement is unchanged.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and no hashed file changes. No redo is needed. The change ships as an image swap plus the
+  schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261102140000_normalized_events_registry_roles_index.sql` installs the
+index. Where an index of that name already exists, valid and ready, with the reviewed
+definition, the schema-migration adopts it without a build and without a lock, so it is a
+no-op on a database where the index was already built by hand with the statement below. An
+empty `normalized_events` builds it directly. A populated table without it is refused, so on
+an initialized database prebuild it concurrently first, outside a transaction. The phase
+runner and API can keep running while it builds, and the API reads it as soon as it is
+valid:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_registry_roles_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(raw_fact_ref ->> 'emitting_address'),
+        resource_id,
+        lower(after_state ->> 'subject'),
+        block_number DESC,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND event_kind IN ('PermissionChanged', 'RootPermissionChanged')
+      AND after_state ->> 'source_event' = 'EACRolesChanged'
+      AND resource_id IS NOT NULL
+      AND after_state ->> 'subject' IS NOT NULL
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+ANALYZE bigname_phase.normalized_events;
+```
+
+`ops/walk-index-set/install.sql` also builds it, together with any other index of the walk
+index set that is missing. The statement above builds this one only.
+
+`IF NOT EXISTS` matches the index name only, and an interrupted concurrent build leaves an
+invalid index. Check the index after the build:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'normalized_events_registry_roles_idx';
+RESET search_path;
+```
+
+It must return one row with `relkind` `i`, `indrelid` `bigname_phase.normalized_events`, and
+`indisvalid` and `indisready` true. The definition must be exactly this line, which is the
+text the schema-migration compares:
+
+```text
+CREATE INDEX normalized_events_registry_roles_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), resource_id, lower((after_state ->> 'subject'::text)), block_number DESC, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((source_family = ANY (ARRAY['ens_v2_root_l1'::text, 'ens_v2_registry_l1'::text])) AND (event_kind = ANY (ARRAY['PermissionChanged'::text, 'RootPermissionChanged'::text])) AND ((after_state ->> 'source_event'::text) = 'EACRolesChanged'::text) AND (resource_id IS NOT NULL) AND ((after_state ->> 'subject'::text) IS NOT NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))
+```
+
+The schema-migration refuses a name that is not an index, an index on another table or one
+that is not valid and ready, and another definition. Its error names the index and, for
+another definition, prints the definition it found and the one it expects. The recovery
+steps:
+
+- A name that is not an index: remove or rename that relation, then build the index with the
+  statement above.
+- Any other refusal: confirm in `pg_stat_progress_create_index` that no build of the index is
+  still running, drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.normalized_events_registry_roles_idx`, then build it
+  again with the statement above.
+
+Then run the schema-migrations again. `ops/walk-index-set/drop.sql` drops the index with the
+other Project and API indexes, and its `install.sql` rebuilds it.
+
+## An ordered index for the resolver links page
+
+The build that adds `project_resolver_link_order_idx` changes how
+`GET /v1/resolvers/{chain_id}/{address}/links` reads a resolver's links
+([table ownership](storage.md#table-ownership)).
+
+- Before, the statement in `crates/storage/src/families/topology/collections.rs` rendered every
+  link of the resolver, with its name and link event, then sorted them all to cut one page. It
+  counted the total from the same rendered rows.
+- The page now walks the new index from the cursor and stops at the page size, and only the
+  page's links are rendered. The total counts the resolver's links directly. Rows, order,
+  cursors and totals do not change.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the changed statement is in a serving reader, not a hashed file. No redo is needed. The
+  change ships as an image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order:
+
+1. Prebuild the index with the statement below.
+2. Apply schema-migration `20261103130000_project_resolver_link_order_index.sql`.
+3. Swap the image.
+
+The schema-migration installs the index. Where an index of that name already exists, valid and
+ready, with the reviewed definition, it adopts it without a build and without a lock, so it is
+a no-op on a database where the index was already built by hand with the statement below. An
+empty `project_resolver_link` builds it directly. A populated table without it is refused, so
+on an initialized database prebuild it concurrently first, outside a transaction. The phase
+runner and API can keep running while it builds. The previous image does not read the index,
+and the family step keeps it current like the table's primary key:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_resolver_link_order_idx
+    ON bigname_phase.project_resolver_link
+        (chain_id, resolver_address, lpad(record_id, 78, '0'), node)
+    WHERE record_id <> '0';
+ANALYZE bigname_phase.project_resolver_link;
+```
+
+`IF NOT EXISTS` matches the index name only, and an interrupted concurrent build leaves an
+invalid index. Check the index after the build:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'project_resolver_link_order_idx';
+RESET search_path;
+```
+
+It must return one row with `relkind` `i`, `indrelid` `bigname_phase.project_resolver_link`,
+and `indisvalid` and `indisready` true. The definition must be exactly this line, which is the
+text the schema-migration compares:
+
+```text
+CREATE INDEX project_resolver_link_order_idx ON bigname_phase.project_resolver_link USING btree (chain_id, resolver_address, lpad(record_id, 78, '0'::text), node) WHERE (record_id <> '0'::text)
+```
+
+The schema-migration refuses a name that is not an index, an index on another table or one
+that is not valid and ready, and another definition. Its error names the index and, for
+another definition, prints the definition it found and the one it expects. The recovery
+steps:
+
+- A name that is not an index: remove or rename that relation, then build the index with the
+  statement above.
+- Any other refusal: confirm in `pg_stat_progress_create_index` that no build of the index is
+  still running, drop it with
+  `DROP INDEX CONCURRENTLY bigname_phase.project_resolver_link_order_idx`, then build it again
+  with the statement above.
+
+Then run the schema-migrations again. An image swap without the index serves the same
+responses, but each page sorts every link of the resolver first.
+
+## The phase runner rebuilds the indexes drop.sql drops before Project
+
+The build that has the phase runner rebuild the `normalized_events` indexes
+[`ops/walk-index-set/drop.sql`](../ops/walk-index-set/README.md) drops (TYR-457, see
+[walk index set](storage.md#walk-index-set)) changes the runner and adds a read of the drop
+list's catalog state to `bigname-storage`.
+
+- Before, after `drop.sql` an operator had to stop the runner or the one-shot redo while
+  Interpret's last batches ran and run `install.sql`. A missed stop let Project, and the API
+  after it, read without those indexes, and on a large database an API read could exceed
+  `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.
+- Now, at every Project entry, the runner builds any index of the list that is missing, and
+  drops and rebuilds one that is not valid and ready, before Project's first batch. It uses
+  `install.sql`'s statements, one at a time with `CREATE INDEX CONCURRENTLY`, then analyzes
+  the table. With every index in place it reads the catalog once and builds nothing.
+- Neither content hash rotates: no hashed file changes. It adds no schema-migration, no
+  manifest change and no redo. It ships as an image swap.
+- It adds two optional settings for the rebuild's connection,
+  `BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM` and
+  `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS`. Unset, the server's
+  `maintenance_work_mem` and `max_parallel_maintenance_workers` apply.
+
+The runner's login must own `normalized_events`, as it does when that login ran
+`init-schema`. Check it before the swap:
+
+```sql
+SELECT tableowner = current_user FROM pg_tables
+WHERE schemaname = 'bigname_phase' AND tablename = 'normalized_events';
+```
+
+If any index of the list is missing on a database whose chains are served, run
+`install.sql` by hand before the swap, with the runner still on the old image. The new runner
+then finds every index in place and builds nothing, so Project and Live do not wait.
+
+While the runner builds:
+
+- The chain's Project, and so its Live, wait. Another chain's Project entry waits too, on the
+  rebuild's lock, and then finds the indexes in place.
+- Interpret on another chain keeps running, and the API keeps serving what was published.
+- The runner records loop progress, so a long build does not raise the stale-loop alert.
+- Each build first waits for storage capacity, with the batch loop's ceiling and floor. While
+  either is breached the runner logs
+  `the rebuild of the normalized_events indexes the walk index set scripts drop waits until storage capacity recovers`
+  with `breach_reasons`, `database_size_bytes` and `free_disk_bytes`, and the gauge
+  `phase_runner_walk_index_capacity_blocked{chain}` reads 1. A running Project row is paused
+  meanwhile and resumed after. An idle or completed one records no loop progress, so a long
+  wait raises the stale-loop alert. An invalid leftover is dropped before the wait, which
+  frees the space it holds.
+
+When a build fails:
+
+- A build or drop that fails stops the chain with an error that names the index and the
+  cause. The runner does not retry it in the process: another chain's Project entry stops
+  with the same error instead of building again. Once every chain has stopped, the process
+  exits non-zero.
+- Under a restart policy each start drops the invalid leftover and builds it again, so a cause
+  that persists shows as a restart loop with the same error.
+- A name held by another relation is refused and never dropped.
+
+The [walk index set README](../ops/walk-index-set/README.md#the-phase-runners-rebuild) lists
+the log lines and the recovery.
+
+A release that adds an index to the drop list is deployed in this order:
+
+1. The phase runner. On an initialized database it builds the new index at its first Project
+   entry, and after the build logs
+   `every normalized_events index the walk index set scripts drop is in place`. On a served
+   chain that build holds Project and Live for its length, so prefer building the index by
+   hand first with the release's statement while the runner keeps running. The runner then
+   finds it in place, builds nothing and logs no build line.
+2. The schema-migrations, once the runner has logged that line or the operator's build has
+   finished. A schema-migration that installs such an index adopts the valid index the runner
+   or the operator built, without a build. Run while the build is still going, it finds an
+   invalid index under the name and fails its check.
+3. The API.
+
 ## The child listing family and its counts
 
 The build that stores each parent's listed children (TYR-455) adds the child listing family,
@@ -5748,11 +6224,18 @@ composition pass derives every parent's rows in a children stream after the name
   index on a populated table in its own transaction, so apply it in the redo's maintenance window.
   It resets nothing: the new tables start empty and the redo fills them.
 - Each listing row keeps the label hashes its stored name still spells as `[labelhash]`
-  (`unhealed_labelhashes`), with a GIN index. A preimage observation derives again only the rows
-  that hold one of the observed name's labels, by that index. On mainnet most blocks carry a
-  preimage observation and most labels are unhealed, so selecting by label instead would derive
-  every unspelled name under a shared label, such as every unspelled `.eth` name, at nearly
-  every block.
+  (`unhealed_labelhashes`), with a GIN index. A preimage observation derives again, by that
+  index, only the rows that hold one of its labels. Those are the labels of the observed name, or
+  the one label an observation with no name carries. The adapter writes such an observation for
+  a label whose full name it does not know yet, such as a label an ENSv2 registry registers before
+  the registry's parent name is known. On mainnet most blocks carry a preimage observation and
+  most labels are unhealed, so selecting by label instead would derive every unspelled name under
+  a shared label, such as every unspelled `.eth` name, at nearly every block.
+- An undo restores the listing rows and counts from the journal like the other families. It then
+  derives the restored rows that still spell a label as `[labelhash]` again at the restored block,
+  and writes only those it spells further, journalling nothing and moving no count. Interpret's
+  redo never removes a label from `label_preimages`, so a row the undone block healed keeps its
+  healed name, as a rebuild at that block spells it.
 - A label first learned on another chain reaches the stored name at this chain's next block.
   An imported label reaches it only when its row is derived again for another reason
   (TYR-373/374). Served names heal at read time.
@@ -5798,6 +6281,36 @@ composition pass derives every parent's rows in a children stream after the name
   [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
   binaries. The change rides the next release that redoes Project and shares that release's
   Project redo.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo.
+
+## Stored event counts
+
+The build that stores event counts adds the event count family, `project_event_count`
+(see [event counts](projections.md#event-counts)). Project counts, per chain, anchor, namespace
+and event kind, the events an emitter's or a resolver's event read counts, at every
+publication, and journals the counts with the other families. The composition pass counts each
+catalogue window.
+
+- It needs `20261104130000_project_event_count.sql`. The schema-migration creates the empty
+  table. It resets nothing and builds no index on a populated table. Apply it before starting
+  the release: the family writer writes the table, so without it the first family block fails.
+- A family step that touches more than 10,000 count keys logs a `WARN` naming the chain, block
+  and key count.
+- The readers do not change in this build. Event `total_count` and the registry overview's
+  `counts.events` still count at read.
+- The count statement and its shared predicate are in `crates/project/src` and in
+  `crates/storage/src/history/count_contract.rs`, so the build rotates the
+  [projection content hash](glossary.md#projection-content-hash) for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next release that redoes Project and shares that release's
+  Project redo.
+- A manifest file edited under the same version replaces that manifest's contract rows in
+  place. Such an edit leaves the stored counts stale until a full-range Project redo (see
+  [event counts](projections.md#event-counts)).
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.

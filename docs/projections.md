@@ -2648,6 +2648,61 @@ Both tables are journalled and undone like every family. Schema-migration
 phase schema; they start empty, and the content-hash rotation that ships with
 them rebuilds the families.
 
+### Event counts
+
+F20, `project_event_count`, keeps per chain, anchor, namespace and event kind
+the number of events at or below the family marker's block that an event read
+of that anchor counts. The anchor kinds follow the arms of the resolver event
+read (`crates/storage/src/history/resolver_source.rs`):
+
+| `anchor_kind` | An event is counted for `anchor` when |
+| --- | --- |
+| 0 | `anchor` emitted it |
+| 1 | it is a `ResolverChanged` another contract emitted, setting the pointer to `anchor` |
+| 2 | it is a `ResolverChanged` another contract emitted, moving the pointer from `anchor` to another resolver |
+
+So the kind 0 rows of an address are what `GET /v1/events?contract_address=`
+counts for it, per namespace and kind, and the three kinds of a resolver add up
+to what `GET /v1/events?resolver=` counts. The rows hold every event kind,
+product kind or not. A count of zero has no row.
+
+An event is counted under the predicate those reads apply, built from the same
+code (`crates/storage/src/history/count_contract.rs`):
+
+- It is `activated`, its row and its block's lineage are `canonical`, `safe` or
+  `finalized`, and it has a block. An event without a block is never counted,
+  because every read a stored count serves is bounded by a published block.
+- It is not a registrar surface snapshot, a token-state-absent `ExpiryChanged`,
+  a derived NameWrapper mint transfer, a registry-read copy, or the second row
+  of a proven adjacent address pair ([History](#history)).
+- Of a registry-fallback handoff's copies, the anchor counts the copy with the
+  least identity among the copies its own read admits in the event's
+  namespace. The copies of one handoff come from one log, so they share the
+  chain, block, emitter, namespace and kind.
+
+Each family block adds the counts of the events in its range after the prior
+marker's block and journals each touched key's before-image, so an undo
+restores the counts with the other families. A step that touches more than
+10,000 keys logs a `WARN` with the chain, block and key count. A rebuild's
+ranges write no counts. Its [composition pass](glossary.md#composition-pass)
+adds them window by window in the catalogue's event windows, with the code a
+block runs.
+
+The address-pair rule reads the contract rows of the event's own manifest
+(`manifest_contract_instances`) and the proven resolver generations in
+`count_contract.rs`, so a stored count keeps the decision they gave when its
+block was counted. An edit of the proven generations rotates the projection
+content hash, so the redo it requires counts again. Manifest synchronization
+replaces a manifest's contract rows in place when its file changes under the
+same version (`crates/manifests/src/schema_v2.rs`). Such an edit changes the
+reads at once and leaves the stored counts stale until a full-range Project
+redo.
+
+The table is journalled and undone like every family. Schema-migration
+`20261104130000_project_event_count.sql` adds it to an existing phase schema
+empty, and the projection content-hash rotation that ships with it rebuilds the
+families. No read serves it yet.
+
 ### Publication and resumption
 
 ProjectPhase invokes the family runner directly. One run applies or undoes at
@@ -2682,6 +2737,37 @@ A family failure leaves the committed prefix in place and fails Project.
 The supervised runner retries with backoff, including family data-integrity
 failures; a one-shot redo returns the failure and leaves repair unfinished for
 an explicit rerun. The failure is not converted into a successful publication.
+
+A block whose write PostgreSQL refuses for the value itself is not retried.
+The transaction rolls back with that value still first in line, so a retry
+would meet it again at the same head. Two shapes reach this:
+
+- a string with a NUL byte, such as a text record or reverse name read from
+  the resolver over RPC (SQLSTATE class 22, data exception)
+- a record key longer than an index row may be (SQLSTATE class 54, program
+  limit exceeded).
+
+The runner marks that chain's Project row `failed`, with PostgreSQL's message
+in `last_error`, and that chain's supervisor stops with a data-integrity error.
+A one-shot redo stops with the same error. Nothing is dropped. The family
+marker stays before the block, or before the range in a bounded rebuild, and
+the chain's last publication is kept. The API serves it only while it is within
+the [publication lag tolerance](glossary.md#publication-lag-tolerance) of the
+chain's stored head, one block by default. The stop itself leaves that head
+where it is, but a stop during catch-up already has it further ahead. A restart
+moves it too, because the runner runs Ingest to the source's head before Project
+meets the block again. That chain's reads then answer `409 stale` until it
+recovers.
+
+A runner exits nonzero once every chain it runs has stopped. A runner with one
+chain therefore exits on this stop. Under a restart policy it starts again,
+replays the same block and stops again, in a loop. Stop that runner until a
+build that stores or explicitly skips the value is deployed. On a runner with
+several chains the others keep running.
+
+The runner recognises these failures by PostgreSQL's English message text, so
+it assumes the server's `lc_messages` is English. Under another language the
+failure is retried as before.
 
 Verified lookup captures topology, inventory, participating publications and
 real manifest provenance in one snapshot. After RPC, the guarded ledger writer

@@ -35,8 +35,9 @@
 //!   a read can wait those steps.
 //! - Undoing an A block later does not un-heal B's names: a preimage is true whichever block
 //!   revealed it, and `label_preimages` keeps it.
-//! - Undoing B's block restores the watermark from the journal. Reading an A block again derives
-//!   rows that already spell its labels again, which changes nothing.
+//! - Undoing B's block restores the watermark from the journal, and heals the listing rows it
+//!   healed again at B's restored block, where the kept preimage still spells them. Reading an A
+//!   block again derives rows that already spell its labels again, which changes nothing.
 //! - A source without a watermark is read from block 0. A rebuild's reset clears the watermarks
 //!   and its composition pass starts them again at each source's highest observation on its
 //!   readable lineage, or its floor if lower ([`seed`]): the pass composes every row from the
@@ -82,7 +83,6 @@ const CUTOFF: &str = "/* project:families.derived.child_listing_source_cutoff */
               AND observed.canonicality_state = state.canonicality_state
               AND observed.chain_id = $1 AND observed.block_number > $2
               AND observed.consumer_visibility = 'activated'
-              AND observed.logical_name_id IS NOT NULL
               AND EXISTS (
                   SELECT 1 FROM chain_lineage lineage
                   WHERE lineage.chain_id = observed.chain_id
@@ -97,21 +97,22 @@ const CUTOFF: &str = "/* project:families.derived.child_listing_source_cutoff */
         LIMIT $3
     ) first";
 
-/// The rows of chain `$1` whose stored name still holds a label of a name chain `$2` observed
-/// in blocks `$3` (exclusive) to `$4`. Each observed name's surface is probed by its key.
+/// The rows of chain `$1` whose stored name still holds a label chain `$2` observed in blocks
+/// `$3` (exclusive) to `$4`: a label of an observed name, whose surface is probed by its key, or
+/// the label hash an observation carries in its after state, as an observation of a label with no
+/// name does.
 const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders */
-    WITH observed AS MATERIALIZED (
-        SELECT array_agg(DISTINCT lower(label.labelhash)) AS labelhashes
+    WITH observation AS MATERIALIZED (
+        SELECT event.logical_name_id, event.labelhash
         FROM unnest('{canonical,safe,finalized}'::canonicality_state[]) state (canonicality_state)
         CROSS JOIN LATERAL (
-            SELECT observed.logical_name_id
+            SELECT observed.logical_name_id, observed.after_state ->> 'labelhash' AS labelhash
             FROM normalized_events observed
             WHERE observed.event_kind = 'PreimageObserved'
               AND observed.canonicality_state = state.canonicality_state
               AND observed.chain_id = $2
               AND observed.block_number > $3 AND observed.block_number <= $4
               AND observed.consumer_visibility = 'activated'
-              AND observed.logical_name_id IS NOT NULL
               AND EXISTS (
                   SELECT 1 FROM chain_lineage lineage
                   WHERE lineage.chain_id = observed.chain_id
@@ -121,12 +122,22 @@ const HOLDERS: &str = "/* project:families.derived.child_listing_source_holders 
               )
             OFFSET 0
         ) event
-        CROSS JOIN LATERAL (
-            SELECT surface.labelhashes FROM name_surfaces surface
-            WHERE surface.logical_name_id = event.logical_name_id
-            OFFSET 0
-        ) surface
-        CROSS JOIN LATERAL unnest(surface.labelhashes) label (labelhash)
+    ),
+    observed AS MATERIALIZED (
+        SELECT array_agg(DISTINCT label.labelhash) AS labelhashes
+        FROM (
+            SELECT lower(surface_label.labelhash) AS labelhash
+            FROM observation
+            CROSS JOIN LATERAL (
+                SELECT surface.labelhashes FROM name_surfaces surface
+                WHERE surface.logical_name_id = observation.logical_name_id
+                OFFSET 0
+            ) surface
+            CROSS JOIN LATERAL unnest(surface.labelhashes) surface_label (labelhash)
+            UNION ALL
+            SELECT lower(observation.labelhash) FROM observation
+            WHERE observation.labelhash IS NOT NULL
+        ) label
     )
     SELECT listing.child_logical_name_id FROM project_child_listing listing
     WHERE listing.chain_id = $1 AND listing.unhealed_labelhashes <> '{}'
@@ -165,7 +176,6 @@ const TOP: &str = "/* project:families.derived.child_listing_source_top */
           AND observed.canonicality_state = state.canonicality_state
           AND observed.chain_id = $1
           AND observed.consumer_visibility = 'activated'
-          AND observed.logical_name_id IS NOT NULL
           AND EXISTS (
               SELECT 1 FROM chain_lineage lineage
               WHERE lineage.chain_id = observed.chain_id

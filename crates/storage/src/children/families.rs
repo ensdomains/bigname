@@ -16,7 +16,7 @@ use crate::families::{
     name::ensure_published,
     topology::{
         FamilyChildRow, RegistryLabels, children_page_on, count_children_of_parents_on,
-        count_children_on, require_publication,
+        count_registry_labels, require_publication,
     },
 };
 use crate::{ReadDb, read_db::ReadConn};
@@ -49,6 +49,7 @@ pub(super) async fn page(
     filter: &ChildrenCurrentPageFilter<'_>,
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
+    total_cap: Option<u64>,
 ) -> Result<ChildrenCurrentPage> {
     let mut transaction = snapshot(db, &[parent_logical_name_id.to_owned()]).await?;
     let page = children_page_on(
@@ -58,19 +59,14 @@ pub(super) async fn page(
         None,
         cursor,
         page_size,
+        total_cap,
     )
     .await?;
-    let child_count = if filter.admits_every_child() {
-        page.total_count
-    } else {
-        count_children_on(&mut transaction, parent_logical_name_id, None).await?
-    };
     close(transaction).await?;
     Ok(ChildrenCurrentPage {
         total_count: page.total_count,
         rows: page.rows.into_iter().map(row).collect(),
         next_cursor: page.next_cursor,
-        summary: summary(parent_logical_name_id, child_count)?,
     })
 }
 
@@ -91,9 +87,11 @@ pub(super) async fn registry_page(
         Some(RegistryLabels {
             registry: &registry,
             owner,
+            registration_limit: None,
         }),
         cursor,
         page_size,
+        None,
     )
     .await?;
     close(transaction).await?;
@@ -119,13 +117,15 @@ const SERVING_PARENT: &str = "/* storage:children.registry_serving_parent */
 
 /// The labels-route total of `registry_address` at the current family publication of
 /// `chain_id`: its labels under its representative pointing name ([`SERVING_PARENT`]) in that
-/// same snapshot, or zero when no name points at it. The name is resolved here, not passed in,
-/// so the count never anchors to a name read from an earlier publication.
+/// same snapshot, or zero when no name points at it, and `None` when the registry holds more
+/// than `cap` registrations under that name ([`count_registry_labels`]). The name is resolved
+/// here, not passed in, so the count never anchors to a name read from an earlier publication.
 pub(super) async fn registry_count_current(
     db: ReadDb<'_>,
     chain_id: &str,
     registry_address: &str,
-) -> Result<i64> {
+    cap: u64,
+) -> Result<Option<i64>> {
     let registry = registry_address.to_ascii_lowercase();
     let mut transaction = db.snapshot().await?;
     ensure_published(&mut transaction, &[chain_id.to_owned()]).await?;
@@ -136,11 +136,13 @@ pub(super) async fn registry_count_current(
         .await
         .context("failed to read the name a registry serves")?;
     let count = match parent {
-        Some(parent) => count_children_on(&mut transaction, &parent, Some(&registry)).await?,
-        None => 0,
+        Some(parent) => count_registry_labels(&mut transaction, &parent, &registry, cap).await?,
+        None => Some(0),
     };
     close(transaction).await?;
-    i64::try_from(count).context("registry label count overflow")
+    count
+        .map(|count| i64::try_from(count).context("registry label count overflow"))
+        .transpose()
 }
 
 pub(super) async fn summaries(

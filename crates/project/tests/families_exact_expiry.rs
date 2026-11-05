@@ -47,6 +47,8 @@ fn reset_tables() -> BTreeSet<&'static str> {
                     | "project_child_listing"
                     | "project_child_listing_count"
                     | "project_child_preimage_watermark"
+                    // Added later, by 20261104130000_project_event_count.sql.
+                    | "project_event_count"
             )
         })
         .chain(CONTROL_TABLES)

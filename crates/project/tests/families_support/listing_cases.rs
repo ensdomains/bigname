@@ -45,6 +45,16 @@ pub async fn edge(
     Ok(())
 }
 
+/// The after state of a label-only preimage observation of `label`: no name, the label hash
+/// carried directly, as the adapter writes one for a label no name of its log represents
+/// (`crates/adapters/src/schema_v2/identity.rs`, `materialize_from`).
+pub fn label_state(label: &str) -> serde_json::Value {
+    json!({"source_event": "LabelRegistered",
+           "raw_label_hex": alloy_primitives::hex::encode(label),
+           "decoded_label": label,
+           "labelhash": format!("{:#x}", alloy_primitives::keccak256(label.as_bytes()))})
+}
+
 /// A chain-observed label preimage.
 pub async fn preimage(fixture: &Fixture, labelhash: &str, label: &str) -> Result<()> {
     sqlx::query(
@@ -127,6 +137,18 @@ pub async fn assert_served(fixture: &Fixture, parent: &str) -> Result<()> {
         u64::try_from(count)? == total,
         "{parent} counts {count}, serves a total of {total}"
     );
+    Ok(())
+}
+
+/// `kept` and `now`, two `Fixture::exact` snapshots, agree on every family table but the child
+/// listing, which an undo derives again at the restored block.
+pub fn ensure_equal_but_listing(kept: &[(String, String)], now: &[(String, String)]) -> Result<()> {
+    for ((table, was), (_, is)) in kept.iter().zip(now) {
+        if table == "project_child_listing" {
+            continue;
+        }
+        ensure!(was == is, "the undo left {table} as {is}, not {was}");
+    }
     Ok(())
 }
 

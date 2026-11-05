@@ -10,8 +10,8 @@ use bigname_project::families::{self, FamilyMode};
 use families_support::{
     CHAIN, Fixture, hash,
     listing_cases::{
-        CHAIN_KIND, OWNER, REGISTRY, ZERO, assert_served, counted, edge, journalled, listed, name,
-        node, preimage,
+        CHAIN_KIND, OWNER, REGISTRY, ZERO, assert_served, counted, edge, ensure_equal_but_listing,
+        journalled, listed, name, node, preimage,
     },
 };
 use serde_json::json;
@@ -79,8 +79,10 @@ async fn a_parent_stores_one_row_per_served_child_and_an_exact_count() -> Result
 // Row 12 and the parent-wide arm: a parent with no raw bytes and 2,000 ENSv1 children spells
 // every child's name from its own labels. An observation of the parent's first label at block
 // 12 spells the parent, so the block derives the parent whole: all 2,000 rows are re-keyed in
-// one statement, each journalled with its before-image, the count stays, and the undo restores
-// every row.
+// one statement, each journalled with its before-image, and the count stays. The undo restores
+// every other family and derives the 2,000 rows again at block 11. `label_preimages` keeps the
+// parent's label, so they stay re-keyed under the spelled parent, as a rebuild at block 11 keys
+// them.
 #[tokio::test]
 async fn a_parent_spelled_by_an_observation_rekeys_and_journals_all_its_children() -> Result<()> {
     const CHILDREN: i64 = 2_000;
@@ -174,13 +176,13 @@ async fn a_parent_spelled_by_an_observation_rekeys_and_journals_all_its_children
 
     let undone = families::undo_to(&fixture.pool, CHAIN, 11).await?;
     ensure!(undone == 1, "undid {undone} blocks");
-    let restored = fixture.exact().await?;
-    for ((table, was), (_, now)) in kept.iter().zip(&restored) {
-        ensure!(was == now, "the undo left {table} as {now}, not {was}");
-    }
-    ensure!(listed(&fixture, &name(1)).await? == before);
+    ensure_equal_but_listing(&kept, &fixture.exact().await?)?;
+    ensure!(listed(&fixture, &name(1)).await? == after);
+    ensure!(counted(&fixture, &name(1)).await? == vec![(String::new(), CHILDREN)]);
+    fixture.assert_child_listing(CHAIN).await?;
     fixture.apply(12, FamilyMode::Normal).await?;
     ensure!(listed(&fixture, &name(1)).await? == after);
+    ensure!(journalled(&fixture, 12, "project_child_listing").await? == (0, 0));
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
@@ -188,8 +190,10 @@ async fn a_parent_spelled_by_an_observation_rekeys_and_journals_all_its_children
 // Rows 14 and 28, and the long-name key: one label carried by edge children under two parents
 // is observed at block 12 for a third name. Both children are re-keyed at that block under
 // their own parents and the other children keep their rows; the stored rows equal today's
-// read-time rows before and after, and the undo and rebuilds equal them. A child whose name is
-// longer than a btree entry allows stores its full name and its first 500 characters as the key.
+// read-time rows before and after. The undo restores every other family and derives the two
+// rows again at block 11, where the kept preimage spells them, and the rebuilds equal them. A
+// child whose name is longer than a btree entry allows stores its full name and its first 500
+// characters as the key.
 #[tokio::test]
 async fn an_observed_label_rekeys_its_edge_children_under_every_parent() -> Result<()> {
     let fixture = Fixture::new("families_child_listing_shared_label", 20).await?;
@@ -262,11 +266,12 @@ async fn an_observed_label_rekeys_its_edge_children_under_every_parent() -> Resu
     }
 
     families::undo_to(&fixture.pool, CHAIN, 11).await?;
-    let restored = fixture.exact().await?;
-    for ((table, was), (_, now)) in kept.iter().zip(&restored) {
-        ensure!(was == now, "the undo left {table} as {now}, not {was}");
-    }
+    ensure_equal_but_listing(&kept, &fixture.exact().await?)?;
+    ensure!(listed(&fixture, &name(1)).await? == first_after);
+    ensure!(listed(&fixture, &name(2)).await? == second_after);
+    fixture.assert_child_listing(CHAIN).await?;
     fixture.apply(12, FamilyMode::Normal).await?;
+    ensure!(journalled(&fixture, 12, "project_child_listing").await? == (0, 0));
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }

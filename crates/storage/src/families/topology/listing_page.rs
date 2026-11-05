@@ -10,7 +10,8 @@
 //! [`MISSING_TIMESTAMP`], so it sorts first ascending and last descending.
 //!
 //! The unfiltered total is a primary-key read of the counts, and a filtered total counts the
-//! parent's rows through the same index the page reads. A page row whose stored name keeps a
+//! parent's rows through the same index the page reads, stopping one row past a caller's cap. A
+//! registry's label count is a primary-key read of the counts too. A page row whose stored name keeps a
 //! label placeholder is spelled again by the served relation, narrowed to those children, so an
 //! imported label serves healed while the row keeps its stored key ([`heal`]).
 use std::collections::BTreeMap;
@@ -78,7 +79,8 @@ const fn sort_key(sort: ChildrenCurrentSort) -> Option<&'static str> {
     }
 }
 
-/// One page and its exact total, in the caller's snapshot.
+/// One page and its total, in the caller's snapshot. The total is exact, or `total_cap + 1` when
+/// it is above `total_cap`; the rows and cursor are those of the uncapped page.
 pub(crate) async fn page(
     conn: &mut PgConnection,
     parent_logical_name_id: &str,
@@ -86,11 +88,13 @@ pub(crate) async fn page(
     registry: Option<RegistryLabels<'_>>,
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
+    total_cap: Option<u64>,
 ) -> Result<FamilyChildrenPage> {
     if page_size == 0 {
         bail!("children shadow page_size must be positive");
     }
     let limit = i64::try_from(page_size).context("children shadow page_size is too large")? + 1;
+    let total_limit = total_cap.map(past).transpose()?;
     if let Some(cursor) = cursor {
         let matches = matches!(
             (filter.sort, &cursor.sort_value),
@@ -128,7 +132,7 @@ pub(crate) async fn page(
             });
     let mut rows: Vec<FamilyChildRow> = listed.into_iter().map(|row| row.child).collect();
     heal(conn, parent_logical_name_id, &mut rows).await?;
-    let total_count = total(conn, parent_logical_name_id, filter, registry).await?;
+    let total_count = total(conn, parent_logical_name_id, filter, registry, total_limit).await?;
     Ok(FamilyChildrenPage {
         total_count,
         rows,
@@ -152,6 +156,31 @@ pub(crate) async fn count(
     u64::try_from(count.unwrap_or_default()).context("negative child count")
 }
 
+/// The exact number of labels `registry` holds under `parent_logical_name_id`, one primary-key
+/// read of the counts, or `None` when they are more than `cap`.
+pub(crate) async fn count_registry_labels(
+    conn: &mut PgConnection,
+    parent_logical_name_id: &str,
+    registry: &str,
+    cap: u64,
+) -> Result<Option<u64>> {
+    let labels = count(conn, parent_logical_name_id, Some(registry)).await?;
+    Ok((labels <= cap).then_some(labels))
+}
+
+/// The bind of a `LIMIT` that keeps one row past `cap`.
+fn past(cap: u64) -> Result<i64> {
+    i64::try_from(cap)
+        .ok()
+        .and_then(|cap| cap.checked_add(1))
+        .context("children count cap is too large")
+}
+
+/// True when the filter admits every child the stored counts count.
+const fn admits_every_child(filter: &ChildrenCurrentPageFilter<'_>) -> bool {
+    filter.q.is_none() && filter.include_expired
+}
+
 /// The exact unfiltered child count of each of `parent_logical_name_ids` in one statement, keyed
 /// by parent; a parent with no child (or no surface) has no entry.
 pub(crate) async fn counts(
@@ -173,41 +202,49 @@ pub(crate) async fn counts(
         .collect()
 }
 
-/// The exact total the filters admit, before the cursor. With no filter it is the parent's (or
-/// the registry's) stored count. A registry's labels excluding one owner are its count less the
-/// owner's labels, read from the owner index.
+/// The total the filters admit, before the cursor: exact, or `total_limit` when it reaches that
+/// bind. With no filter it is the parent's (or the registry's) stored count. A registry's labels
+/// excluding one owner are its count less the owner's labels, read from the owner index.
 async fn total(
     conn: &mut PgConnection,
     parent_logical_name_id: &str,
     filter: &ChildrenCurrentPageFilter<'_>,
     registry: Option<RegistryLabels<'_>>,
+    total_limit: Option<i64>,
 ) -> Result<u64> {
-    if !filter.admits_every_child() {
-        return filtered_count(conn, parent_logical_name_id, filter, registry).await;
+    if !admits_every_child(filter) {
+        return filtered_count(conn, parent_logical_name_id, filter, registry, total_limit).await;
     }
     let registry_address = registry.map(|labels| labels.registry);
-    match registry.and_then(|labels| labels.owner) {
-        None => count(conn, parent_logical_name_id, registry_address).await,
+    let total = match registry.and_then(|labels| labels.owner) {
+        None => count(conn, parent_logical_name_id, registry_address).await?,
         Some(RegistryLabelOwnerFilter::Owner(_)) => {
-            filtered_count(conn, parent_logical_name_id, filter, registry).await
+            return filtered_count(conn, parent_logical_name_id, filter, registry, total_limit)
+                .await;
         }
         Some(RegistryLabelOwnerFilter::ExcludeOwner(owner)) => {
             let labels = count(conn, parent_logical_name_id, registry_address).await?;
+            // The difference needs the owner's exact count.
             let owned = filtered_count(
                 conn,
                 parent_logical_name_id,
                 filter,
                 registry.map(|labels| RegistryLabels {
-                    registry: labels.registry,
                     owner: Some(RegistryLabelOwnerFilter::Owner(owner)),
+                    ..labels
                 }),
+                None,
             )
             .await?;
             labels
                 .checked_sub(owned)
-                .context("an owner holds more labels than its registry counts")
+                .context("an owner holds more labels than its registry counts")?
         }
-    }
+    };
+    Ok(match total_limit.map(u64::try_from).transpose()? {
+        Some(limit) => total.min(limit),
+        None => total,
+    })
 }
 
 async fn filtered_count(
@@ -215,8 +252,9 @@ async fn filtered_count(
     parent_logical_name_id: &str,
     filter: &ChildrenCurrentPageFilter<'_>,
     registry: Option<RegistryLabels<'_>>,
+    total_limit: Option<i64>,
 ) -> Result<u64> {
-    let count: i64 = count_query(parent_logical_name_id, filter, registry)
+    let count: i64 = capped_count_query(parent_logical_name_id, filter, registry, total_limit)
         .build_query_scalar()
         .fetch_one(&mut *conn)
         .await
@@ -229,11 +267,32 @@ pub(super) fn count_query<'a>(
     filter: &ChildrenCurrentPageFilter<'a>,
     registry: Option<RegistryLabels<'a>>,
 ) -> QueryBuilder<'a, Postgres> {
-    let mut builder = QueryBuilder::<Postgres>::new(format!(
-        "/* storage:families.topology.child_listing_total */ SELECT count(*){PARENT_ROWS}"
-    ));
+    capped_count_query(parent_logical_name_id, filter, registry, None)
+}
+
+/// The filtered count, over at most `total_limit` of the parent's rows when it is given.
+pub(super) fn capped_count_query<'a>(
+    parent_logical_name_id: &'a str,
+    filter: &ChildrenCurrentPageFilter<'a>,
+    registry: Option<RegistryLabels<'a>>,
+    total_limit: Option<i64>,
+) -> QueryBuilder<'a, Postgres> {
+    let mut builder = QueryBuilder::<Postgres>::new(match total_limit {
+        None => format!(
+            "/* storage:families.topology.child_listing_total */ SELECT count(*){PARENT_ROWS}"
+        ),
+        Some(_) => format!(
+            "/* storage:families.topology.child_listing_capped_total */
+             SELECT count(*) FROM (SELECT 1{PARENT_ROWS}"
+        ),
+    });
     push_parent(&mut builder, parent_logical_name_id);
     push_filters(&mut builder, filter, registry);
+    if let Some(total_limit) = total_limit {
+        builder.push(" LIMIT ");
+        builder.push_bind(total_limit);
+        builder.push(") capped");
+    }
     builder
 }
 

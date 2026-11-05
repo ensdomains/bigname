@@ -6,10 +6,12 @@
 //!
 //! After a block's write the name summaries of the names it touched are composed again
 //! (`summary.rs`), then the child listing rows they move (`children.rs`); both are journalled, so
-//! an undo restores them with the other families.
+//! an undo restores them with the other families. The undo then heals, at the restored block,
+//! the restored listing rows a kept label preimage spells further (`children.rs`).
 mod children;
 pub(crate) use children::{
-    derive as derive_child_listing, seed_sources as seed_child_listing_sources,
+    derive as derive_child_listing, derive_heals as heal_child_listing,
+    seed_sources as seed_child_listing_sources,
 };
 mod summary;
 pub(crate) use summary::{
@@ -457,6 +459,7 @@ pub(super) async fn refresh_block(
         stats,
     )
     .await?;
+    super::event_counts::refresh(transaction, chain_id, block, after, stats).await?;
     let (rows, undo_rows) =
         super::resolution_paths::refresh(transaction, chain_id, block, composition).await?;
     *stats.rows.entry(NAME_SUMMARY.name).or_default() += rows;

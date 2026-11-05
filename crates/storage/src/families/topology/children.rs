@@ -98,12 +98,15 @@ impl Relation<'_> {
 /// decides the arm of a child it shares. `children`, the child nodes a read wants (lowercase, no
 /// namespace), keeps both arms' candidates of only those children, read by child node rather
 /// than by enumerating the parent's edges; the windows below partition by child, so whole
-/// children in or out leave every rank unchanged.
+/// children in or out leave every rank unchanged. `registration_limit` keeps at most that many
+/// ENSv2 candidates, in no order, so everything after them is bounded too: only a capped count
+/// may set it, and it must report a candidate count above its cap as not computed.
 pub(super) fn push_selected<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     parents: Parents<'a>,
     registry: Option<&'a str>,
     children: Option<&'a [String]>,
+    registration_limit: Option<i64>,
     relation: Relation<'a>,
 ) {
     match parents {
@@ -328,6 +331,10 @@ pub(super) fn push_selected<'a>(
         builder.push(" AND subregistry.subregistry_address = ");
         builder.push_bind(registry);
     }
+    if let Some(limit) = registration_limit {
+        builder.push(" LIMIT ");
+        builder.push_bind(limit);
+    }
     builder.push(format!(
         "
         ), v1_edges AS (
@@ -496,9 +503,17 @@ pub(super) fn push_listed<'a>(
     parents: Parents<'a>,
     registry: Option<&'a str>,
     children: Option<&'a [String]>,
+    registration_limit: Option<i64>,
     relation: Relation<'a>,
 ) {
-    push_selected(builder, parents, registry, children, relation);
+    push_selected(
+        builder,
+        parents,
+        registry,
+        children,
+        registration_limit,
+        relation,
+    );
     builder.push(format!(
         " children AS (
             SELECT clock.chain_id, selected.parent_logical_name_id,

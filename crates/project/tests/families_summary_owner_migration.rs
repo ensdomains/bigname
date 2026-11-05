@@ -59,17 +59,20 @@ const CONTROL_TABLES: [&str; 3] = [
 ];
 
 /// The family tables added after the last migration with a reset list
-/// (migrations/20261103120000_project_child_listing.sql creates them). The published
-/// reset lists cannot name them; the family reset (`families::family_tables`) clears them.
-const LATER_TABLES: [&str; 3] = [
+/// (migrations/20261103120000_project_child_listing.sql and
+/// migrations/20261104130000_project_event_count.sql create them). The published reset lists
+/// cannot name them. The family reset (`families::family_tables`) clears them.
+const LATER_TABLES: [&str; 4] = [
     "project_child_listing",
     "project_child_listing_count",
     "project_child_preimage_watermark",
+    "project_event_count",
 ];
 
-/// The family reset covers the child listing tables, so a later reset clears them.
+/// The family reset covers the tables added after the last reset list, so a later reset clears
+/// them.
 #[test]
-fn the_family_reset_names_the_child_listing_tables() {
+fn the_family_reset_names_the_later_tables() {
     let tables = families::family_tables().collect::<BTreeSet<_>>();
     for table in LATER_TABLES {
         assert!(
@@ -119,6 +122,7 @@ fn reset_tables() -> Vec<String> {
                     | "project_child_listing"
                     | "project_child_listing_count"
                     | "project_child_preimage_watermark"
+                    | "project_event_count"
             )
         })
         .map(str::to_owned)
@@ -159,6 +163,7 @@ fn selector_reset_tables() -> Vec<String> {
                     | "project_child_listing"
                     | "project_child_listing_count"
                     | "project_child_preimage_watermark"
+                    | "project_event_count"
             )
         })
         .map(str::to_owned)

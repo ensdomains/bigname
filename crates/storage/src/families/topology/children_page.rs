@@ -66,16 +66,19 @@ pub struct FamilyChildRow {
 }
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
-/// the owner each serves when `owner` is given.
+/// the owner each serves when `owner` is given. `registration_limit` keeps at most that many of
+/// the registry's registrations under the parent (`push_selected`); the label counts are stored
+/// (`listing_page.rs`), so no reader sets it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RegistryLabels<'a> {
     pub(crate) registry: &'a str,
     pub(crate) owner: Option<RegistryLabelOwnerFilter<'a>>,
+    pub(crate) registration_limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyChildrenPage {
-    /// Exact number of children the filters admit, before the cursor.
+    /// Exact number of children the filters admit, before the cursor, or `cap + 1` above a cap.
     pub total_count: u64,
     pub rows: Vec<FamilyChildRow>,
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
@@ -101,6 +104,7 @@ pub async fn load_children_shadow_page(
         None,
         cursor,
         page_size,
+        None,
     )
     .await
 }
@@ -171,6 +175,7 @@ pub(super) fn push_children<'a>(
         parents,
         registry.map(|labels| labels.registry),
         children,
+        registry.and_then(|labels| labels.registration_limit),
         Relation::Served,
     );
     if let Some(labels) = registry {

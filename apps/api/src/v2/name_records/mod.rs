@@ -302,6 +302,7 @@ pub(crate) async fn get_name_records(
                         record_inventory.as_ref(),
                         records,
                         admit_null_resolver_discovery,
+                        alias.is_some(),
                     )?;
                     #[cfg(test)]
                     if !fallback_records.is_empty() {
@@ -326,6 +327,7 @@ pub(crate) async fn get_name_records(
                                 record_inventory.as_ref(),
                                 records,
                                 false,
+                                alias.is_some(),
                             )?;
                         if refreshed_fallback_records.is_empty()
                             || build_authority_unsupported_name_records(
@@ -361,6 +363,7 @@ pub(crate) async fn get_name_records(
                         verified_lookup,
                         include_inventory,
                         admit_null_resolver_discovery,
+                        alias.is_some(),
                     )?
                 }
             }
