@@ -20,6 +20,7 @@ use families_support::{
 use serde_json::json;
 
 const V1_REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
+const BASE_REGISTRAR: &str = "0x00000000000000000000000000000000000000e6";
 const FAMILY: &str = "project_address_listing";
 
 /// A stored registry child row: (address, token holder, effective controller, registry child,
@@ -233,13 +234,14 @@ async fn a_surface_less_registry_child_lists_its_owner_and_manager() -> Result<(
 }
 
 // Row "Basenames child" of TYR-127: the route reads a surface-less registry child only under a
-// parent an ENSv1 registry NewOwner named for it (`registry_child_parents`). The same NewOwner
-// from the Basenames registry gives the children relation a child, and the address listing no
-// row for it.
+// parent an ENSv1 registry NewOwner named for it (`registry_child_parents`). A Basenames registry
+// NewOwner gives the children relation a child, and its registrar lease indexes the holder for
+// the child's id, yet the address listing stores no row for it. The parent's surface appears at
+// block 12, so that block derives the parent's registry children whole, the path no
+// `registry_child_parents` read guards.
 #[tokio::test]
 async fn a_basenames_registry_child_lists_no_row() -> Result<()> {
     let fixture = Fixture::new("families_address_listing_basenames_child", 20).await?;
-    fixture.surface(&name(1), &node(1)).await?;
     fixture
         .write(
             10,
@@ -254,7 +256,53 @@ async fn a_basenames_registry_child_lists_no_row() -> Result<()> {
             REGISTRY,
         )
         .await?;
+    fixture
+        .write(
+            10,
+            1,
+            "TokenControlTransferred",
+            "basenames_base_registrar",
+            None,
+            Some(&uuid(0x4201)),
+            json!({"namehash": node(11), "to": OWNER}),
+            BASE_REGISTRAR,
+        )
+        .await?;
     fixture.apply(10, FamilyMode::Normal).await?;
+    let indexed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_address_name_index
+         WHERE chain_id = $1 AND address = $2 AND logical_name_id = $3
+           AND relation = 'effective_controller'",
+    )
+    .bind(CHAIN)
+    .bind(OWNER)
+    .bind(name(11))
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        indexed == 1,
+        "the lease indexes its holder for the child: {indexed} rows"
+    );
+    let parent = bigname_domain::normalization::normalize_name("parent.eth")?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, 'ens', 'parent.eth', $8, $9, $2, ARRAY[$3, $4], $5, 'active', $6, $7, 12,
+                 'canonical')",
+    )
+    .bind(name(1))
+    .bind(node(1))
+    .bind(labelhash("parent"))
+    .bind(labelhash("eth"))
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(CHAIN)
+    .bind(hash(12))
+    .bind(parent.normalized_labels)
+    .bind(parent.dns_encoded_name)
+    .execute(&fixture.pool)
+    .await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let edges: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM project_child_edge_candidate
          WHERE chain_id = $1 AND child_node = lower($2) AND authority_arm = 'basenames'",
@@ -275,7 +323,7 @@ async fn a_basenames_registry_child_lists_no_row() -> Result<()> {
     .fetch_one(&fixture.pool)
     .await?;
     ensure!(rows == 0, "the Basenames child lists {rows} rows");
-    fixture.assert_rebuild_equal(10).await?;
+    fixture.assert_rebuild_equal(12).await?;
     ensure!(
         fixture.address_listing_checks().0 > 0,
         "the route oracle compared a publication"

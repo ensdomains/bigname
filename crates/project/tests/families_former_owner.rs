@@ -352,6 +352,7 @@ async fn a_name_past_the_btree_row_limit_lists_and_is_found_by_q_parent_and_form
         fixture.listing_read(&by_q).await? == [name.clone()],
         "a q past the cut finds the name"
     );
+    // Capability checks, with every other index of the table hidden (`ensure_index_serves`).
     fixture
         .ensure_index_serves(
             &by_q,

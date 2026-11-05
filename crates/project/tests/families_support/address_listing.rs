@@ -130,10 +130,13 @@ impl Fixture {
             .with_context(|| format!("read {read}"))
     }
 
-    /// `read` is served by an index scan of `index` whose index condition names `condition`,
-    /// with no sort of any kind, when sequential scans, bitmap scans and sorts are off: the
-    /// shape of the index answers the read, whatever the planner would pick for this small
-    /// fixture.
+    /// A capability check: `read` can be served by an index scan of `index` whose index
+    /// condition names `condition`, with no sort of any kind. Inside a rolled-back transaction
+    /// every other index of `project_address_listing` is dropped (the primary key with its
+    /// constraint) and sequential scans, bitmap scans and sorts are off, so the plan shows what
+    /// the shape of `index` can answer, not which index the planner prefers for this small
+    /// fixture. Which index the planner chooses at realistic cardinality is the reader's plan
+    /// guard to prove.
     pub async fn ensure_index_serves(
         &self,
         read: &str,
@@ -141,6 +144,30 @@ impl Fixture {
         condition: &str,
     ) -> Result<()> {
         let mut transaction = self.pool.begin().await?;
+        let others: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT index_class.relname::text, owner.conname::text
+             FROM pg_index entry
+             JOIN pg_class index_class ON index_class.oid = entry.indexrelid
+             LEFT JOIN pg_constraint owner
+               ON owner.conindid = entry.indexrelid AND owner.conrelid = entry.indrelid
+             WHERE entry.indrelid = 'project_address_listing'::regclass
+               AND index_class.relname <> $1",
+        )
+        .bind(index)
+        .fetch_all(&mut *transaction)
+        .await?;
+        for (other, constraint) in others {
+            let hide = match constraint {
+                Some(constraint) => {
+                    format!("ALTER TABLE project_address_listing DROP CONSTRAINT \"{constraint}\"")
+                }
+                None => format!("DROP INDEX \"{other}\""),
+            };
+            sqlx::raw_sql(&hide)
+                .execute(&mut *transaction)
+                .await
+                .with_context(|| format!("hide {other}"))?;
+        }
         sqlx::raw_sql(
             "SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
              SET LOCAL enable_sort = off; SET LOCAL enable_incremental_sort = off",
