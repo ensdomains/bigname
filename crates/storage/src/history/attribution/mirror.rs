@@ -256,20 +256,9 @@ pub(super) fn push_exact_node_mirror_writes_for_test(
 /// term, so the selected pointer is the unfenced statement's. The registrar-grant lookup in
 /// `history/wrapped_registrar.rs` is fenced the same way.
 fn registry_pointer_rows() -> String {
-    format!(
-        "(SELECT registry.* FROM bigname_phase.normalized_events registry
-                      WHERE registry.chain_id = walk.chain_id
-                        AND registry.namespace = surface.namespace
-                        AND lower(COALESCE(registry.after_state ->> 'child_node', registry.after_state ->> 'namehash',
-                                           registry.after_state ->> 'node')) = lower(surface.namehash)
-                        AND registry.event_kind = 'ResolverChanged'
-                        AND registry.source_family IN {ENS_V1_POINTER_FAMILIES}
-                        AND COALESCE(registry.after_state ->> 'child_node', registry.after_state ->> 'namehash',
-                                     registry.after_state ->> 'node') IS NOT NULL
-                        AND registry.consumer_visibility = 'activated'
-                        AND registry.canonicality_state IN {READABLE}
-                      OFFSET 0) registry"
-    )
+    // Red-run stub: the previous statement.
+    let _ = (ENS_V1_POINTER_FAMILIES, READABLE);
+    "bigname_phase.normalized_events registry".to_owned()
 }
 
 /// `SELECT resource_id, normalized_event_id`: one row with a null id for every followed mirror,
