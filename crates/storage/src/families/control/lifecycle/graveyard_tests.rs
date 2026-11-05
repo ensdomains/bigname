@@ -31,7 +31,7 @@ use crate::families::{
     control::{
         position::Position,
         registry::{OwnerEvent, RegistryNode, ZERO_ADDRESS},
-        rows::{BindingCandidate, LifecycleEvent},
+        rows::{BindingCandidate, LifecycleEvent, WrapperRow},
     },
     name::selection::select,
 };
@@ -1511,6 +1511,38 @@ fn a_cleared_wrapped_subname_is_released_to_its_wrapped_holder() -> Row {
     )
 }
 
+/// The same when the wrap was emancipated and its expiry passed before the clear. Past its
+/// expiry NameWrapper reads an emancipated or locked token's owner as zero and lets the parent
+/// take the name, and it emits no event at the expiry. The wrapper adapter records the state
+/// and expiry only from `NameWrapped`, `FusesSet` and `ExpiryExtended`. The last wrapped holder
+/// is the holder, as a lapsed lease's holder is for a claimed `.eth` name.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L701-L730 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+/// (crates/adapters/src/schema_v2/protocol/v1/wrapper.rs, `wrapper_state` and `interpret`)
+fn an_expired_emancipated_subname_cleared_later_names_its_last_wrapped_holder() -> Row {
+    let mut row = row(
+        subname().handed_off_at(60),
+        &then(&WRAP, &[Write(60, 0, 2, GRAVEYARD)]),
+        &[(8, 0, 1, Some(HOLDER)), (60, 0, 2, IN_GRAVEYARD)],
+        Some(HOLDER),
+        60,
+    );
+    row.facts.wrappers.insert(
+        WRAPPED.to_owned(),
+        WrapperRow {
+            resource_id: WRAPPED.to_owned(),
+            logical_name_id: Some(NAME.to_owned()),
+            wrapper_state: Some("emancipated".to_owned()),
+            fuses: Some(1 << 16),
+            has_modifier: true,
+            expiry_seconds: Some(time(30).to_string()),
+            has_expiry: true,
+            lifecycle_unwrapped: Some(false),
+        },
+    );
+    row
+}
+
 /// The same after a transfer of the wrapped token.
 fn a_cleared_wrapped_subname_is_released_to_its_new_wrapped_holder() -> Row {
     row(
@@ -2069,6 +2101,7 @@ fn a_subname_cleared_to_zero_names_no_holder() -> Row {
 }
 
 custody_rows! {
+    an_expired_emancipated_subname_cleared_later_names_its_last_wrapped_holder: an_expired_emancipated_subname_cleared_later_names_its_last_wrapped_holder_serves, an_expired_emancipated_subname_cleared_later_names_its_last_wrapped_holder_trace;
     a_wrapped_eth_name_unwrapped_to_the_graveyard_for_another_controller_names_the_unwrapper: a_wrapped_eth_name_unwrapped_to_the_graveyard_for_another_controller_names_the_unwrapper_serves, a_wrapped_eth_name_unwrapped_to_the_graveyard_for_another_controller_names_the_unwrapper_trace;
     an_owners_bare_name_wrapper_write_and_a_clear_in_one_transaction_name_no_holder: an_owners_bare_name_wrapper_write_and_a_clear_in_one_transaction_name_no_holder_serves, an_owners_bare_name_wrapper_write_and_a_clear_in_one_transaction_name_no_holder_trace;
     a_wrapped_eth_name_unwrapped_to_the_graveyard_names_the_unwrapper: a_wrapped_eth_name_unwrapped_to_the_graveyard_names_the_unwrapper_serves, a_wrapped_eth_name_unwrapped_to_the_graveyard_names_the_unwrapper_trace;

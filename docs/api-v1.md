@@ -2563,7 +2563,8 @@ Graveyard is served as an ended registration, whatever its lease or its schedule
   token's holder, or, while the token was in the NameWrapper, the wrapped token's holder. When
   the wrap was minted to the Graveyard it is the token's holder before the wrap, if the name had
   one. Otherwise it is the registry owner, or, while the NameWrapper owned the record, the
-  wrapped token's holder. A NameWrapper that wrapped the name is never the holder.
+  wrapped token's holder. A NameWrapper that wrapped the name is never the holder. It is the
+  last holder whether or not the wrap or the lease had expired by then.
   It is `null` when no one controlled the name then, such as a record cleared to zero or a
   registry record written to the NameWrapper with no wrapped token. An earlier write in the same
   transaction counts. Three cases the indexed events cannot show are listed under
