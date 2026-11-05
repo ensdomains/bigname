@@ -60,6 +60,16 @@ const FAMILY_TABLES: &[&str] = &[
     "project_lookup_dependency",
 ];
 
+/// The small permission tables autovacuum analyzes sooner than its default, and the storage
+/// parameters that make it.
+const ANALYZE_THRESHOLD_TABLES: [&str; 3] = [
+    "project_account_approval",
+    "project_ens_v2_entry_owner",
+    "project_ens_v2_registry_parent",
+];
+const ANALYZE_THRESHOLDS: &str =
+    "storage:autovacuum_analyze_scale_factor=0.02,autovacuum_analyze_threshold=20";
+
 const BASELINE: &[&str] = &[
     include_str!("../../../crates/storage/schema/baseline/01_chain.sql"),
     include_str!("../../../crates/storage/schema/baseline/02_raw_facts.sql"),
@@ -148,6 +158,15 @@ async fn schema_migrations_create_the_family_tables_the_baseline_installs() -> R
         );
     }
 
+    for table in ANALYZE_THRESHOLD_TABLES {
+        assert!(
+            load_table_structure(installed.pool(), table)
+                .await?
+                .contains(&ANALYZE_THRESHOLDS.to_owned()),
+            "init-schema installs {table} with its analyze thresholds"
+        );
+    }
+
     let migrated = database("families_schema_migrated").await?;
     install_baseline(&migrated, true).await?;
     bigname_storage::MIGRATOR.run(migrated.pool()).await?;
@@ -200,7 +219,8 @@ async fn structures(database: &TestDatabase) -> Result<Vec<Vec<String>>> {
 
 // Storage addresses summary columns by name. The grace column is appended by the
 // migration but declared beside expiry in fresh schemas; compare every semantic
-// property while excluding only that table's physical column positions.
+// property, storage parameters included, while excluding only that table's physical column
+// positions.
 async fn load_table_structure(pool: &sqlx::PgPool, table: &str) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         r#"
@@ -238,6 +258,12 @@ async fn load_table_structure(pool: &sqlx::PgPool, table: &str) -> Result<Vec<St
             JOIN pg_class relation ON relation.oid = index_row.indrelid
             JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
             WHERE namespace.nspname = 'bigname_phase' AND relation.relname = $1
+            UNION ALL
+            SELECT format('storage:%s', array_to_string(relation.reloptions, ','))
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'bigname_phase' AND relation.relname = $1
+              AND relation.reloptions IS NOT NULL
             UNION ALL
             SELECT format('comment:%s:%s', COALESCE(attribute.attname, '<table>'),
                           description.description)

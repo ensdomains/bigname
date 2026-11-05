@@ -5,17 +5,24 @@
 -- changes to 2% of their rows plus 20. No rows, phase markers, catalogue version or content-hash
 -- inputs change, and no redo is required.
 --
--- ALTER TABLE takes SHARE UPDATE EXCLUSIVE for these two parameters, so it blocks no read and no
--- write. It waits behind a VACUUM, an ANALYZE or an index build on the table. Applied again, it
+-- Lock class: ALTER TABLE ... SET for these two storage parameters takes SHARE UPDATE EXCLUSIVE
+-- on the table, which blocks neither reads nor writes. It conflicts only with VACUUM, ANALYZE,
+-- CREATE INDEX CONCURRENTLY and other schema changes on the table. A lock_timeout of 5 seconds
+-- bounds the wait behind one of those, so a busy table fails this schema-migration instead of
+-- holding it. The previous lock_timeout is put back before the block returns. Applied again, it
 -- sets the same values.
 --
 -- An empty schema-migration database has no phase baseline yet, so this schema-migration is a
 -- no-op there, and phase-runner init-schema installs the same parameters.
 DO $migration$
+DECLARE
+    previous_lock_timeout text := current_setting('lock_timeout');
 BEGIN
     IF to_regclass('bigname_phase.project_account_approval') IS NULL THEN
         RETURN;
     END IF;
+
+    PERFORM set_config('lock_timeout', '5s', true);
 
     ALTER TABLE bigname_phase.project_account_approval
         SET (autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 20);
@@ -23,5 +30,6 @@ BEGIN
         SET (autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 20);
     ALTER TABLE bigname_phase.project_ens_v2_registry_parent
         SET (autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 20);
+    PERFORM set_config('lock_timeout', previous_lock_timeout, true);
 END
 $migration$;
