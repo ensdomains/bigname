@@ -64,6 +64,20 @@ pub(super) fn effective_child_fuses(chain: &str, child: &str, epoch: &str) -> St
     )
 }
 
+/// The expiry, in seconds, of the wrapper row [`effective_child_fuses`] reads: the second after
+/// which its fuses read as 0. Null when the name has no wrapper row.
+pub(super) fn effective_child_fuse_expiry(chain: &str, child: &str) -> String {
+    let position = json_position("wrapper.wrapper_state_position");
+    format!(
+        "(SELECT wrapper.expiry_seconds
+          FROM bigname_phase.project_wrapper_state wrapper
+          WHERE wrapper.chain_id = {chain} AND wrapper.logical_name_id = {child}
+            AND wrapper.wrapper_state_position IS NOT NULL
+          ORDER BY {position} DESC
+          LIMIT 1)"
+    )
+}
+
 /// SQL for "the `name_surfaces` row aliased `surface` stores no raw bytes". The raw columns are
 /// null together (`name_surfaces_raw_evidence_check`) and `hash_array_extended` is strict, so the
 /// second test repeats the first in the form `name_surfaces_project_suffix_hash_idx` indexes,

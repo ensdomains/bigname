@@ -861,6 +861,13 @@ check_served_projection_removal() {
                 emit_phase_migration "$registry_roles_index_migration" preceding-shape
             fi
             emit_phase_migration "$registry_roles_index_migration" baseline-first
+            # The child listing family and its work-list index: absent from the pre-7c shape,
+            # present in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261103120000_project_child_listing.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261103120000_project_child_listing.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261103120000_project_child_listing.sql" baseline-first
             # The resolver link order index: absent from the pre-7c shape, present in the
             # baseline.
             if [ "$suffix" = removal ]; then
@@ -1036,6 +1043,7 @@ for migration_file in \
     "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql" \
     "$transfer_node_index_migration" \
     "$registry_roles_index_migration" \
+    "$ROOT/migrations/20261103120000_project_child_listing.sql" \
     "$resolver_link_order_index_migration" \
     "$ROOT/migrations/20261104130000_project_event_count.sql" \
     "$raw_prefix_index_drop_migration"
@@ -1406,6 +1414,9 @@ emit_phase_migration "$transfer_node_index_migration" baseline-first | run_psql
 # empty table.
 emit_phase_migration "$registry_roles_index_migration" preceding-shape | run_psql
 emit_phase_migration "$registry_roles_index_migration" baseline-first | run_psql
+# The historical projections fixture lacks the child listing family and its work-list index.
+emit_phase_migration "$ROOT/migrations/20261103120000_project_child_listing.sql" preceding-shape | run_psql
+emit_phase_migration "$ROOT/migrations/20261103120000_project_child_listing.sql" baseline-first | run_psql
 # The historical projections fixture lacks the resolver link order index, and the table is
 # empty, so the schema-migration builds it.
 emit_phase_migration "$resolver_link_order_index_migration" preceding-shape | run_psql
@@ -6642,6 +6653,9 @@ BEGIN
             ('project_address_record_id_index'),
             ('project_name_history'),
             ('project_name_summary'),
+            ('project_child_listing'),
+            ('project_child_listing_count'),
+            ('project_child_preimage_watermark'),
             ('project_lookup_name'),
             ('project_lookup_relation'),
             ('project_lookup_inventory'),
@@ -6765,6 +6779,9 @@ BEGIN
             ('project_address_record_id_index'),
             ('project_name_history'),
             ('project_name_summary'),
+            ('project_child_listing'),
+            ('project_child_listing_count'),
+            ('project_child_preimage_watermark'),
             ('project_lookup_name'),
             ('project_lookup_relation'),
             ('project_lookup_inventory'),
@@ -6805,8 +6822,11 @@ BEGIN
     -- `project_generation_failures` is the contracted name of the append-only
     -- projection-generation failure audit (docs/storage.md, table ownership and
     -- "Projection publication"); it is not retention-generation state.
+    -- `project_child_preimage_watermark` (TYR-455, authorized 2026-11-05) records how far each chain has read the preimage observations of other chains to heal child names.
     WITH maintainer_authorized_allowlist(table_name) AS (
-        VALUES ('project_generation_failures')
+        VALUES
+            ('project_generation_failures'),
+            ('project_child_preimage_watermark')
     )
     SELECT string_agg(actual.table_name, ', ' ORDER BY actual.table_name)
     INTO forbidden_tables
@@ -6841,7 +6861,8 @@ BEGIN
             ('chain_heads', 'lineage_orphaning_epoch'),
             ('discovery_watch_admissions', 'lineage_orphaning_epoch'),
             ('manifest_authority_attestations', 'generation_token'),
-            ('chain_phase_state', 'redo_attempt_generation')
+            ('chain_phase_state', 'redo_attempt_generation'),
+            ('project_child_preimage_watermark', 'source_redo_attempt_generation')
     )
     SELECT string_agg(
         format('%I.%I', actual.table_name, actual.column_name),

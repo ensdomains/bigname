@@ -1,7 +1,8 @@
 //! Undo of one family block in its own transaction. The locked marker must be the block the
 //! driver planned to undo at the generation it planned from, and the repair record must be
 //! undoing under the driver's attempt. Every journalled before-image of the block is restored (a
-//! missing image deletes the row the block created), the index rows are derived again, the
+//! missing image deletes the row the block created), the index rows are derived again, the child
+//! listing rows a kept label preimage spells further are healed at the restored block, the
 //! marker returns to the block's predecessor one sequence up, and the block's journal rows are
 //! deleted. The undo that reaches the repair's pending undo target also moves the record to
 //! replaying in the same commit, with the input revision it read inside the transaction. Undo
@@ -110,6 +111,7 @@ pub(crate) async fn undo_block(
         &marker::Composition::recorded(&restored),
     )
     .await?;
+    heal_listing(&mut transaction, chain_id, &restored, &journal).await?;
 
     super::history_catalogue::restored(&mut transaction, chain_id, &restored).await?;
     marker::advance(&mut transaction, chain_id, &restored).await?;
@@ -142,6 +144,88 @@ pub(crate) async fn undo_block(
         .await
         .map_err(|error| ProjectError::database("failed to commit a family undo", error))?;
     Ok(Some(restored))
+}
+
+/// Heal, at the restored block, the child listing rows the undone block's journal restored that
+/// still spell a label as `[labelhash]`. Interpret's redo never removes a label from
+/// `label_preimages` (`crates/interpret/src/write.rs`, `prepare_redo_range`), so a row the undone
+/// block healed would otherwise show it as `[labelhash]` again, while the relation at the restored
+/// block, and a rebuild there, spell it. The listing's own statement derives the rows
+/// (`derived/children.rs`, `derive_heals`) and writes only those it spells further, journalling
+/// nothing. Any other difference comes from Interpret rows the repair already replaced, which the
+/// replay derives, or from an input that changes in place with no block, which a rebuild covers.
+/// No count moves. With no restored block the families are empty.
+async fn heal_listing(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain_id: &str,
+    restored: &FamilyMarker,
+    journal: &[(String, String, Option<Value>)],
+) -> Result<()> {
+    let Some(base) = restored.current.as_ref() else {
+        return Ok(());
+    };
+    let mut children = Vec::new();
+    for (family, key, image) in journal {
+        let unhealed = image
+            .as_ref()
+            .and_then(|image| image.get("unhealed_labelhashes"))
+            .and_then(Value::as_array);
+        if family != tables::CHILD_LISTING.name || unhealed.is_none_or(Vec::is_empty) {
+            continue;
+        }
+        let key = store::key_object(&tables::CHILD_LISTING, key)?;
+        let child = key
+            .get("child_logical_name_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ProjectError::data_integrity(format!(
+                    "child listing undo key of chain {chain_id} names no child"
+                ))
+            })?;
+        children.push(child.to_owned());
+    }
+    if children.is_empty() {
+        return Ok(());
+    }
+    let timestamp_seconds = match restored.timestamp_seconds {
+        Some(seconds) => Some(seconds),
+        None => sqlx::query_scalar(
+            "/* project:families.undo.restored_time */
+             SELECT extract(epoch FROM lineage.block_timestamp)::bigint
+             FROM chain_lineage lineage
+             WHERE lineage.chain_id = $1 AND lineage.block_number = $2
+               AND lineage.block_hash = $3",
+        )
+        .bind(chain_id)
+        .bind(base.number)
+        .bind(&base.hash)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to read the restored block", error))?,
+    };
+    let Some(timestamp_seconds) = timestamp_seconds else {
+        return Err(ProjectError::data_integrity(format!(
+            "chain {chain_id}'s restored block {} has no lineage row",
+            base.number
+        )));
+    };
+    let block = input::BlockHeader {
+        number: base.number,
+        hash: base.hash.clone(),
+        predecessor_hash: None,
+        timestamp_seconds,
+        timestamp: Value::Null,
+        journal: false,
+    };
+    // Boxed, so the undo's future does not carry the derivation's state on the caller's stack.
+    Box::pin(derived::heal_child_listing(
+        transaction,
+        chain_id,
+        &block,
+        &children,
+    ))
+    .await?;
+    Ok(())
 }
 
 /// Move an undoing repair whose marker already stands at or below its pending undo target to

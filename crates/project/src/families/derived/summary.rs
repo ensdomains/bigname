@@ -47,6 +47,9 @@ pub(crate) struct Refreshed {
     pub(crate) rows: u64,
     pub(crate) undo_rows: u64,
     pub(crate) names: Vec<String>,
+    /// The names whose stored raw name the block swept (`RAW_NAME_SWEEP`): each spells the
+    /// children it lists, so the child listing derives them whole.
+    pub(crate) raw_name_swept: Vec<String>,
     pub(crate) current_relations: Vec<bigname_storage::families::records::CurrentHistoryRelation>,
 }
 
@@ -79,6 +82,7 @@ pub(super) async fn refresh(
         .map_err(|error| {
             ProjectError::database("failed to read the names a family block touched", error)
         })?;
+    let mut raw_name_swept = Vec::new();
     if sweeps.raw_name {
         let swept: Vec<String> = sqlx::query_scalar(RAW_NAME_SWEEP)
             .bind(chain_id)
@@ -87,7 +91,8 @@ pub(super) async fn refresh(
             .map_err(|error| {
                 ProjectError::database("failed to sweep the stored raw names", error)
             })?;
-        names.extend(swept);
+        names.extend(swept.iter().cloned());
+        raw_name_swept = swept;
     }
     if sweeps.admission {
         let swept: Vec<String> = sqlx::query_scalar(ADMISSION_SWEEP)
@@ -107,9 +112,12 @@ pub(super) async fn refresh(
     if names.is_empty() {
         return Ok(Refreshed::default());
     }
+    let mut result = Refreshed {
+        raw_name_swept,
+        ..Refreshed::default()
+    };
     let publication = super::super::marker::publication(chain_id, &block, composition)?;
     let mut current_relations = Vec::new();
-    let mut result = Refreshed::default();
     for chunk in names.chunks(CHUNK) {
         let fresh = compose(transaction, &publication, chunk).await?;
         retire_null_resolver_divergences(transaction, chain_id, &fresh.null_resolver_names).await?;

@@ -19,7 +19,7 @@ use super::{
     event_counts, history_catalogue,
     input::BlockHeader,
     lookup, marker,
-    tables::NAME_SUMMARY,
+    tables::{CHILD_LISTING, NAME_SUMMARY},
 };
 use crate::{ProjectError, Result};
 
@@ -42,6 +42,9 @@ pub(crate) enum Stream {
     /// The address history catalogue over consecutive block windows; the cursor is the last
     /// window's end, the pass block once the stream is done.
     Windows = 3,
+    /// Every parent that can list a child, as (namespace, node), for the child listing family;
+    /// it runs after the names stream, whose summaries the listing rows read.
+    Children = 4,
 }
 
 impl Stream {
@@ -50,6 +53,7 @@ impl Stream {
             Some(1) => Self::Nodes,
             Some(2) => Self::RecordIds,
             Some(3) => Self::Windows,
+            Some(4) => Self::Children,
             _ => Self::Names,
         }
     }
@@ -60,7 +64,8 @@ impl Stream {
 
     pub(crate) const fn next(self) -> Self {
         match self {
-            Self::Names => Self::Nodes,
+            Self::Names => Self::Children,
+            Self::Children => Self::Nodes,
             Self::Nodes => Self::RecordIds,
             Self::RecordIds | Self::Windows => Self::Windows,
         }
@@ -181,6 +186,29 @@ const RECORD_IDS: &str = r#"/* project:families.compose.record_ids */
     ORDER BY value.resolver_address, value.record_id
     LIMIT $4"#;
 
+/// The parents after `($2, $3)` that can list a child, as (namespace, node), at most `$4`: the
+/// parent of an ENSv1 or Basenames edge, read in the edge key's order, and a name with an ENSv2
+/// subregistry pointer.
+const PARENTS: &str = "/* project:families.compose.parents */
+    SELECT namespace, node FROM (
+        (SELECT DISTINCT edge.namespace, edge.parent_node AS node
+         FROM project_child_edge_candidate edge
+         WHERE edge.chain_id = $1 AND (edge.namespace, edge.parent_node) > ($2, $3)
+         ORDER BY edge.namespace, edge.parent_node
+         LIMIT $4)
+        UNION
+        (SELECT split_part(pointer.logical_name_id, ':', 1),
+                lower(split_part(pointer.logical_name_id, ':', 2))
+         FROM project_parent_subregistry pointer
+         WHERE pointer.chain_id = $1
+           AND (split_part(pointer.logical_name_id, ':', 1),
+                lower(split_part(pointer.logical_name_id, ':', 2))) > ($2, $3)
+         ORDER BY 1, 2
+         LIMIT $4)
+    ) parents
+    ORDER BY namespace, node
+    LIMIT $4";
+
 /// The blocks after `$2` up to the pass block `$3` that hold interpreted events, with the running
 /// count of their events, at most `$4` of them.
 const WINDOW: &str = "/* project:families.compose.window */
@@ -262,10 +290,10 @@ pub(crate) async fn pairs(
         }
         None => (None, None),
     };
-    let sql = if stream == Stream::Nodes {
-        NODES
-    } else {
-        RECORD_IDS
+    let sql = match stream {
+        Stream::Nodes => NODES,
+        Stream::Children => PARENTS,
+        _ => RECORD_IDS,
     };
     sqlx::query_as(sql)
         .bind(chain_id)
@@ -362,14 +390,33 @@ pub(crate) async fn names_chunk(
     lookup::refresh(transaction, chain_id, block, composition, stats).await
 }
 
-/// Derive the address record index rows of one chunk of the node or record-id stream.
+/// Derive the address record index rows of one chunk of the node or record-id stream, or the
+/// child listing rows and counts of one chunk of the parents stream at the pass block `block`,
+/// each parent whole.
 pub(crate) async fn pairs_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-    stream: Stream,
+    (stream, block): (Stream, &BlockHeader),
     composition: &marker::Composition,
     pairs: Vec<(String, String)>,
+    stats: &mut BlockStats,
 ) -> Result<()> {
+    if stream == Stream::Children {
+        let parents: Vec<String> = pairs
+            .into_iter()
+            .map(|(namespace, node)| format!("{namespace}:{node}"))
+            .collect();
+        let listing = Box::pin(derived::derive_child_listing(
+            transaction,
+            chain_id,
+            block,
+            &parents,
+            &[],
+        ))
+        .await?;
+        *stats.rows.entry(CHILD_LISTING.name).or_default() += listing.rows;
+        return Ok(());
+    }
     let pairs = pairs.into_iter().unzip();
     let keys = if stream == Stream::Nodes {
         Touched::keys(Vec::new(), pairs, Default::default())

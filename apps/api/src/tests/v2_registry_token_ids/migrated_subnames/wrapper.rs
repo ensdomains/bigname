@@ -3,6 +3,8 @@
 //! change it. These fixtures execute admission, interpretation, Project and public readers.
 #[path = "wrapper/alias.rs"]
 mod alias;
+#[path = "wrapper/expiry.rs"]
+mod expiry;
 #[path = "wrapper/getter.rs"]
 mod getter;
 #[path = "wrapper/physical.rs"]
@@ -34,6 +36,14 @@ fn roles(bits: &[usize]) -> U256 {
         .fold(U256::ZERO, |v, b| v | (U256::from(1) << b))
 }
 fn wrapped(name: &str, owner: Address, fuses: u32) -> Result<alloy_primitives::LogData> {
+    wrapped_until(name, owner, fuses, WRAPPED_EXPIRY)
+}
+fn wrapped_until(
+    name: &str,
+    owner: Address,
+    fuses: u32,
+    expiry: u64,
+) -> Result<alloy_primitives::LogData> {
     Ok(NameWrapped {
         node: bigname_lookup::ens_namehash_hex(name)?.parse()?,
         name: bigname_domain::normalization::normalize_name(name)?
@@ -41,11 +51,16 @@ fn wrapped(name: &str, owner: Address, fuses: u32) -> Result<alloy_primitives::L
             .into(),
         owner,
         fuses,
-        expiry: WRAPPED_EXPIRY,
+        expiry,
     }
     .encode_log_data())
 }
 async fn wrapped_setup() -> Result<(TestDatabase, Address)> {
+    // Boxed: the deepest test of the module runs within a few KiB of the test-thread stack.
+    Box::pin(wrapped_setup_until(WRAPPED_EXPIRY)).await
+}
+/// The wrapped setup with the locked child's wrapper expiry at `child_expiry`.
+async fn wrapped_setup_until(child_expiry: u64) -> Result<(TestDatabase, Address)> {
     let (database, mut logs, resolver) = setup().await?;
     logs.retain(|log| log.block_number < BASE + 122);
     let v1 = V1.parse()?;
@@ -126,7 +141,10 @@ async fn wrapped_setup() -> Result<(TestDatabase, Address)> {
                     }
                     .encode_log_data(),
                 ),
-                (wrapper, wrapped(CHILD, child_owner, 65536)?),
+                (
+                    wrapper,
+                    wrapped_until(CHILD, child_owner, 65536, child_expiry)?,
+                ),
             ],
         )
         .into_iter()
