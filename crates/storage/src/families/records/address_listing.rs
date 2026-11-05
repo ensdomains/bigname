@@ -207,12 +207,13 @@ pub fn address_listing_statement(
                   former_expires_key numeric, token_holder_block bigint,
                   effective_controller_block bigint, role_holder_block bigint)
            ON rel.logical_name_id = nc.logical_name_id
-         -- A name whose surface stores no raw bytes is composed under its placeholder labels,
-         -- and served under each label the preimages spell (`name::rendered`, `enrich`); the
-         -- stored spelling reads the chain-observed preimages only.
+         -- A name the publication reads without raw bytes is composed under its placeholder
+         -- labels, and served under each label the preimages spell (`name::rendered`,
+         -- `enrich`), though Interpret may since have filled the surface's raw bytes from a
+         -- later observation (`name::loaders::surfaces_at`). The stored spelling reads the
+         -- chain-observed preimages only.
          LEFT JOIN bigname_phase.name_surfaces surface
-           ON nc.bracketed AND surface.logical_name_id = nc.logical_name_id
-          AND surface.raw_name IS NULL{spelling}
+           ON nc.bracketed AND surface.logical_name_id = nc.logical_name_id{spelling}
          CROSS JOIN LATERAL (
              SELECT COALESCE(spelling.name, nc.display_name) AS name,
                     COALESCE(spelling.name, nc.normalized_name) AS normalized,
@@ -250,8 +251,8 @@ pub fn address_listing_statement(
 }
 
 /// A statement that spells again each row of the subquery `target` (rows of
-/// `project_address_listing` whose name was spelled from a surface with no raw bytes) from that
-/// surface's chain-observed preimages, and yields `(address, logical_name_id, before_image,
+/// `project_address_listing` whose name was spelled from label hashes, as a publication read the
+/// surface without raw bytes) from that surface's chain-observed preimages, and yields `(address, logical_name_id, before_image,
 /// after_image)` for each row it spells further: fewer labels left as `[labelhash]`. Only the
 /// name and the columns read from it change; a preimage observation can do nothing else to a
 /// stored row. `target` is read first and on its own, so its own index bounds the read.
@@ -272,7 +273,7 @@ pub fn address_listing_respell_sql(target: &str) -> String {
                     'unhealed_labelhashes', to_jsonb(spelling.unhealed))
          FROM target
          JOIN bigname_phase.name_surfaces surface
-           ON surface.logical_name_id = target.logical_name_id AND surface.raw_name IS NULL{spelling}
+           ON surface.logical_name_id = target.logical_name_id{spelling}
          WHERE spelling.name IS NOT NULL
            AND target.unhealed_labelhashes @> spelling.unhealed
            AND target.unhealed_labelhashes <> spelling.unhealed",
