@@ -7,7 +7,7 @@ use super::{
     catalogue_source::{Bucket, block_window, push_bucket},
 };
 use crate::history::{
-    EventHistoryReadFilter,
+    EventHistoryReadFilter, HistoryOrder, catalogue_contract as contract,
     keyset::{HistoryKeyset, push_history_cursor_block_bound},
     paging::push_history_order_terms,
 };
@@ -48,8 +48,18 @@ pub(super) fn push_event_rows<'a>(
     }
     query.push(" AND ");
     push_key(query);
-    push_bucket(query, bucket, filter.order);
     let (minimum, maximum) = block_window(filter);
+    match (bucket, filter.order, minimum) {
+        // The window's lower bound excludes unpositioned events, so the descending seek's
+        // `IS NULL` arm is dead here. Without it the planner has no `OR` to serve with a
+        // bitmap of the whole history; the probe's outer bucket term keeps it.
+        (Bucket::After(after), HistoryOrder::Desc, Some(_)) if after != contract::NULL_BUCKET => {
+            query
+                .push(" AND ne.block_number < ")
+                .push_bind(after.saturating_mul(contract::BUCKET_BLOCKS));
+        }
+        _ => push_bucket(query, bucket, filter.order),
+    }
     if let Some(minimum) = minimum {
         query.push(" AND ne.block_number >= ").push_bind(minimum);
     }
