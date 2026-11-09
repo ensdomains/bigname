@@ -95,6 +95,9 @@ mod sunny_seal;
 #[path = "tests/registration_lifecycle.rs"]
 mod registration_lifecycle;
 
+#[path = "tests/registry_reservation_lineage.rs"]
+mod registry_reservation_lineage;
+
 #[path = "tests/search_redo.rs"]
 mod search_redo;
 
