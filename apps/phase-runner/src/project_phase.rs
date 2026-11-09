@@ -167,10 +167,9 @@ fn is_sweep_cap_refusal(error: &ProjectError) -> bool {
 ///
 /// Temporary: `ProjectError` does not carry the SQLSTATE, so this matches PostgreSQL's English
 /// messages, which assumes the server's `lc_messages` is English. Under another language nothing
-/// matches and the error is retried as before. The SQLSTATE carried on `ProjectError` replaces
-/// this match in the next Project change that rotates the projection content hash.
-/// `tests/families_runner.rs` and `tests/production_live/hydration.rs` meet each message from a
-/// real server, so a change of this wording fails there.
+/// matches and the error is retried as before. Carrying the SQLSTATE on `ProjectError` and
+/// retiring this match is TYR-491. `tests/families_runner.rs` meets each message from a real
+/// server, so a change of this wording fails there.
 fn is_unstorable_value(error: &ProjectError) -> bool {
     let message = error.to_string();
     let Some((_, refusal)) = message.rsplit_once("error returned from database: ") else {

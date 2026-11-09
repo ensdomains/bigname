@@ -151,6 +151,15 @@ fn decode_multicall_results(return_data: &[u8]) -> Result<Vec<EnsReverseNameMult
                     });
                 }
             };
+            // PostgreSQL text and jsonb cannot hold a NUL byte, so a name containing one has the
+            // outcome of a malformed return: no value is written and the read counts as failed.
+            if value.contains('\0') {
+                return Ok(EnsReverseNameMulticallResult::Failed {
+                    message: "resolver name call returned a name containing a NUL byte, which \
+                              cannot be stored"
+                        .to_owned(),
+                });
+            }
             Ok(if value.is_empty() {
                 EnsReverseNameMulticallResult::NotFound
             } else {

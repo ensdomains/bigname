@@ -295,87 +295,10 @@ async fn missing_hydration_rpc_fails_before_a_rebuild_publishes() -> Result<()> 
     db.cleanup().await
 }
 
-/// A hydrated string with a NUL byte, which PostgreSQL cannot store, fails the head block's
-/// write and rolls the block back. Every retry would read the same answer at the same head, so the
-/// supervised runner stops the chain on it once with a data-integrity error, and so does a run
-/// with retries off. A reverse name and a text record each reach the refusal. It is PostgreSQL's
-/// own, so a change of its wording fails here.
-#[tokio::test]
-async fn a_hydrated_nul_byte_is_not_retried() -> Result<()> {
-    for (label, text) in [
-        ("live_family_nul_reverse", false),
-        ("live_family_nul_text", true),
-    ] {
-        let db = setup(label, 2).await?;
-        if text {
-            seed_text(db.pool()).await?;
-        } else {
-            seed_reverse(db.pool(), ADDRESS).await?;
-        }
-        let rpc =
-            HydrationRpc::spawn(BTreeMap::from([(block_hash(1, 1), "a\0b.eth".into())])).await?;
-        publish(db.pool(), ETHEREUM, 1, 1, 0, 0).await?;
-        for retry_family_failures in [true, false] {
-            let error = ProjectPhase::with_hydration(db.pool().clone(), urls(&rpc.endpoint)?)
-                .with_family_settings(FamilySettings {
-                    retry_family_failures,
-                    ..FamilySettings::default()
-                })
-                .run_batch(PhaseContext {
-                    chain_id: ETHEREUM.into(),
-                    phase: PhaseName::Project,
-                    mode: RunMode::Normal,
-                    redo_attempt: None,
-                    sources: Arc::from([]),
-                    available_heads: Some(HeadMarkers {
-                        latest: BlockMarker::new(1, block_hash(1, 1))?,
-                        safe: None,
-                        finalized: None,
-                    }),
-                    live_handoff: None,
-                    resume: PhaseResume {
-                        current: Some(BlockMarker::new(0, block_hash(1, 0))?),
-                        ..Default::default()
-                    },
-                })
-                .await
-                .err()
-                .context("the NUL byte published")?;
-            let message = error.to_string();
-            assert_eq!(
-                (error.kind(), error.is_retryable()),
-                (ErrorKind::DataIntegrity, false),
-                "{label} under retry {retry_family_failures}: {message}"
-            );
-            let refusal = message.rsplit("error returned from database: ").next();
-            assert!(
-                matches!(
-                    refusal,
-                    Some(
-                        "unsupported Unicode escape sequence"
-                            | "invalid byte sequence for encoding \"UTF8\": 0x00"
-                    )
-                ),
-                "{message}"
-            );
-            let marker: i64 = sqlx::query_scalar(
-                "SELECT current_block_number FROM project_family_marker WHERE chain_id=$1",
-            )
-            .bind(ETHEREUM)
-            .fetch_one(db.pool())
-            .await?;
-            assert_eq!(marker, 0, "the refused block published nothing");
-        }
-        rpc.server.abort();
-        db.cleanup().await?;
-    }
-    Ok(())
-}
-
 /// A resolver can return a string with a NUL byte, which PostgreSQL cannot store. It is a failed
 /// read, as a malformed return is: the head block publishes with no value, the failure is
-/// counted, and the selector is not read again at the same head. A reverse name and a text record
-/// each meet it, under either retry setting.
+/// counted, and the next follow block does not read the selector again inside the retry delay. A
+/// reverse name and a text record each meet it, under either retry setting.
 #[tokio::test]
 async fn a_hydrated_nul_byte_is_a_failed_read_and_the_block_publishes() -> Result<()> {
     let mut stopped = Vec::new();
@@ -398,7 +321,7 @@ async fn a_hydrated_nul_byte_is_a_failed_read_and_the_block_publishes() -> Resul
                     retry_family_failures,
                     ..FamilySettings::default()
                 });
-            let at_head = |current: i64| -> Result<PhaseContext> {
+            let at_head = |current: i64, latest: i64| -> Result<PhaseContext> {
                 Ok(PhaseContext {
                     chain_id: ETHEREUM.into(),
                     phase: PhaseName::Project,
@@ -406,7 +329,7 @@ async fn a_hydrated_nul_byte_is_a_failed_read_and_the_block_publishes() -> Resul
                     redo_attempt: None,
                     sources: Arc::from([]),
                     available_heads: Some(HeadMarkers {
-                        latest: BlockMarker::new(1, block_hash(1, 1))?,
+                        latest: BlockMarker::new(latest, block_hash(1, latest))?,
                         safe: None,
                         finalized: None,
                     }),
@@ -418,7 +341,7 @@ async fn a_hydrated_nul_byte_is_a_failed_read_and_the_block_publishes() -> Resul
                 })
             };
             let case = format!("{label} under retry {retry_family_failures}");
-            let outcome = match phase.run_batch(at_head(0)?).await {
+            let outcome = match phase.run_batch(at_head(0, 1)?).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     stopped.push(format!("{case}: the head block stopped: {error}"));
@@ -442,33 +365,33 @@ async fn a_hydrated_nul_byte_is_a_failed_read_and_the_block_publishes() -> Resul
             .fetch_one(db.pool())
             .await?;
             assert_eq!(marker, 1, "{case}: the head block published");
-            let failed_read: (bool, Option<i32>) = if text {
-                sqlx::query_as(
-                    "SELECT hydrated_value IS NULL, hydration_failures
-                     FROM project_node_record_value WHERE record_key = 'text:url'",
-                )
-                .fetch_one(db.pool())
-                .await?
-            } else {
-                sqlx::query_as(
-                    "SELECT hydrated_name IS NULL, attempt_failures
-                     FROM project_reverse_tuple WHERE address = $1",
-                )
-                .bind(ADDRESS)
-                .fetch_one(db.pool())
-                .await?
-            };
             assert_eq!(
-                failed_read,
+                nul_read_state(db.pool(), text).await?,
                 (true, Some(1)),
                 "{case}: no value, one failure"
             );
+            // Block 2 is the next follow block and hydrates. Without the failed-read delay it would
+            // read the selector again.
             let calls = rpc.calls.lock().unwrap().len();
-            phase.run_batch(at_head(1)?).await?;
+            publish(db.pool(), ETHEREUM, 1, 2, 0, 0).await?;
+            let PhaseBatchOutcome::Complete(progress) = phase.run_batch(at_head(1, 2)?).await?
+            else {
+                anyhow::bail!("{case}: the next block did not finish")
+            };
+            assert_eq!(
+                progress.current,
+                Some(BlockMarker::new(2, block_hash(1, 2))?),
+                "{case}"
+            );
             assert_eq!(
                 rpc.calls.lock().unwrap().len(),
                 calls,
-                "{case}: the failed read is not selected again at the same head"
+                "{case}: the failed read waits out its retry delay"
+            );
+            assert_eq!(
+                nul_read_state(db.pool(), text).await?,
+                (true, Some(1)),
+                "{case}: the failed read is unchanged at the next block"
             );
             rpc.server.abort();
             db.cleanup().await?;
@@ -479,6 +402,26 @@ async fn a_hydrated_nul_byte_is_a_failed_read_and_the_block_publishes() -> Resul
         "a NUL byte must be a failed read: {stopped:#?}"
     );
     Ok(())
+}
+
+/// Whether the seeded selector has no value, and its count of failed reads in a row.
+async fn nul_read_state(pool: &PgPool, text: bool) -> Result<(bool, Option<i32>)> {
+    Ok(if text {
+        sqlx::query_as(
+            "SELECT hydrated_value IS NULL, hydration_failures
+             FROM project_node_record_value WHERE record_key = 'text:url'",
+        )
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT hydrated_name IS NULL, attempt_failures
+             FROM project_reverse_tuple WHERE address = $1",
+        )
+        .bind(ADDRESS)
+        .fetch_one(pool)
+        .await?
+    })
 }
 
 #[tokio::test]
