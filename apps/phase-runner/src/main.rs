@@ -8,6 +8,7 @@ use phase_runner::{
         Cli, RedoChains, ResolvedCommand, resolve_all_redo_chains, validate_redo_attestation_chains,
     },
     database::{RunnerDatabase, VerificationDatabase},
+    error::RunnerError,
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
     live_phase::LivePhase,
@@ -171,7 +172,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             };
             let report = runner.run(&runtime, cancellation).await?;
-            require_clean_supervisor_exit(report)?;
+            require_clean_stop(&report)?;
         }
         ResolvedCommand::Redo {
             database_url,
@@ -420,19 +421,28 @@ async fn start_metrics<'a>(
     Ok((loop_heartbeat, phase_progress, metrics_feed))
 }
 
+/// A chain that failed before the stop was requested was already reported through its phase
+/// row, the metrics and the log. Only a failure during the stop fails the exit.
+fn require_clean_stop(report: &SupervisorReport) -> Result<()> {
+    require_no_stopped_chains(report.stop_time_failures())
+}
+
 fn require_clean_supervisor_exit(report: SupervisorReport) -> Result<()> {
-    if report.stopped_chains.is_empty() {
+    require_no_stopped_chains(&report.stopped_chains)
+}
+
+fn require_no_stopped_chains(stopped_chains: &[(String, RunnerError)]) -> Result<()> {
+    if stopped_chains.is_empty() {
         return Ok(());
     }
-    let failures = report
-        .stopped_chains
+    let failures = stopped_chains
         .iter()
         .map(|(chain_id, error)| format!("{chain_id} ({:?}): {error}", error.kind()))
         .collect::<Vec<_>>()
         .join("; ");
     anyhow::bail!(
         "{} chain supervisor(s) stopped on terminal errors: {failures}",
-        report.stopped_chains.len()
+        stopped_chains.len()
     )
 }
 
