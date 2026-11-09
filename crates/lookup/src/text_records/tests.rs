@@ -169,6 +169,63 @@ fn decodes_multicall_text_results() -> Result<()> {
     Ok(())
 }
 
+fn successful_text_returns(values: &[&str]) -> Vec<u8> {
+    let results = values
+        .iter()
+        .map(|value| abi::Result3 {
+            success: true,
+            returnData: Bytes::from((value.to_string(),).abi_encode_params()),
+        })
+        .collect::<Vec<_>>();
+    (results,).abi_encode_params()
+}
+
+// A text record can be set to any string
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f),
+// but PostgreSQL text and jsonb cannot hold a NUL byte, so such a value is a failed read.
+#[test]
+fn a_text_value_with_a_nul_byte_is_a_failed_read() -> Result<()> {
+    let encoded = successful_text_returns(&["\0ab", "a\0b", "ab\0", "ab"]);
+
+    let results = decode_multicall_results(&encoded)?;
+    assert_eq!(results.len(), 4);
+    for (value, result) in ["\0ab", "a\0b", "ab\0"].iter().zip(&results) {
+        assert!(
+            matches!(
+                result,
+                EnsTextRecordMulticallResult::Failed { message } if message.contains("NUL byte")
+            ),
+            "text value {value:?} must be a failed read that names the NUL byte, got {result:?}"
+        );
+    }
+    assert_eq!(
+        results[3],
+        EnsTextRecordMulticallResult::Success {
+            value: "ab".to_owned()
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn an_invalid_utf8_text_value_is_a_failed_read() -> Result<()> {
+    let encoded = (vec![abi::Result3 {
+        success: true,
+        returnData: Bytes::from((Bytes::from(vec![0xff, 0x61]),).abi_encode_params()),
+    }],)
+        .abi_encode_params();
+
+    let results = decode_multicall_results(&encoded)?;
+    let [EnsTextRecordMulticallResult::Failed { message }] = results.as_slice() else {
+        panic!("a text value that is not UTF-8 must be a failed read, got {results:?}");
+    };
+    assert!(
+        message.starts_with("resolver text call return data is malformed"),
+        "{message}"
+    );
+    Ok(())
+}
+
 #[test]
 fn encodes_text_call_targets() -> Result<()> {
     let call = multicall_call_for_text_request(&EnsTextRecordMulticallRequest {

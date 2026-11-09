@@ -372,6 +372,115 @@ async fn a_hydrated_nul_byte_is_not_retried() -> Result<()> {
     Ok(())
 }
 
+/// A resolver can return a string with a NUL byte, which PostgreSQL cannot store. It is a failed
+/// read, as a malformed return is: the head block publishes with no value, the failure is
+/// counted, and the selector is not read again at the same head. A reverse name and a text record
+/// each meet it, under either retry setting.
+#[tokio::test]
+async fn a_hydrated_nul_byte_is_a_failed_read_and_the_block_publishes() -> Result<()> {
+    let mut stopped = Vec::new();
+    for (label, text) in [
+        ("live_family_nul_failed_read_reverse", false),
+        ("live_family_nul_failed_read_text", true),
+    ] {
+        for retry_family_failures in [true, false] {
+            let db = setup(label, 2).await?;
+            if text {
+                seed_text(db.pool()).await?;
+            } else {
+                seed_reverse(db.pool(), ADDRESS).await?;
+            }
+            let rpc = HydrationRpc::spawn(BTreeMap::from([(block_hash(1, 1), "a\0b.eth".into())]))
+                .await?;
+            publish(db.pool(), ETHEREUM, 1, 1, 0, 0).await?;
+            let phase = ProjectPhase::with_hydration(db.pool().clone(), urls(&rpc.endpoint)?)
+                .with_family_settings(FamilySettings {
+                    retry_family_failures,
+                    ..FamilySettings::default()
+                });
+            let at_head = |current: i64| -> Result<PhaseContext> {
+                Ok(PhaseContext {
+                    chain_id: ETHEREUM.into(),
+                    phase: PhaseName::Project,
+                    mode: RunMode::Normal,
+                    redo_attempt: None,
+                    sources: Arc::from([]),
+                    available_heads: Some(HeadMarkers {
+                        latest: BlockMarker::new(1, block_hash(1, 1))?,
+                        safe: None,
+                        finalized: None,
+                    }),
+                    live_handoff: None,
+                    resume: PhaseResume {
+                        current: Some(BlockMarker::new(current, block_hash(1, current))?),
+                        ..Default::default()
+                    },
+                })
+            };
+            let case = format!("{label} under retry {retry_family_failures}");
+            let outcome = match phase.run_batch(at_head(0)?).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    stopped.push(format!("{case}: the head block stopped: {error}"));
+                    rpc.server.abort();
+                    db.cleanup().await?;
+                    continue;
+                }
+            };
+            let PhaseBatchOutcome::Complete(progress) = outcome else {
+                anyhow::bail!("{case}: the head block did not finish")
+            };
+            assert_eq!(
+                progress.current,
+                Some(BlockMarker::new(1, block_hash(1, 1))?),
+                "{case}"
+            );
+            let marker: i64 = sqlx::query_scalar(
+                "SELECT current_block_number FROM project_family_marker WHERE chain_id=$1",
+            )
+            .bind(ETHEREUM)
+            .fetch_one(db.pool())
+            .await?;
+            assert_eq!(marker, 1, "{case}: the head block published");
+            let failed_read: (bool, Option<i32>) = if text {
+                sqlx::query_as(
+                    "SELECT hydrated_value IS NULL, hydration_failures
+                     FROM project_node_record_value WHERE record_key = 'text:url'",
+                )
+                .fetch_one(db.pool())
+                .await?
+            } else {
+                sqlx::query_as(
+                    "SELECT hydrated_name IS NULL, attempt_failures
+                     FROM project_reverse_tuple WHERE address = $1",
+                )
+                .bind(ADDRESS)
+                .fetch_one(db.pool())
+                .await?
+            };
+            assert_eq!(
+                failed_read,
+                (true, Some(1)),
+                "{case}: no value, one failure"
+            );
+            let calls = rpc.calls.lock().unwrap().len();
+            phase.run_batch(at_head(1)?).await?;
+            assert_eq!(
+                rpc.calls.lock().unwrap().len(),
+                calls,
+                "{case}: the failed read is not selected again at the same head"
+            );
+            rpc.server.abort();
+            db.cleanup().await?;
+        }
+    }
+    assert!(
+        stopped.is_empty(),
+        "a NUL byte must be a failed read: {stopped:#?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn project_redo_behind_the_canonical_head_defers_hydration() -> Result<()> {
     let db = setup("live_family_redo_rpc_free", 2).await?;

@@ -22,6 +22,9 @@ mod migration;
 #[path = "tests/record_id_resolver.rs"]
 mod record_id_resolver;
 
+#[path = "tests/record_key_cap.rs"]
+mod record_key_cap;
+
 #[path = "tests/registry_origin.rs"]
 mod registry_origin;
 
