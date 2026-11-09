@@ -6304,3 +6304,35 @@ catalogue window.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
+
+## Resolver record keys longer than 2,400 bytes
+
+The build that skips a resolver record log whose stored record key would be longer than 2,400
+bytes ([architecture](architecture.md#record_inventory),
+[known divergence](upstream.md#record-key-length-limit)) changes `crates/adapters/src`. It
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+The [projection content hash](glossary.md#projection-content-hash) includes it, so that
+rotates too.
+
+What changes for names:
+
+- A text, data or DNS record write whose stored key would be longer than 2,400 bytes yields no
+  `RecordChanged`. That covers `TextChanged`, `DataChanged`, `DNSRecordChanged` and
+  `DNSRecordDeleted` from an ENSv1 or Basenames resolver, `TextChanged` from a PublicResolverV2
+  or any other ENSv2 resolver, and an ENSv2 record-ID resolver's `TextUpdated` and
+  `DataUpdated`. Interpret logs one `WARN` naming the log, its emitter and the key's length, and
+  the batch continues.
+- Before this build, such a write with a key that does not compress stopped Project at its
+  block.
+- Every key of at most 2,400 bytes is interpreted exactly as before. The longest record key set
+  on mainnet is about 2.1 KB.
+
+An existing deployment finishes the full-range Interpret redo and then the stamped Project redo
+it installs before the matching API serves, as the [handoff](#phase-runner-configuration)
+describes, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+matching runner and API binaries. The change rides the next re-derivation release and shares
+that release's one Interpret and Project redo pair with its other hash-rotating changes. Do not
+mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::model::RawLogInput;
+use super::{catalog::Selected, model::RawLogInput};
 
 pub(super) fn stable_uuid(seed: &str) -> Uuid {
     let hash = keccak256(seed.as_bytes());
@@ -153,6 +153,46 @@ impl EventStringSelector {
             after_state.insert("raw_selector_key".to_owned(), raw_selector_key.clone());
         }
     }
+}
+
+/// The longest record key, in bytes, that a resolver record event may carry. Project stores the
+/// key in the primary keys of its record tables and in the text hydration order index. A
+/// PostgreSQL btree index row holds at most 2,704 bytes, and the widest of those rows carries
+/// about 200 bytes besides the key, so a longer key that does not compress cannot be stored.
+///
+/// The bound applies to the formatted key as it is stored (`text:{key}`, `text_opaque:0x{hex}`,
+/// `data:{key}`, `dns:{resource}:0x{hex}`), not to the raw key in the log: an opaque key is
+/// stored as hex and doubles in length. `str::len` counts UTF-8 bytes, as PostgreSQL's
+/// `octet_length` does. The longest record key set on mainnet is 2,126 bytes, so every key in
+/// use keeps updating under its own key.
+pub(super) const MAX_RECORD_KEY_BYTES: usize = 2_400;
+
+/// Whether `record_key` is longer than [`MAX_RECORD_KEY_BYTES`], logging one warning when it is.
+/// The caller then skips the log as it skips one whose indexed key is not the hash of its key:
+/// no record event, no substitute key and no row.
+pub(super) fn record_key_over_cap(
+    selected: &Selected,
+    raw: &RawLogInput,
+    record_family: &str,
+    record_key: &str,
+) -> bool {
+    if record_key.len() <= MAX_RECORD_KEY_BYTES {
+        return false;
+    }
+    tracing::warn!(
+        chain_id = %raw.chain_id,
+        block_number = raw.block_number,
+        block_hash = %raw.block_hash,
+        transaction_hash = %raw.transaction_hash,
+        log_index = raw.log_index,
+        emitting_address = %raw.emitting_address,
+        source_family = %selected.source.source_family,
+        event = %selected.event.name,
+        record_family = %record_family,
+        record_key_bytes = record_key.len(),
+        "resolver record key is longer than 2400 bytes; log skipped, no record written"
+    );
+    true
 }
 
 pub(super) fn event_string_selector(record_family: &str, raw_key: &[u8]) -> EventStringSelector {
