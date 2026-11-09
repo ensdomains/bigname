@@ -432,12 +432,53 @@ async fn a_stop_after_a_completed_batch_with_a_refresh_due_leaves_the_phase_runn
             live_poll_interval: Duration::from_millis(1),
         },
     )?;
-    tokio::time::timeout(
-        Duration::from_secs(120),
-        runner.run_chain(&runner_chain()?, stop.clone()),
+    let chain = runner_chain()?;
+    let logs = support::CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(logs.clone())
+        .finish();
+    let run = tokio::time::timeout(
+        Duration::from_secs(45),
+        tracing::instrument::WithSubscriber::with_subscriber(
+            runner.run_chain(&chain, stop.clone()),
+            subscriber,
+        ),
     )
+    .await;
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().collect();
+    let head: Vec<String> = lines.iter().take(150).map(|line| line.chars().take(400).collect()).collect();
+    let tail: Vec<String> = lines
+        .iter()
+        .skip(lines.len().saturating_sub(150))
+        .map(|line| line.chars().take(400).collect())
+        .collect();
+    eprintln!("DIAG {} log lines; first:\n{}\nDIAG last:\n{}", lines.len(), head.join("\n"), tail.join("\n"));
+    let (status, current): (String, Option<i64>) = sqlx::query_as(
+        "SELECT phase_status, current_block_number FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(RUNNER_CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    eprintln!(
+        "DIAG project {status} {current:?} batches {} completed {}",
+        project.batches.load(Ordering::SeqCst),
+        project.completed.load(Ordering::SeqCst)
+    );
+    let states: Vec<(String, String, Option<i64>, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, phase_status, current_block_number, failure_reason FROM chain_phase_state
+         WHERE chain_id = $1 ORDER BY phase_name",
+    )
+    .bind(RUNNER_CHAIN)
+    .fetch_all(scratch.pool())
     .await
-    .context("the chain run did not stop within two minutes")??;
+    .unwrap_or_default();
+    eprintln!("DIAG states {states:?}");
+    run.context("the chain run did not stop within 45 seconds")??;
 
     ensure!(
         project.batches.load(Ordering::SeqCst) == 1 && project.completed.load(Ordering::SeqCst),
