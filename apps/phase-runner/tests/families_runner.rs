@@ -596,7 +596,7 @@ async fn a_record_key_at_the_cap_is_stored_under_the_longest_arm_identity() -> R
                  manifest_version, source_manifest_id, chain_id, block_number, block_hash,
                  derivation_kind, canonicality_state, after_state)
              VALUES ($1, 'ens', 'RecordChanged', 'ens_v2_resolver_l1', 1, $2, $3, 11,
-                 $3 || '-block-11', 'fixture', 'canonical', $4)",
+                 $3 || '-block-11', 'ens_v2_resolver', 'canonical', $4)",
         )
         .bind(identity)
         .bind(MANIFEST)
