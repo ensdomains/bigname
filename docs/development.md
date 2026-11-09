@@ -138,11 +138,15 @@ Tests have time limits:
 - `cargo nextest` kills a test that runs for 12 minutes and reports it as
   `TIMEOUT`, which fails the run. The limit is the default profile's
   `slow-timeout` in `.config/nextest.toml`.
-- `cargo test` has no per-test limit. CI gives the core suite's run step 20
-  minutes. In the log of a run cut off there, a test that never finished has a
-  "has been running for over 60 seconds" line and no result line.
+- `cargo test` has no per-test limit. CI runs the core suite as two entries
+  and gives each one's run step 20 minutes. `core-arms` runs only the test in
+  `crates/storage/src/history/resolver_arm_equivalence_tests.rs`, and `core`
+  runs every other test. In the log of a run cut off at that limit, a test that
+  never finished has a "has been running for over 60 seconds" line and no
+  result line.
 
-On CI the slowest test takes under 4 minutes.
+In the core suite on CI, the test `core-arms` runs takes about 7 minutes. Every
+other core test takes under 6 minutes.
 
 The CI jobs for the core, API and phase-runner suites record where a stalled
 test stopped, before a limit ends it:

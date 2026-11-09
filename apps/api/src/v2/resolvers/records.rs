@@ -21,8 +21,8 @@ use crate::{
         SnapshotReadResource, Source, StrictQueryParams, V2Error, V2Result,
         api_error_to_v2_for_resource, default_requested_records,
         name_records::{
-            NameRecords, ensure_default_record_limit, indexed_record_answer,
-            inventory_only_request, records_include_inventory,
+            NameRecords, apply_inventory_completeness, ensure_default_record_limit,
+            indexed_record_answer, inventory_only_request, records_include_inventory,
         },
         name_records_inventory::{fill_records_route_abi_content_types, inventory_summary},
         parse_record_keys, resolve_v2_snapshot_for, snapshot_meta,
@@ -204,6 +204,7 @@ pub(crate) async fn get_resolver_records(
         .await?;
     let mut meta = snapshot_meta(&selected)?;
     meta.source = Some(Source::Indexed);
+    apply_inventory_completeness(&mut meta, Some(&inventory));
     Ok(Json(Envelope {
         data,
         page: None,

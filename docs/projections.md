@@ -2498,11 +2498,11 @@ moves it too, because the runner runs Ingest to the source's head before Project
 meets the block again. That chain's reads then answer `409 stale` until it
 recovers.
 
-A runner exits nonzero once every chain it runs has stopped. A runner with one
-chain therefore exits on this stop. Under a restart policy it starts again,
-replays the same block and stops again, in a loop. Stop that runner until a
-build that stores or explicitly skips the value is deployed. On a runner with
-several chains the others keep running.
+A runner stays up when a chain stops this way, even when it was the only chain.
+The other chains keep running, and the runner keeps serving its metrics until
+it is stopped. There is no restart loop. Stop the runner and start a build that
+stores or explicitly skips the value once one is deployed. That stop exits 0,
+because the failure was already reported.
 
 The runner recognises these failures by PostgreSQL's English message text, so
 it assumes the server's `lc_messages` is English. Under another language the

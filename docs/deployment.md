@@ -801,11 +801,9 @@ moves mid-run is refused, but one repointed between starts is checked only for
 the chain id and a readable block 0. A mismatch then stops
 that chain with a configuration error, which is not retried. On an Ingest or
 Live source it also sets `phase_runner_rpc_chain_mismatch` (see the
-[monitoring runbook](runbooks/pipeline-monitoring.md#alerts)). That gauge pages
-only if Prometheus scrapes it before the process exits, so it covers runners
-that keep serving other chains; a single-chain runner exits on the mismatch and
-is caught by `BignamePhaseRunnerDown` and the refusal log. A Verify reference
-that fails pages through `BignamePhaseFailed`. Hydration URLs are
+[monitoring runbook](runbooks/pipeline-monitoring.md#alerts)). The runner stays
+up after a mismatch found while running, so Prometheus scrapes that gauge. A
+Verify reference that fails pages through `BignamePhaseFailed`. Hydration URLs are
 checked at startup only.
 
 Each intake cursor records the chain id its endpoint reported and, once checked
@@ -5161,6 +5159,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS name_search_documents_prefix3_idx
     WHERE spelling_class IN (0, 1);
 ```
 
+Then analyze the table. An expression index has no statistics until the table is analyzed:
+
+```sql
+ANALYZE bigname_phase.name_search_documents;
+```
+
 `IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
 invalid index. The schema-migration checks all three names before its own builds and again
 after them. It refuses a name that is not an index, is on another table, is not valid and
@@ -5504,10 +5508,9 @@ When a build fails:
 
 - A build or drop that fails stops the chain with an error that names the index and the
   cause. The runner does not retry it in the process: another chain's Project entry stops
-  with the same error instead of building again. Once every chain has stopped, the process
-  exits non-zero.
-- Under a restart policy each start drops the invalid leftover and builds it again, so a cause
-  that persists shows as a restart loop with the same error.
+  with the same error instead of building again. The runner stays up until it is stopped.
+- Each start drops the invalid leftover and builds it again, so fix the cause and then restart
+  the runner. A cause that persists stops the chain again with the same error.
 - A name held by another relation is refused and never dropped.
 
 The [walk index set README](../ops/walk-index-set/README.md#the-phase-runners-rebuild) lists
