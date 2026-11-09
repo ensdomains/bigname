@@ -109,7 +109,7 @@ fn batch(
 fn role_change(block: i64, log: i64, old: u64, new: u64) -> RawLogInput {
     raw_at(
         EACRolesChanged {
-            resource: versioned_token("tyr507", 1),
+            resource: versioned_token("announced", 1),
             account: OWNER.parse().unwrap(),
             oldRoleBitmap: U256::from(old),
             newRoleBitmap: U256::from(new),

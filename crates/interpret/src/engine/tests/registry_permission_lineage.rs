@@ -48,7 +48,7 @@ fn versioned(label: &str, version: u32) -> U256 {
 
 /// The non-zero role resource of the self-announced registry cases.
 fn announced_resource() -> U256 {
-    versioned("tyr507", 1)
+    versioned("announced", 1)
 }
 
 fn owner() -> Address {
@@ -340,7 +340,7 @@ async fn declared_registry_role_change_after_a_reload_keeps_one_lineage(
     let prefix = format!("interpret_declared_role_lineage_{}", loader.name());
     let database = sepolia_database(&prefix).await?;
     let pool = database.pool();
-    let label = "tyr507-live";
+    let label = "registered";
     let token = versioned(label, 0);
     let owner: Address = OWNER.parse()?;
     insert_block(
@@ -435,7 +435,7 @@ async fn token_link_after_a_role_change_and_a_reload_keeps_one_lineage(
     let pool = database.pool();
     insert_announcement_and_grant(pool).await?;
     let link = TokenResource {
-        tokenId: versioned("tyr507", 0),
+        tokenId: versioned("announced", 0),
         resource: announced_resource(),
     }
     .encode_log_data();
