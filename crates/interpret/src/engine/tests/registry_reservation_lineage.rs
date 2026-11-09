@@ -10,6 +10,9 @@
 //! (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L39 @ ens_v2@a971bd64)
 //! (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L472 @ ens_v2@a971bd64)
 use super::*;
+use bigname_adapters::schema_v2::seam::{
+    TOKEN_CONTROL_TRANSFERRED_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
+};
 
 sol! {
     event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
@@ -193,11 +196,12 @@ async fn run_block_by_block(pool: &PgPool, loader: Loader) -> TestResult {
 /// The resource and token lineage the reservation drafted.
 async fn reservation_identity(pool: &PgPool) -> TestResult<(Uuid, Uuid)> {
     let (resource, lineage): (Option<Uuid>, Option<String>) = sqlx::query_as(
-        "SELECT resource_id, after_state ->> 'token_lineage_id' FROM normalized_events
+        "SELECT resource_id, after_state ->> $3 FROM normalized_events
          WHERE chain_id = $1 AND event_kind = 'RegistrationReserved' AND block_number = $2",
     )
     .bind(CHAIN)
     .bind(FIRST)
+    .bind(TOKEN_LINEAGE_ID_KEY)
     .fetch_one(pool)
     .await?;
     let (Some(resource), Some(lineage)) = (resource, lineage) else {
@@ -241,10 +245,11 @@ async fn reserved_then_registered_token_keeps_its_lineage(loader: Loader) -> Tes
     );
     let transfers: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events
-         WHERE chain_id = $1 AND event_kind = 'TokenControlTransferred' AND block_number = $2",
+         WHERE chain_id = $1 AND event_kind = $3 AND block_number = $2",
     )
     .bind(CHAIN)
     .bind(SECOND)
+    .bind(TOKEN_CONTROL_TRANSFERRED_EVENT_KIND)
     .fetch_one(pool)
     .await?;
     assert_eq!(
