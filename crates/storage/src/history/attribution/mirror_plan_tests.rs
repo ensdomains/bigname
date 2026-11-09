@@ -72,15 +72,20 @@ impl Statistics {
     }
 
     async fn apply(self, connection: &mut PgConnection) -> Result<()> {
+        // A sample of 300 x 300 rows covers every base fixture table whole, so each run plans on
+        // the same statistics.
+        self.apply_sampling(connection, 300).await
+    }
+
+    /// ANALYZE samples 300 x `sample_target` rows of each table.
+    async fn apply_sampling(self, connection: &mut PgConnection, sample_target: u32) -> Result<()> {
         let target = match self {
             Self::Off => 0,
             Self::On => -1,
         };
-        // A sample of 300 x 300 rows covers every fixture table whole, so each run plans on the
-        // same statistics.
         raw_sql(&format!(
             "ALTER INDEX {POINTER_INDEX} ALTER COLUMN 3 SET STATISTICS {target};
-             SET default_statistics_target = 300;
+             SET default_statistics_target = {sample_target};
              ANALYZE normalized_events, name_surfaces, chain_lineage;
              RESET default_statistics_target;"
         ))
@@ -264,7 +269,10 @@ async fn mirror_registry_probe_custom_walk_on_a_pointer_heavy_chain() -> Result<
         let published = BTreeMap::from([(MAINNET.to_owned(), BOUND)]);
         let mut failures = Vec::new();
         for statistics in [Statistics::Off, Statistics::On] {
-            statistics.apply(connection).await?;
+            // A sample of 300 x 1100 rows reads the pointer-heavy table whole (about 310,000
+            // rows), so the previous statement's walk asserted below is planned on the same
+            // statistics every run rather than on a random sample.
+            statistics.apply_sampling(connection, 1100).await?;
             for (label, k) in [("old pointer", CHILD_NODE), ("hot node", HOT_NODE)] {
                 let walk = walk(&[(k, &[])]);
                 let (sql, arguments) = render(&walk, &published)?;
