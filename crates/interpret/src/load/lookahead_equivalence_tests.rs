@@ -1010,9 +1010,23 @@ async fn name_over_the_label_cap_loads_in_one_attempt_on_every_pass() -> TestRes
     assert_eq!(current.number, FIRST_BLOCK);
     assert_eq!(first_block_attempts(pool).await?, expected, "redo");
     assert_eq!(super::RETRIES.get(), 0, "no lookahead attempt was retried");
-    let stored = stored_events(pool, CHAIN).await?;
-    assert!(stored.iter().any(|row| row.contains("RecordChanged")));
-    assert!(!stored.iter().any(|row| row.contains("PreimageObserved")));
+    let block_events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT event_kind, (to_jsonb(event) - 'normalized_event_id' - 'observed_at')::text
+         FROM normalized_events event
+         WHERE chain_id = $1 AND block_number = $2
+         ORDER BY transaction_index, log_index, event_identity",
+    )
+    .bind(CHAIN)
+    .bind(FIRST_BLOCK)
+    .fetch_all(pool)
+    .await?;
+    let kinds: Vec<&str> = block_events.iter().map(|(kind, _)| kind.as_str()).collect();
+    let rows: Vec<&str> = block_events.iter().map(|(_, row)| row.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["RecordChanged"],
+        "one NameChanged stores one event in its block; stored rows: {rows:#?}"
+    );
     database.cleanup().await?;
     Ok(())
 }
