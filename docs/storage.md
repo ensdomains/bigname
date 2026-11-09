@@ -758,6 +758,11 @@ Family indexes serve these concrete readers:
   `project_ens_v2_registry_parent_entry_idx` `(chain_id, parent, parent_entry_key)` over rows
   with a parent, from a parent entry to the registries that name it. Schema-migration
   `20261005140000_project_ens_v2_registry_entries.sql` adds the two tables and these indexes.
+- `project_account_approval`, `project_ens_v2_entry_owner` and
+  `project_ens_v2_registry_parent` set `autovacuum_analyze_scale_factor` 0.02 and
+  `autovacuum_analyze_threshold` 20, so a new kind of row in these small tables reaches the
+  planner statistics sooner. Schema-migration
+  `20261105120000_project_permission_analyze_thresholds.sql` sets them.
 - The composed name reader's resource pointer lookup
   (`storage:families.name.resource_pointers`) can probe `project_resource_pointer_pkey` by
   resource and the partial `project_resource_pointer_root_node_idx` (ENSv2 root registry

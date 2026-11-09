@@ -1690,6 +1690,8 @@ CREATE TABLE IF NOT EXISTS project_account_approval (
 );
 CREATE INDEX IF NOT EXISTS project_account_approval_subject_idx
     ON project_account_approval (subject, authority_kind);
+ALTER TABLE project_account_approval
+    SET (autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 20);
 COMMENT ON TABLE project_account_approval IS
     'Project-owned account approvals of family F9: the latest AccountPermissionChanged per authority contract, owner, subject and relation; an explicit false stays as a row.';
 COMMENT ON COLUMN project_account_approval.chain_id IS
@@ -1758,6 +1760,8 @@ CREATE INDEX IF NOT EXISTS project_ens_v2_entry_owner_owner_idx
 CREATE INDEX IF NOT EXISTS project_ens_v2_entry_owner_resource_idx
     ON project_ens_v2_entry_owner (chain_id, resource_id)
     WHERE resource_id IS NOT NULL;
+ALTER TABLE project_ens_v2_entry_owner
+    SET (autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 20);
 COMMENT ON TABLE project_ens_v2_entry_owner IS
     'Project-owned ENSv2 registry entries of family F16: per registry and entry (the labelhash with its 32 version bits cleared), what the registry''s own logs last said about the entry''s token. It follows the contract, not the name: an entry whose own expiry has passed keeps its owner, because the registry burns nothing at expiry, and a name whose path was released keeps its entry. Readers compare expiry with the block they serve.';
 COMMENT ON COLUMN project_ens_v2_entry_owner.chain_id IS
@@ -1816,6 +1820,8 @@ CREATE TABLE IF NOT EXISTS project_ens_v2_registry_parent (
 CREATE INDEX IF NOT EXISTS project_ens_v2_registry_parent_entry_idx
     ON project_ens_v2_registry_parent (chain_id, parent, parent_entry_key)
     WHERE parent IS NOT NULL;
+ALTER TABLE project_ens_v2_registry_parent
+    SET (autovacuum_analyze_scale_factor = 0.02, autovacuum_analyze_threshold = 20);
 COMMENT ON TABLE project_ens_v2_registry_parent IS
     'Project-owned ENSv2 registry parents of family F16: per registry, the parent registry and label its latest ParentUpdated named. An ENSv1→ENSv2 migration-created WrapperRegistry gives its root roles to the owner of that label''s entry in the parent, and to that owner''s operators there.';
 COMMENT ON COLUMN project_ens_v2_registry_parent.chain_id IS

@@ -5676,3 +5676,58 @@ The index reads `bigname_phase.entry_key_hashes`, so that function can no longer
 while the index exists. Where the recovery of
 `20261012120000_name_surfaces_project_path_indexes.sql` drops the function, drop this index
 first and build it again afterwards with the statements above.
+
+## The runner refreshes the statistics of the permission tables
+
+Project analyzes its family tables during a rebuild. After that only autovacuum refreshes their
+planner statistics, by default once changes reach 10% of a table's rows plus 50. So statistics
+older than the runner process can stay in place, for example after a restore or a restart. A
+table PostgreSQL has never analyzed is planned from a default guess.
+
+The phase runner now runs `ANALYZE` itself between Project batches on the tables the permission
+reads join: `project_grant`, `project_account_approval`, `project_ens_v2_entry_owner`,
+`project_ens_v2_registry_parent`, `project_registry_binding_observation`,
+`project_binding_candidate` and `project_lifecycle_key_state`.
+
+- It refreshes a table after the first normal batch of the process that writes it.
+- It refreshes it again each time the writes since the last refresh reach the table's row count
+  at that refresh, and at least 1,000.
+- A redo's writes do not count, because Project analyzes a rebuild itself. A process that has not
+  refreshed a table yet refreshes it after the first normal batch that writes it.
+
+The counts are per table, across chains, and kept in memory. A table no batch writes is not
+refreshed. So a table a restore left without statistics stays that way until its first write,
+and a restore still needs its own `ANALYZE`.
+
+Each refresh runs after the batch's progress is recorded, one table per call, in a transaction of
+its own with a `lock_timeout` of 10 seconds and a `statement_timeout` of 120 seconds. `ANALYZE`
+blocks no read and no write. The chain's next batch waits for it, as it does for the
+`normalized_events` refresh. The process runs one of these statements at a time. A chain that
+finds one running goes on to its next batch and leaves the due table to a later call.
+
+The runner logs `project refreshed table statistics` for each refresh, with `table`,
+`writes_since_last_refresh`, `rows` and `duration_ms`. A refresh that fails logs the warning
+`project could not refresh table statistics`, and the batch and the phase run are not affected.
+The runner tries the table again after a later batch, no sooner than 60 seconds after the failure
+returns. There is no setting and no metric for the refresh. A stop drops a running refresh and
+leaves the table due, and the next process starts its counts again.
+
+A stop that arrives while a refresh is waiting skips it. The batch's progress is already
+recorded, but the run is reported as stopped, not complete. The Project phase stays `running`
+until the next start settles it. A redo's batches leave nothing due, so a `phase-runner redo` is
+not affected.
+
+This does not catch a small change to a table. After the first refresh, a new kind of row that
+is a small share of the table is below the runner's count, and it can be below autovacuum's
+default too. Schema-migration `20261105120000_project_permission_analyze_thresholds.sql` lowers
+autovacuum's threshold for that case on the three small tables the ENSv2 registry permission
+reads join: `project_account_approval`, `project_ens_v2_entry_owner` and
+`project_ens_v2_registry_parent`. They now analyze after changes to 2% of their rows plus 20. It
+takes SHARE UPDATE EXCLUSIVE, so it blocks no read and no write. It waits at most 5 seconds per
+table behind a `VACUUM`, an `ANALYZE` or an index build, then fails, and can be run again.
+A table a fresh `phase-runner init-schema` creates has the same parameters.
+
+Neither content hash rotates. `apps/phase-runner`, the baseline and the schema-migration are
+inputs of neither, so no redo is needed. The manifest-authority fingerprint and the compiled
+watch plan are unchanged. The refresh ships with the runner image and the thresholds with the
+schema-migration, in either order.
