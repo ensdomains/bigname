@@ -62,13 +62,32 @@ pub(super) fn namehash(labels: &[String]) -> String {
 }
 
 pub(super) fn namehash_raw<'a>(labels: impl DoubleEndedIterator<Item = &'a [u8]>) -> String {
-    let node = labels.rev().fold(B256::ZERO, |node, label| {
-        let mut input = [0u8; 64];
-        input[..32].copy_from_slice(node.as_slice());
-        input[32..].copy_from_slice(keccak256(label).as_slice());
-        keccak256(input)
-    });
+    let node = labels
+        .rev()
+        .fold(B256::ZERO, |node, label| child_namehash(node, label));
     format!("{node:#x}")
+}
+
+/// The node of the name with `label` under the name whose node is `parent`.
+pub(super) fn child_namehash(parent: B256, label: &[u8]) -> B256 {
+    let mut input = [0u8; 64];
+    input[..32].copy_from_slice(parent.as_slice());
+    input[32..].copy_from_slice(keccak256(label).as_slice());
+    keccak256(input)
+}
+
+/// Our limit on the labels of a name read from a log, set at the DNS wire bound: a DNS-encoded
+/// name fits in 255 bytes, so it has at most 127 labels, and 128 is the next power of two. The
+/// longest real names are far below it. A dot-separated name over the limit gets no name
+/// observation (`raw_name_observation`), and its event keeps the value. Interpreting it reads no
+/// name state, so dependency collection requests none. For an ENSv2 resolver's DNS-encoded name
+/// over the limit, collection requests the name's own node and none of its parents.
+pub(super) const MAX_NAME_SEGMENTS: usize = 128;
+
+/// Whether `raw_name` has more than `MAX_NAME_SEGMENTS` dot-separated segments. Every dot
+/// starts a segment, so an empty label between two dots counts too.
+pub(super) fn exceeds_name_segment_cap(raw_name: &[u8]) -> bool {
+    raw_name.iter().filter(|byte| **byte == b'.').count() >= MAX_NAME_SEGMENTS
 }
 
 pub(super) fn dns_encode(labels: &[String]) -> anyhow::Result<Vec<u8>> {

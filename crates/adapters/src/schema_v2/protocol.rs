@@ -130,7 +130,7 @@ pub(super) fn raw_name_observation(
     raw_name: &[u8],
     source_kind: &str,
 ) -> (Vec<LabelDraft>, Vec<ShadowNameDraft>) {
-    if raw_name.is_empty() {
+    if raw_name.is_empty() || super::common::exceeds_name_segment_cap(raw_name) {
         return (Vec::new(), Vec::new());
     }
     let raw_labels = raw_name
