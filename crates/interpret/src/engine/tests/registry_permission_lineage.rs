@@ -4,7 +4,8 @@
 //! ever linked to. The lineage its first role change drafted must still be known after the
 //! adapter state is restored from stored events. That restore happens at every batch boundary
 //! under the lookahead loader and at every process start under the full-state loader. A fresh
-//! Engine per block stands in for both, and each case runs under each loader.
+//! Engine per block stands in for both. Most cases run under each loader; the cases about the
+//! state-value cache and the root resource run under the lookahead loader only.
 use super::*;
 
 /// A contract no Sepolia manifest declares. It admits itself with `RegistryCreated()`.
@@ -22,8 +23,10 @@ enum Loader {
 
 impl Loader {
     fn engine(self, pool: &PgPool) -> Engine {
-        let forced = matches!(self, Self::FullState);
-        Engine::new(pool.clone()).with_full_state_loader_forced(forced)
+        match self {
+            Self::Lookahead => Engine::new(pool.clone()),
+            Self::FullState => Engine::new(pool.clone()).with_full_state_loader_forced(true),
+        }
     }
 
     fn name(self) -> &'static str {
@@ -49,6 +52,11 @@ fn announced_resource() -> U256 {
 
 fn owner() -> Address {
     OWNER.parse().expect("the owner is an address")
+}
+
+/// Distinct accounts the self-announced registry grants roles to.
+fn account(index: u8) -> Address {
+    Address::with_last_byte(0xc0 + index)
 }
 
 fn role_change(resource: U256, account: Address, old: u64, new: u64) -> alloy_primitives::LogData {
@@ -202,7 +210,23 @@ async fn assert_one_lineage_from_first_block(pool: &PgPool, lineage: Uuid) -> Te
     Ok(())
 }
 
-async fn self_announced_registry_role_change_survives_a_reload(loader: Loader) -> TestResult {
+/// A restore rebuilds the drafted lineages from stored after_states, so every role change on
+/// the resource carries the lineage it names: `count` rows, in block and log order.
+async fn assert_role_changes_carry(pool: &PgPool, lineage: Uuid, count: usize) -> TestResult {
+    let carried: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT after_state ->> 'token_lineage_id' FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'PermissionChanged'
+         ORDER BY block_number, log_index",
+    )
+    .bind(CHAIN)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(carried, vec![Some(lineage.to_string()); count]);
+    Ok(())
+}
+
+/// One prior role change on the resource, then a reload, then a second role change.
+async fn one_prior_permission_change_keeps_the_lineage(loader: Loader) -> TestResult {
     let prefix = format!("interpret_announced_role_lineage_{}", loader.name());
     let database = sepolia_database(&prefix).await?;
     let pool = database.pool();
@@ -211,29 +235,96 @@ async fn self_announced_registry_role_change_survives_a_reload(loader: Loader) -
 
     let lineage = first_role_change_lineage(pool).await?;
     assert_one_lineage_from_first_block(pool, lineage).await?;
-    // A restore rebuilds the drafted lineages from stored after_states, so the role change
-    // must carry the lineage it names.
-    let carried: Option<String> = sqlx::query_scalar(
-        "SELECT after_state ->> 'token_lineage_id' FROM normalized_events
-         WHERE chain_id = $1 AND event_kind = 'PermissionChanged' AND block_number = $2",
-    )
-    .bind(CHAIN)
-    .bind(SECOND)
-    .fetch_one(pool)
-    .await?;
-    assert_eq!(carried, Some(lineage.to_string()));
+    assert_role_changes_carry(pool, lineage, 2).await?;
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn self_announced_registry_role_change_survives_a_reload_under_lookahead() -> TestResult {
-    self_announced_registry_role_change_survives_a_reload(Loader::Lookahead).await
+async fn one_prior_permission_change_keeps_the_lineage_across_a_lookahead_reload() -> TestResult {
+    one_prior_permission_change_keeps_the_lineage(Loader::Lookahead).await
 }
 
 #[tokio::test]
-async fn self_announced_registry_role_change_survives_a_reload_under_full_state() -> TestResult {
-    self_announced_registry_role_change_survives_a_reload(Loader::FullState).await
+async fn one_prior_permission_change_keeps_the_lineage_across_a_full_state_reload() -> TestResult {
+    one_prior_permission_change_keeps_the_lineage(Loader::FullState).await
+}
+
+/// The interpreter state-value cache, `StateCacheCapacity::Entries` (default
+/// `DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES`), is the one bound a loader puts on restored
+/// state: it evicts the least recently used values and reloads them on demand, while the
+/// lookahead queries read every prior row. A role change's state is keyed by its account, so
+/// granting more accounts on the resource than the cache holds restores more rows than it
+/// keeps. The second role change after the reload must still find the first lineage.
+const STATE_CACHE_ENTRIES: usize = 4;
+
+#[tokio::test]
+async fn many_prior_permission_changes_beyond_the_state_cache_keep_the_lineage_across_a_lookahead_reload()
+-> TestResult {
+    let database = sepolia_database("interpret_announced_role_lineage_beyond_cache").await?;
+    let pool = database.pool();
+    let resource = announced_resource();
+    let mut first_block = vec![RegistryCreated {}.encode_log_data()];
+    for index in 1..=2 * STATE_CACHE_ENTRIES as u8 {
+        first_block.push(role_change(resource, account(index), 0, 1));
+    }
+    insert_block(pool, FIRST, ANNOUNCED_REGISTRY, first_block).await?;
+    let widen = role_change(resource, account(1), 1, 3);
+    insert_block(pool, SECOND, ANNOUNCED_REGISTRY, vec![widen]).await?;
+    let engine = || Engine::with_state_cache_capacity(pool.clone(), STATE_CACHE_ENTRIES);
+    run_block_by_block_with(Loader::Lookahead, engine).await?;
+
+    let lineage = first_role_change_lineage(pool).await?;
+    assert_one_lineage_from_first_block(pool, lineage).await?;
+    assert_role_changes_carry(pool, lineage, 2 * STATE_CACHE_ENTRIES + 1).await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A role change on the root resource names no token lineage: it drafts none, before or after
+/// a reload, and its after_state carries the lineage key as null.
+#[tokio::test]
+async fn root_permission_changes_carry_a_null_lineage_and_draft_none() -> TestResult {
+    let database = sepolia_database("interpret_announced_root_role_lineage").await?;
+    let pool = database.pool();
+    let grant = role_change(U256::ZERO, account(1), 0, 1);
+    let announce = RegistryCreated {}.encode_log_data();
+    insert_block(pool, FIRST, ANNOUNCED_REGISTRY, vec![announce, grant]).await?;
+    let widen = role_change(U256::ZERO, account(1), 1, 3);
+    insert_block(pool, SECOND, ANNOUNCED_REGISTRY, vec![widen]).await?;
+    run_block_by_block(pool, Loader::Lookahead).await?;
+
+    let lineages: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM token_lineages lineage
+         JOIN resources
+           ON resources.chain_id = lineage.chain_id
+          AND resources.token_lineage_id = lineage.token_lineage_id
+         JOIN normalized_events events
+           ON events.chain_id = resources.chain_id
+          AND events.resource_id = resources.resource_id
+         WHERE lineage.chain_id = $1
+           AND events.raw_fact_ref ->> 'emitting_address' = $2",
+    )
+    .bind(CHAIN)
+    .bind(ANNOUNCED_REGISTRY)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(lineages, 0, "a root role change drafts no token lineage");
+    let carried: Vec<Option<serde_json::Value>> = sqlx::query_scalar(
+        "SELECT after_state -> 'token_lineage_id' FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RootPermissionChanged'
+         ORDER BY block_number, log_index",
+    )
+    .bind(CHAIN)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        carried,
+        vec![Some(serde_json::Value::Null); 2],
+        "both root role changes carry the lineage key as null"
+    );
+    database.cleanup().await?;
+    Ok(())
 }
 
 /// A declared registry's `register` links the token to its resource before it grants roles,
