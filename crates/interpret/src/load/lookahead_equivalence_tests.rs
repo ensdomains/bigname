@@ -37,6 +37,12 @@ mod registry {
     }
 }
 
+mod resolver {
+    alloy_sol_types::sol! {
+        event NameChanged(bytes32 indexed node, string name);
+    }
+}
+
 mod registrar {
     alloy_sol_types::sol! {
         event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
@@ -944,6 +950,73 @@ async fn retained_history_of_an_uncovered_family_requires_full_state() -> TestRe
         assert_eq!(stored, forced, "{rollout_status}: stored events differ");
         assert!(stored.iter().any(|row| row.contains(UNCOVERED_FAMILY)));
     }
+    Ok(())
+}
+
+/// The names one lookahead load of the chain's first block requests, per attempt.
+async fn first_block_attempts(pool: &PgPool) -> TestResult<Vec<BTreeSet<String>>> {
+    super::CLOSURES.set(Some(super::Closure::default()));
+    let loaded =
+        super::batch_input(pool, CHAIN, FIRST_BLOCK, FIRST_BLOCK, None, CAPACITY, None).await;
+    let closure = super::CLOSURES.take().expect("the recorder is set");
+    let super::Attempt::Loaded(_) = loaded? else {
+        anyhow::bail!("{CHAIN} manifests must choose lookahead");
+    };
+    Ok(closure
+        .attempts
+        .iter()
+        .map(|(_, dependencies)| {
+            dependencies
+                .nodes
+                .iter()
+                .map(|request| format!("{}:{}", request.namespace, request.node))
+                .collect()
+        })
+        .collect())
+}
+
+/// A resolver `NameChanged` whose name has more labels than any DNS-encodable name, from an
+/// address no manifest declares, requests only its record's node. Every pass over its block
+/// asks for the same and loads in one attempt: the first, a restart that loads the batch
+/// again, and a load after the engine wrote the block, as a redo over it does.
+#[tokio::test]
+async fn name_over_the_label_cap_loads_in_one_attempt_on_every_pass() -> TestResult {
+    let database = database("interpret_lookahead_name_cap").await?;
+    let pool = database.pool();
+    seed_lineage(pool, CHAIN, &[0]).await?;
+    let mut seed = Seeder {
+        pool,
+        chain: CHAIN,
+        block: 0,
+        hash: String::new(),
+        transaction: String::new(),
+        log_index: 0,
+    };
+    seed.block(FIRST_BLOCK).await?;
+    let node = B256::repeat_byte(0x5a);
+    let name_changed = resolver::NameChanged {
+        node,
+        name: ".".repeat(128),
+    };
+    seed.log(
+        "0x0000000000000000000000000000000000000099",
+        name_changed.encode_log_data(),
+    )
+    .await?;
+    super::RETRIES.set(0);
+    let expected = vec![BTreeSet::from([format!("ens:{node:#x}")])];
+    assert_eq!(first_block_attempts(pool).await?, expected, "first pass");
+    assert_eq!(first_block_attempts(pool).await?, expected, "restart");
+    let engine = Engine::new(pool.clone())
+        .with_blocks_per_batch(NonZeroU32::new(1).expect("positive batch"));
+    let current = run_batch(&engine, None, FIRST_BLOCK).await?;
+    assert_eq!(current.number, FIRST_BLOCK);
+    assert_eq!(first_block_attempts(pool).await?, expected, "redo");
+    assert_eq!(super::RETRIES.get(), 0, "no lookahead attempt was retried");
+    let stored = stored_events(pool, CHAIN).await?;
+    assert!(stored.iter().any(|row| row.contains("RecordChanged")));
+    assert!(!stored.iter().any(|row| row.contains("PreimageObserved")));
+    database.cleanup().await?;
     Ok(())
 }
 

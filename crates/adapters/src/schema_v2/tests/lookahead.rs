@@ -2,6 +2,8 @@ use super::*;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[path = "lookahead_name_cap.rs"]
+mod name_cap;
 #[path = "v2_mount_path.rs"]
 mod v2_mount_path;
 
@@ -81,10 +83,16 @@ fn complete(
 thread_local! {
     /// Scoped comparisons run on this test thread, so a test can prove the fixture hook ran.
     static SCOPED_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The attempts the latest scoped comparison on this thread made, the one it used included.
+    static SCOPED_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(super) fn scoped_comparisons() -> usize {
     SCOPED_COMPARISONS.get()
+}
+
+fn last_scoped_attempts() -> usize {
+    SCOPED_ATTEMPTS.get()
 }
 
 /// The families whose retained events `events.sql` reads by name or resource.
@@ -326,7 +334,9 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
     }
     // Mirrors the Interpret loader: an attempt that reads a key outside the loaded set is
     // discarded, and the next attempt loads that key too.
+    let mut attempts = 0;
     let (prepared, loaded) = loop {
+        attempts += 1;
         let (scoped, rows) = scope(dependencies.clone(), &prior)?;
         assert!(scoped.unsupported.is_empty());
         let attempt = restore_schema_v2_lookahead_session(
@@ -372,6 +382,7 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
             }
         }
     };
+    SCOPED_ATTEMPTS.set(attempts);
     let (actual, session) = complete(prepared, &prior)?;
     assert_eq!(actual, expected, "complete scoped suffix output differs");
     SCOPED_COMPARISONS.set(SCOPED_COMPARISONS.get() + 1);
@@ -1023,91 +1034,4 @@ fn covered_families_outside_the_name_families_refuse_registrar_events() {
         );
     }
     assert!(!v1_lookahead_supports_family("dns_l1"));
-}
-
-/// Most labels a chain-chosen name may contribute node requests for. A DNS-encoded name fits
-/// in 255 bytes, so it has at most 127 labels; the cap is the next power of two.
-const NAME_SEGMENT_CAP: usize = 128;
-
-/// An ENSv1 resolver `NameChanged` whose name is `dots` dots, emitted by an address no
-/// manifest declares. The resolver family's generic events are matched across every emitter,
-/// so anyone can put this log in front of the collector.
-fn undeclared_dot_name_changed(node: B256, dots: usize) -> BatchInput {
-    let encoded = with_topic0(
-        raw_resolver_strings::RawNameChanged {
-            node,
-            name: ".".repeat(dots).into_bytes().into(),
-        }
-        .encode_log_data(),
-        resolver_name::NameChanged::SIGNATURE_HASH,
-    );
-    input(
-        vec![manifest(
-            91,
-            "ens_v1_resolver_l1",
-            "NameChanged",
-            "event NameChanged(bytes32 indexed node, string name)",
-            &[],
-            &["RecordChanged"],
-        )],
-        vec![],
-        vec![raw_at(
-            encoded,
-            1,
-            0,
-            "0x0000000000000000000000000000000000000099",
-        )],
-    )
-}
-
-#[test]
-fn dot_dense_name_changed_from_an_undeclared_resolver_collects_in_linear_time() -> anyhow::Result<()>
-{
-    // 1,000 dots split into 1,001 empty labels. Hashing every suffix of the name from scratch
-    // costs the square of the label count; one right-to-left fold costs twice the count.
-    let input = undeclared_dot_name_changed(B256::repeat_byte(0x91), 1_000);
-    let started = std::time::Instant::now();
-    let dependencies = collect_v1_batch_dependencies(&input, &input.manifests)?;
-    let elapsed = started.elapsed();
-    eprintln!(
-        "collected {} node requests in {elapsed:?}",
-        dependencies.nodes.len()
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "collecting one dot-dense NameChanged took {elapsed:?}"
-    );
-    assert!(
-        dependencies.nodes.len() <= NAME_SEGMENT_CAP + 2,
-        "one name requested {} nodes",
-        dependencies.nodes.len()
-    );
-    Ok(())
-}
-
-#[test]
-fn name_changed_over_the_segment_cap_requests_its_node_only() -> anyhow::Result<()> {
-    // One dot more than the cap gives a name over the cap: it is known by its whole-name hash
-    // alone, so the collector asks for the log's own node and that hash, and for no suffix.
-    let node = B256::repeat_byte(0x92);
-    let input = undeclared_dot_name_changed(node, NAME_SEGMENT_CAP + 1);
-    let dependencies = collect_v1_batch_dependencies(&input, &input.manifests)?;
-    let empty_labels = std::iter::repeat_n(String::new(), NAME_SEGMENT_CAP + 2).collect::<Vec<_>>();
-    let whole_name = super::super::common::namehash(&empty_labels);
-    let expected = [format!("{node:#x}"), whole_name]
-        .into_iter()
-        .map(|node| V1NodeRequest {
-            namespace: "ens".to_owned(),
-            node,
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        dependencies.nodes.len(),
-        expected.len(),
-        "requested {} nodes",
-        dependencies.nodes.len()
-    );
-    assert_eq!(dependencies.nodes, expected);
-    assert!(dependencies.unsupported.is_empty(), "{dependencies:?}");
-    Ok(())
 }
