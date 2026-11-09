@@ -7,6 +7,7 @@
 //! Engine per block stands in for both. Most cases run under each loader; the cases about the
 //! state-value cache and the root resource run under the lookahead loader only.
 use super::*;
+use bigname_adapters::schema_v2::seam::TOKEN_LINEAGE_ID_KEY;
 
 /// A contract no Sepolia manifest declares. It admits itself with `RegistryCreated()`.
 const ANNOUNCED_REGISTRY: &str = "0x00000000000000000000000000000000000000a7";
@@ -214,11 +215,12 @@ async fn assert_one_lineage_from_first_block(pool: &PgPool, lineage: Uuid) -> Te
 /// the resource carries the lineage it names: `count` rows, in block and log order.
 async fn assert_role_changes_carry(pool: &PgPool, lineage: Uuid, count: usize) -> TestResult {
     let carried: Vec<Option<String>> = sqlx::query_scalar(
-        "SELECT after_state ->> 'token_lineage_id' FROM normalized_events
+        "SELECT after_state ->> $2 FROM normalized_events
          WHERE chain_id = $1 AND event_kind = 'PermissionChanged'
          ORDER BY block_number, log_index",
     )
     .bind(CHAIN)
+    .bind(TOKEN_LINEAGE_ID_KEY)
     .fetch_all(pool)
     .await?;
     assert_eq!(carried, vec![Some(lineage.to_string()); count]);
@@ -311,11 +313,12 @@ async fn root_permission_changes_carry_a_null_lineage_and_draft_none() -> TestRe
     .await?;
     assert_eq!(lineages, 0, "a root role change drafts no token lineage");
     let carried: Vec<Option<serde_json::Value>> = sqlx::query_scalar(
-        "SELECT after_state -> 'token_lineage_id' FROM normalized_events
+        "SELECT after_state -> $2 FROM normalized_events
          WHERE chain_id = $1 AND event_kind = 'RootPermissionChanged'
          ORDER BY block_number, log_index",
     )
     .bind(CHAIN)
+    .bind(TOKEN_LINEAGE_ID_KEY)
     .fetch_all(pool)
     .await?;
     assert_eq!(
