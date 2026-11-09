@@ -525,6 +525,164 @@ async fn refused_record_key(prefix: &str, hashes: u64) -> Result<String> {
     Ok(message)
 }
 
+/// The longest record key Interpret admits is 2,400 bytes once formatted. Project stores one that
+/// PostgreSQL cannot compress, under the longest arm identity in use, the guarded arm's
+/// `{node}|ens_v2_resolver_l1|ens|{manifest}` with a three-digit manifest (93 bytes). Project
+/// writes it into the node record and record-id tables. The text hydration work table only holds
+/// selectors of admitted text resolvers, so its rows are copied from the stored record, and each
+/// table also takes a copy under the longest chain id in use. Every write passes each table's
+/// primary key and indexes, the hydration order index included.
+#[tokio::test]
+async fn a_record_key_at_the_cap_is_stored_under_the_longest_arm_identity() -> Result<()> {
+    use anyhow::Context as _;
+
+    const MANIFEST: i64 = 101;
+    const LONGEST_CHAIN: &str = "ethereum-mainnet";
+    let scratch = ready("families_cap_key").await?;
+    let published = head_marker(&scratch, 10).await?;
+    let project = ProjectPhase::new(scratch.pool().clone());
+    project.run_batch(context(&published, None)).await?;
+    ensure!(marker(&scratch).await? == Some(10));
+
+    let hashes: String = (0..38_u64)
+        .map(|seed| hex::encode(keccak256(seed.to_be_bytes())))
+        .collect();
+    let key = &hashes[..2_395];
+    let record_key = format!("text:{key}");
+    ensure!(record_key.len() == 2_400);
+    let node = format!("0x{}", hex::encode(keccak256(b"record key cap node")));
+    let resolver = format!(
+        "0x{}",
+        &hex::encode(keccak256(b"record key cap resolver"))[..40]
+    );
+    let record_id = alloy_primitives::U256::MAX.to_string();
+    sqlx::query(
+        "INSERT INTO manifest_versions (manifest_id, manifest_version, namespace, source_family,
+             chain_id, deployment_label, rollout_status, normalizer_version, file_path,
+             manifest_payload)
+         OVERRIDING SYSTEM VALUE
+         VALUES ($1, 1, 'ens', 'ens_v2_resolver_l1', $2, 'fixture', 'active', 'fixture',
+             'fixture/record-key-cap.toml', '{\"contracts\":[]}'::jsonb)",
+    )
+    .bind(MANIFEST)
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    let node_write = serde_json::json!({
+        "node": node,
+        "resolver": resolver,
+        "record_family": "text",
+        "record_key": record_key,
+        "selector_key": key,
+        "source_event": "TextChanged",
+        "value": "value",
+    });
+    let record_id_write = serde_json::json!({
+        "resolver": resolver,
+        "storage_model": "resolver_record_id",
+        "resolver_record_id": record_id,
+        "record_family": "text",
+        "record_key": record_key,
+        "selector_key": key,
+        "source_event": "TextUpdated",
+        "value": "value",
+    });
+    for (identity, after) in [
+        ("fixture:cap-key-node", &node_write),
+        ("fixture:cap-key-record-id", &record_id_write),
+    ] {
+        sqlx::query(
+            "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+                 manifest_version, source_manifest_id, chain_id, block_number, block_hash,
+                 derivation_kind, canonicality_state, after_state)
+             VALUES ($1, 'ens', 'RecordChanged', 'ens_v2_resolver_l1', 1, $2, $3, 11,
+                 $3 || '-block-11', 'fixture', 'canonical', $4)",
+        )
+        .bind(identity)
+        .bind(MANIFEST)
+        .bind(CHAIN)
+        .bind(after)
+        .execute(scratch.pool())
+        .await?;
+    }
+    let head = head_marker(&scratch, HEAD).await?;
+    let outcome = project
+        .run_batch(context(&head, Some(&published)))
+        .await
+        .context("Project stores the record key at the cap")?;
+    ensure!(
+        matches!(outcome, PhaseBatchOutcome::Complete(_)),
+        "{outcome:?}"
+    );
+    ensure!(marker(&scratch).await? == Some(HEAD));
+
+    let stored: (String, i32, i32) = sqlx::query_as(
+        "SELECT arm, octet_length(arm_identity), octet_length(record_key)
+         FROM project_node_record_value WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(CHAIN)
+    .bind(&resolver)
+    .fetch_one(scratch.pool())
+    .await?;
+    ensure!(stored == ("guarded".to_owned(), 93, 2_400), "{stored:?}");
+    let stored: (i32, i32) = sqlx::query_as(
+        "SELECT octet_length(record_id), octet_length(record_key)
+         FROM project_record_id_value WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(CHAIN)
+    .bind(&resolver)
+    .fetch_one(scratch.pool())
+    .await?;
+    ensure!(stored == (78, 2_400), "{stored:?}");
+
+    let chain = serde_json::json!({ "chain_id": LONGEST_CHAIN });
+    for table in ["project_node_record_value", "project_record_id_value"] {
+        sqlx::query(&format!(
+            "INSERT INTO {table}
+             SELECT (jsonb_populate_record(source_row, $2)).* FROM {table} source_row
+             WHERE chain_id = $1 AND resolver_address = $3"
+        ))
+        .bind(CHAIN)
+        .bind(&chain)
+        .bind(&resolver)
+        .execute(scratch.pool())
+        .await
+        .with_context(|| format!("{table} under chain id {LONGEST_CHAIN}"))?;
+    }
+    let order_index: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes
+             WHERE tablename = 'project_text_hydration_work'
+               AND indexname = 'project_text_hydration_work_order_idx')",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    ensure!(order_index, "the hydration order index exists");
+    for chain_id in [CHAIN, LONGEST_CHAIN] {
+        sqlx::query(
+            "INSERT INTO project_text_hydration_work (chain_id, resolver_address, arm,
+                 arm_identity, record_key, hydrated_at_block, hydration_failures)
+             SELECT $2, resolver_address, arm, arm_identity, record_key, $3, 1
+             FROM project_node_record_value WHERE chain_id = $1 AND resolver_address = $4",
+        )
+        .bind(CHAIN)
+        .bind(chain_id)
+        .bind(i64::MAX)
+        .bind(&resolver)
+        .execute(scratch.pool())
+        .await
+        .with_context(|| format!("project_text_hydration_work under chain id {chain_id}"))?;
+    }
+    let work: Vec<(i32, i32)> = sqlx::query_as(
+        "SELECT octet_length(arm_identity), octet_length(record_key)
+         FROM project_text_hydration_work WHERE resolver_address = $1 ORDER BY chain_id",
+    )
+    .bind(&resolver)
+    .fetch_all(scratch.pool())
+    .await?;
+    ensure!(work == vec![(93, 2_400), (93, 2_400)], "{work:?}");
+    scratch.cleanup().await
+}
+
 // The runner also matches PostgreSQL's refusal of a NUL in a text value. No Project write binds a
 // string as text, so this binds one directly to pin the wording a real server uses.
 #[tokio::test]
