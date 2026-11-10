@@ -36,7 +36,7 @@ use sqlx::{Postgres, Transaction};
 use crate::{ProjectError, Result, families::input};
 
 mod sources;
-pub(crate) use sources::seed as seed_sources;
+pub(crate) use sources::{Read as Observed, seed as seed_sources};
 mod work;
 
 /// Children derived per statement, to bound the working set.
@@ -255,24 +255,47 @@ const COUNT_INSERT: &str = "/* project:families.derived.child_listing_count_inse
     FROM pg_temp.bigname_child_listing_count_change change
     WHERE change.child_count > 0";
 
-/// Derive again, journal and write the listing rows and counts block `block` moved, after the
-/// family marker's block `after` (-1 with none).
-pub(crate) async fn refresh(
+/// The preimage observations of the other chains above this chain's watermarks
+/// (`sources.rs`), read once per family step: the address listing family heals from the same
+/// labels before this family's refresh advances the watermarks.
+pub(crate) async fn observe(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<Observed> {
+    sources::read(transaction, chain_id).await
+}
+
+/// The children and the parents block `block` can have moved after the family marker's block
+/// `after` (-1 with none), from `touched`, the names the block's summary refresh composed and
+/// those whose raw name it swept (`work.rs`). The address listing family derives its surface-less
+/// registry children from the same list.
+pub(crate) async fn work(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,
     after: i64,
     touched: (&[String], &[String]),
+) -> Result<(Vec<String>, Vec<String>)> {
+    work::list(transaction, chain_id, block, after, touched).await
+}
+
+/// Derive again, journal and write the listing rows and counts block `block` moved: the
+/// children and parents of its work list (`work`) and the rows `observed` heals, then advance the
+/// preimage watermarks `observed` read.
+pub(crate) async fn refresh(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    (mut children, parents): (Vec<String>, Vec<String>),
+    observed: &Observed,
 ) -> Result<Refreshed> {
-    let observed = sources::read(transaction, chain_id).await?;
-    let (mut children, parents) = work::list(transaction, chain_id, block, after, touched).await?;
     if !observed.holders.is_empty() {
         children.extend(observed.holders.iter().cloned());
         children.sort();
         children.dedup();
     }
     let mut refreshed = derive(transaction, chain_id, block, &parents, &children).await?;
-    let (rows, undo_rows) = sources::advance(transaction, chain_id, block, &observed).await?;
+    let (rows, undo_rows) = sources::advance(transaction, chain_id, block, observed).await?;
     refreshed.watermark_rows += rows;
     refreshed.undo_rows += undo_rows;
     Ok(refreshed)

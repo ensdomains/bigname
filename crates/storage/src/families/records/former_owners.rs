@@ -103,7 +103,7 @@ pub fn lapsed_owner(row: &NameCurrentRow) -> Option<String> {
 }
 
 /// The served registration expiry, including finite values beyond the calendar range.
-fn served_expiry(row: &NameCurrentRow) -> Option<UnixSeconds> {
+pub(super) fn served_expiry(row: &NameCurrentRow) -> Option<UnixSeconds> {
     row.declared_summary
         .pointer("/registration/expiry")
         .and_then(UnixSeconds::from_json)
