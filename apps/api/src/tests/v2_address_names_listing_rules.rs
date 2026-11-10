@@ -370,7 +370,7 @@ async fn a_name_past_the_btree_row_limit_pages_by_its_cut_key() -> Result<()> {
     .payload;
     assert_eq!(
         listing_names(&listing_rows(std::slice::from_ref(&matched))),
-        [long.clone()]
+        std::slice::from_ref(&long)
     );
     assert_eq!(matched["page"]["total_count"], json!(1));
     let past: String = format!("{}b", "a".repeat(119));

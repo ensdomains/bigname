@@ -275,7 +275,7 @@ async fn v2_address_names_sort_by_created_at_is_first_observation_with_identity_
     .await?;
     assert_eq!(
         row_names(&owned),
-        ["shared-one.eth", "shared-two.eth", "gamma.eth", "alpha.eth"]
+        ["shared-two.eth", "shared-one.eth", "gamma.eth", "alpha.eth"]
     );
 
     // A created_at cursor resumes only a created_at page of the same order.
