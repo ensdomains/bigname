@@ -28,6 +28,9 @@ mod v2_registry_operators;
 #[path = "tests/v2_permission_lineage.rs"]
 mod v2_permission_lineage;
 
+#[path = "tests/v2_reservation_lineage.rs"]
+mod v2_reservation_lineage;
+
 #[path = "tests/v1_node_identity.rs"]
 mod v1_node_identity;
 #[path = "tests/v1_pre_surface_resolver.rs"]
