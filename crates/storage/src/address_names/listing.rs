@@ -141,27 +141,30 @@ pub(super) async fn held_publications(
         .collect())
 }
 
-/// The API serves these reads from handlers, which need their futures `Send`. Checked here so a
-/// change that breaks it fails in this crate, at the value held across an await.
+/// The API's handlers need these futures `Send`. A read that breaks it fails to compile here, at
+/// the value held across an await.
 #[cfg(test)]
-#[allow(dead_code)]
-fn the_listing_reads_are_send(
-    pool: &sqlx::PgPool,
-    conn: &mut PgConnection,
-    request: &AddressNamesPageRequest<'_>,
-    filter: &crate::families::records::FormerOwnerFilter<'_>,
-    published: &BTreeMap<String, i64>,
-) {
+#[test]
+fn the_listing_reads_are_send() {
     fn send<F: std::future::Future + Send>(_: F) {}
-    send(load_stored_current_anchors(pool, "", None, None, published));
-    send(load_address_names_listing_page(pool, request, false));
-    send(listing_page(conn, request, false));
-    send(load_address_former_owner_page(
-        pool,
-        filter,
-        crate::NameCurrentListOrder::Asc,
-        None,
-        1,
-    ));
-    send(statement::explain(conn, "send", || unreachable!()));
+    fn reads(
+        pool: &sqlx::PgPool,
+        conn: &mut PgConnection,
+        request: &AddressNamesPageRequest<'_>,
+        filter: &crate::families::records::FormerOwnerFilter<'_>,
+        published: &BTreeMap<String, i64>,
+    ) {
+        send(load_stored_current_anchors(pool, "", None, None, published));
+        send(load_address_names_listing_page(pool, request, false));
+        send(listing_page(conn, request, false));
+        send(load_address_former_owner_page(
+            pool,
+            filter,
+            crate::NameCurrentListOrder::Asc,
+            None,
+            1,
+        ));
+        send(statement::explain(conn, "send", || unreachable!()));
+    }
+    let _ = reads;
 }
