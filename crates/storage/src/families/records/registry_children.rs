@@ -17,8 +17,6 @@
 //! derived.rs, `registry_children`). A child that gains a surface is read by the ordinary path
 //! under the same id and never here. The row has no surface binding, binding kind or token
 //! lineage; its resource is the node's registry-only resource.
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
@@ -58,7 +56,7 @@ pub(crate) async fn load_registry_children(
     address: &str,
     namespace: Option<&str>,
 ) -> Result<Vec<(FamilyPublication, Vec<RegistryChildRow>)>> {
-    let chains: Vec<String> = sqlx::query_scalar(
+    let mut chains: Vec<String> = sqlx::query_scalar(
         "/* storage:families.records.address_registry_child_chains */
          SELECT DISTINCT indexed.chain_id
          FROM bigname_phase.project_address_name_index indexed
@@ -70,58 +68,71 @@ pub(crate) async fn load_registry_children(
     .fetch_all(&mut *conn)
     .await
     .with_context(|| format!("failed to load the registry child chains of {address}"))?;
-    let mut by_chain: BTreeMap<String, (i64, Vec<String>)> = BTreeMap::new();
-    for chain_id in chains {
-        let published = servable_publication(conn, &chain_id).await?;
-        let candidates: Vec<String> = sqlx::query_scalar(&format!(
-            "/* storage:families.records.address_registry_child_index */
-             SELECT DISTINCT indexed.logical_name_id
-             FROM bigname_phase.project_address_name_index indexed
-             WHERE indexed.address = lower($1) AND indexed.relation = 'effective_controller'
-               AND indexed.chain_id = $3
-               AND ($2::text IS NULL OR split_part(indexed.logical_name_id, ':', 1) = $2)
-               AND NOT {}",
-            published_surface_exists("indexed.logical_name_id", "$4")
-        ))
-        .bind(address)
-        .bind(namespace)
-        .bind(&chain_id)
-        .bind(published.block_number)
-        .fetch_all(&mut *conn)
-        .await
-        .with_context(|| format!("failed to load the registry child candidates of {address}"))?;
-        if !candidates.is_empty() {
-            by_chain.insert(chain_id, (published.block_number, candidates));
-        }
-    }
+    // In chain order, as the page has always composed them.
+    chains.sort();
     let mut out = Vec::new();
-    for (chain_id, (published_block, ids)) in by_chain {
-        let mut children: Vec<RegistryChildRow> = Vec::new();
-        for chunk in ids.chunks(super::seams::compose_chunk()) {
-            children.extend(
-                load_owned_registry_children(conn, &chain_id, address, chunk, published_block)
-                    .await?,
-            );
-        }
-        // The NameWrapper holds such a child for a token holder, its owner and manager, whom the
-        // address index does not record; the child is listed for neither
-        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
-        // A released lease leaves its registry record behind: the registrar writes it only
-        // on a registration other than `registerOnly`
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
-        // or a `reclaim` by a live token's holder or an address it approved
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f),
-        // and a released name has no owner or manager, so that child is listed for neither.
-        children.retain(|child| !child.wrapper_held && !child.released_lease);
-        if children.is_empty() {
-            continue;
-        }
-        out.push((servable_publication(conn, &chain_id).await?, children));
+    for chain_id in chains {
+        out.extend(load_chain_registry_children(conn, &chain_id, address, namespace).await?);
     }
     Ok(out)
+}
+
+/// The surface-less registry children `address` lists on `chain_id`, with the chain's
+/// publication, or none. Refuses a chain whose families are not published.
+pub(crate) async fn load_chain_registry_children(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    address: &str,
+    namespace: Option<&str>,
+) -> Result<Option<(FamilyPublication, Vec<RegistryChildRow>)>> {
+    let published = servable_publication(conn, chain_id).await?;
+    let candidates: Vec<String> = sqlx::query_scalar(&format!(
+        "/* storage:families.records.address_registry_child_index */
+         SELECT DISTINCT indexed.logical_name_id
+         FROM bigname_phase.project_address_name_index indexed
+         WHERE indexed.address = lower($1) AND indexed.relation = 'effective_controller'
+           AND indexed.chain_id = $3
+           AND ($2::text IS NULL OR split_part(indexed.logical_name_id, ':', 1) = $2)
+           AND NOT {}",
+        published_surface_exists("indexed.logical_name_id", "$4")
+    ))
+    .bind(address)
+    .bind(namespace)
+    .bind(chain_id)
+    .bind(published.block_number)
+    .fetch_all(&mut *conn)
+    .await
+    .with_context(|| format!("failed to load the registry child candidates of {address}"))?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut children: Vec<RegistryChildRow> = Vec::new();
+    for chunk in candidates.chunks(super::seams::compose_chunk()) {
+        children.extend(
+            load_owned_registry_children(conn, chain_id, address, chunk, published.block_number)
+                .await?,
+        );
+    }
+    // The NameWrapper holds such a child for a token holder, its owner and manager, whom the
+    // address index does not record; the child is listed for neither
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
+    // A released lease leaves its registry record behind: the registrar writes it only
+    // on a registration other than `registerOnly`
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+    // or a `reclaim` by a live token's holder or an address it approved
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f),
+    // and a released name has no owner or manager, so that child is listed for neither.
+    children.retain(|child| !child.wrapper_held && !child.released_lease);
+    if children.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((
+        servable_publication(conn, chain_id).await?,
+        children,
+    )))
 }
 
 /// A registry child's relation rows for `address`, in the shape of `address_names.rs`.

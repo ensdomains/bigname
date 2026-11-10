@@ -309,7 +309,7 @@ pub(super) fn publication_stamps(publication: &FamilyPublication) -> (Value, Val
 /// The resource a name's address-name rows stand on: its selected binding's, or, for an
 /// ownerless registry name with an implied lease, which has no binding, the lease's
 /// (`registration.resource_id`).
-fn relation_resource(row: &NameCurrentRow) -> Option<String> {
+pub(super) fn relation_resource(row: &NameCurrentRow) -> Option<String> {
     if let Some(resource) = row.resource_id {
         return Some(resource.to_string());
     }

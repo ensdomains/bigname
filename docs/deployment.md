@@ -6305,6 +6305,46 @@ catalogue window.
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
 
+## The address listing family
+
+The build that stores each address's listed names (TYR-127, part 1) adds the address listing
+family, `project_address_listing` (see [owned key families](projections.md#owned-key-families)).
+Project derives, at every publication, one row per (address, name) that
+`GET /v1/addresses/{address}/names` lists for the token holder, effective controller or registry
+role holder relation, or as a former owner, from the same composition and relation fold the route
+composes with. Each row carries the relations as flags, the four sort keys, the filter columns and
+the registration lead of its (address, resource) group, and is journalled with the other
+families. The composition pass derives every row in the names stream.
+
+- It needs `20261104140000_project_address_listing.sql`. The schema-migration creates the table
+  and its indexes empty, after taking the family marker table in `EXCLUSIVE` mode. It resets
+  nothing and builds no index on a populated table. Apply it before starting the release: the
+  family writer writes the table, so without it the first family block fails.
+- The API role needs `SELECT` on the new table before a later build reads it. This build's
+  readers do not read it.
+- A block derives again the rows of every name its summary and lookup refreshes composed, the
+  surface-less ENSv1 registry children the child listing's work list names, and the registry
+  children of each parent that work list derives whole.
+- The stored name is the chain-data spelling, healed as the child listing's is: a preimage
+  observation derives again, by the `unhealed_labelhashes` GIN index, only the rows that still
+  spell one of its labels as `[labelhash]`, from this chain or, through the same watermark
+  (`project_child_preimage_watermark`), from another chain. An undo keeps a healed name, as a
+  rebuild at the restored block spells it. An imported label reaches the stored name only when
+  its row is derived again for another reason (TYR-373/374).
+- The readers do not change in this build. The address-names route still composes every
+  candidate name at read.
+- The relation fold's storage files move from the reader sources to the composition sources, and
+  the family step is in `crates/project/src`, so the build rotates the
+  [projection content hash](glossary.md#projection-content-hash) for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next release that redoes Project and shares that release's
+  Project redo.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo.
+
 ## A hydrated name or text value with a NUL byte is a failed read
 
 The build that treats a resolver's NUL-bearing answer as a failed read changes
