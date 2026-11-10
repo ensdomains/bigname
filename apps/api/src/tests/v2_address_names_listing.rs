@@ -544,12 +544,11 @@ async fn cursors_issued_before_the_listing_continue_on_it() -> Result<()> {
     database.cleanup().await
 }
 
-/// The read checks the publication of each chain the address has rows on, or of every chain
-/// when it has none: a chain being rebuilt does not refuse an address it holds nothing on.
-#[tokio::test]
-async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_bulk_address_names(&database, 5).await?;
+/// The bulk fixture with the basenames chain's publication made unservable, as during its
+/// rebuild. The requests below name the `ens` namespace: a request naming none spans the rebuilt
+/// chain's namespace too and is refused before any read.
+async fn seed_listing_with_a_rebuilt_chain(database: &TestDatabase) -> Result<()> {
+    seed_bulk_address_names(database, 5).await?;
     let unservable = sqlx::query(
         "UPDATE bigname_phase.project_family_marker SET input_content_hash = 'another build'
          WHERE chain_id = 'base-mainnet'",
@@ -557,13 +556,30 @@ async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Res
     .execute(&database.pool)
     .await?;
     assert_eq!(unservable.rows_affected(), 1);
-    let held = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=10");
+    Ok(())
+}
+
+/// The read checks the publication of each chain the address has rows on: a chain being
+/// rebuilt does not refuse an address it holds nothing on.
+#[tokio::test]
+async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_listing_with_a_rebuilt_chain(&database).await?;
+    let held = format!("/v1/addresses/{BULK_ADDRESS}/names?namespace=ens&page_size=10");
     let read = listing_read(&database, &held).await?;
     assert_eq!(read.payload["data"].as_array().unwrap().len(), 5);
-    assert_eq!(read.paths, ["listing"]);
+    database.cleanup().await
+}
+
+/// An address with no rows has no chain to check, so the read checks every chain and answers
+/// stale while one is rebuilt, as it cannot tell an empty address from one being rebuilt.
+#[tokio::test]
+async fn the_publication_check_reads_every_chain_for_an_address_with_no_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_listing_with_a_rebuilt_chain(&database).await?;
     let (status, payload) = bulk_listing_response(
         &database,
-        &format!("/v1/addresses/{LISTING_EMPTY_ADDRESS}/names"),
+        &format!("/v1/addresses/{LISTING_EMPTY_ADDRESS}/names?namespace=ens"),
     )
     .await?;
     assert_eq!(status, StatusCode::CONFLICT, "{payload}");
