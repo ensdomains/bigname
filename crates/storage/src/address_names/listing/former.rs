@@ -51,13 +51,13 @@ pub async fn load_address_former_owner_page(
     }
     let mut snapshot = db.into().snapshot().await?;
     seams::note_address_name_path("listing");
-    let chains: Vec<String> = super::held_publications(&mut snapshot, &address)
+    let chains: Vec<String> = super::held_publications(&mut snapshot, &address, filter.namespace)
         .await?
         .into_keys()
         .collect();
     let statement = || former_statement(&address, &chains, filter, order, after.as_ref(), size);
     #[cfg(any(test, feature = "test-support"))]
-    super::statement::explain(&mut *snapshot, "former_page", statement).await?;
+    super::statement::explain(&mut snapshot, "former_page", statement).await?;
     let mut held: Vec<Former> = statement()?
         .build_query_as()
         .fetch_all(&mut *snapshot)

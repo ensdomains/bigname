@@ -6321,7 +6321,9 @@ families. The composition pass derives every row in the names stream.
   and its indexes empty, after taking the family marker table in `EXCLUSIVE` mode. It resets
   nothing and builds no index on a populated table. Apply it before starting the release: the
   family writer writes the table, so without it the first family block fails.
-- The API role needs `SELECT` on the new table, which the address-names readers read.
+- The API role needs `SELECT` on the new table, which the address-names readers read. An API
+  on this build refuses to boot until its role has it: startup preflight
+  (`crates/storage/src/api_preflight.rs`) lists the table.
 - A block derives again the rows of every name its summary and lookup refreshes composed, the
   surface-less ENSv1 registry children the child listing's work list names, and the registry
   children of each parent that work list derives whole.

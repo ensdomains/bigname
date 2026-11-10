@@ -426,12 +426,10 @@ async fn v2_address_ownership_filters_skip_role_candidate_and_grant_reads() -> R
     ] {
         for query in ["", "?relation=any", "?relation=owner,role_holder"] {
             let reads = Arc::new(Mutex::new(Vec::new()));
+            let uri = format!("/v1/addresses/{ROLE_HOLDER}/{route}{query}");
             let read = with_role_read_counter(
                 reads.clone(),
-                v2_address_names_payload_for_database(
-                    &database,
-                    &format!("/v1/addresses/{ROLE_HOLDER}/{route}{query}"),
-                ),
+                v2_address_names_payload_for_database(&database, &uri),
             );
             let payload = if composed {
                 bigname_storage::families::records::seams::with_composed_address_names(read).await?

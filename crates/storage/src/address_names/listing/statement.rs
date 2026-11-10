@@ -426,14 +426,21 @@ pub(super) async fn explain(
     if !seams::listing_plans_wanted() {
         return Ok(());
     }
+    // `Executor::execute`, not `RawSql::execute`: the latter's future is not `Send` for every
+    // connection lifetime, which the API's handlers need.
+    use sqlx::{Arguments, Execute, Executor};
+
     let mut plans = Vec::with_capacity(2);
     for mode in ["force_custom_plan", "force_generic_plan"] {
         let mut query = build()?;
         sqlx::query(&format!("SET LOCAL plan_cache_mode = {mode}"))
             .execute(&mut *conn)
             .await?;
-        sqlx::raw_sql(&format!("PREPARE listing_plan AS {}", query.sql()))
-            .execute(&mut *conn)
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&format!(
+                "PREPARE listing_plan AS {}",
+                query.sql()
+            )))
             .await
             .with_context(|| format!("failed to prepare the listing {statement} statement"))?;
         let arguments = query
@@ -459,13 +466,13 @@ pub(super) async fn explain(
         .fetch_one(&mut *conn)
         .await
         .with_context(|| format!("failed to explain the listing {statement} statement"))?;
-        sqlx::raw_sql("DEALLOCATE listing_plan")
-            .execute(&mut *conn)
+        (&mut *conn)
+            .execute(sqlx::raw_sql("DEALLOCATE listing_plan"))
             .await?;
         plans.push(plan);
     }
-    sqlx::raw_sql("SET LOCAL plan_cache_mode = DEFAULT")
-        .execute(&mut *conn)
+    (&mut *conn)
+        .execute(sqlx::raw_sql("SET LOCAL plan_cache_mode = DEFAULT"))
         .await?;
     let generic = plans.pop().expect("two plans");
     let custom = plans.pop().expect("two plans");

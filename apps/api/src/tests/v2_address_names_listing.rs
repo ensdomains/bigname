@@ -494,6 +494,97 @@ async fn a_hidden_name_leaves_the_page_and_stays_in_the_count() -> Result<()> {
     database.cleanup().await
 }
 
+/// The served names of a page, in order.
+fn listed_names(payload: &Value) -> Vec<String> {
+    payload["data"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|row| row["name"].as_str().expect("a name").to_owned())
+        .collect()
+}
+
+/// The page reads no binding: a name whose binding a reorg orphaned, its surface and resource
+/// still readable, stays on the page and in the total until Project's undo rewrites its row. The
+/// full read hides it.
+#[tokio::test]
+async fn a_name_with_an_orphaned_binding_stays_on_the_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 5).await?;
+    let binding = sqlx::query(
+        "UPDATE bigname_phase.surface_bindings SET canonicality_state = 'orphaned'
+         WHERE logical_name_id = $1",
+    )
+    .bind(bulk_logical_name_id(1)?)
+    .execute(&database.pool)
+    .await?;
+    assert!(binding.rows_affected() >= 1);
+    let orphaned = |name: &String| name.starts_with(&bulk_label(1));
+    for count in ["", "&include=total_count"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=10{count}");
+        let read = listing_read(&database, &uri).await?;
+        let listed = listed_names(&read.payload);
+        assert_eq!(listed.len(), 5, "{uri}: {listed:?}");
+        assert!(listed.iter().any(orphaned), "{uri}: {listed:?}");
+        assert_eq!(read.payload["page"]["total_count"], json!(5), "{uri}");
+        assert_eq!(read.paths, ["listing"], "{uri}");
+        let full = listing_oracle(v2_address_names_payload_for_database(&database, &uri)).await?;
+        assert!(!listed_names(&full).iter().any(orphaned), "{uri}: {full}");
+    }
+    database.cleanup().await
+}
+
+/// Under `dedupe=registration` with no filter a resource's entry row is its stored lead. A lead
+/// hidden by the read filter takes the resource off the page, though an alias of the same
+/// resource is readable, and the total still counts the resource.
+#[tokio::test]
+async fn a_hidden_registration_lead_takes_its_resource_off_the_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_names(&database, 6, |_| BULK_ADDRESS, &[(1, 2)]).await?;
+    let aliases = [bulk_logical_name_id(1)?, bulk_logical_name_id(2)?];
+    let leads: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT logical_name_id, registration_lead FROM bigname_phase.project_address_listing
+         WHERE address = $1 AND logical_name_id = ANY($2) ORDER BY logical_name_id",
+    )
+    .bind(BULK_ADDRESS)
+    .bind(aliases.to_vec())
+    .fetch_all(&database.pool)
+    .await?;
+    let lead: Vec<&String> = leads
+        .iter()
+        .filter(|(_, lead)| *lead)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!((leads.len(), lead.len()), (2, 1), "{leads:?}");
+    let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?dedupe=registration&page_size=10");
+    let before = listing_read(&database, &uri).await?;
+    assert_eq!(listed_names(&before.payload).len(), 5, "{}", before.payload);
+    assert_eq!(before.payload["page"]["total_count"], json!(5));
+    let hidden = sqlx::query(
+        "UPDATE bigname_phase.name_surfaces SET canonicality_state = 'orphaned'
+         WHERE logical_name_id = $1",
+    )
+    .bind(lead[0])
+    .execute(&database.pool)
+    .await?;
+    assert!(hidden.rows_affected() >= 1);
+    let alias = |name: &String| {
+        [1, 2]
+            .iter()
+            .any(|index| name.starts_with(&bulk_label(*index)))
+    };
+    for count in ["", "&include=total_count"] {
+        let uri = format!("{uri}{count}");
+        let read = listing_read(&database, &uri).await?;
+        let listed = listed_names(&read.payload);
+        assert_eq!(listed.len(), 4, "{uri}: {listed:?}");
+        assert!(!listed.iter().any(alias), "{uri}: {listed:?}");
+        assert_eq!(read.payload["page"]["total_count"], json!(5), "{uri}");
+        assert_eq!(read.paths, ["listing"], "{uri}");
+    }
+    database.cleanup().await
+}
+
 /// The cap counts listed entries, not candidates: a holder with the cap's number of names and
 /// more candidates has an exact total without asking.
 #[tokio::test]
@@ -522,6 +613,37 @@ async fn a_holder_over_the_cap_counts_only_when_asked() -> Result<()> {
     for (count, total) in [("", Value::Null), ("&include=total_count", json!(11))] {
         let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=3{count}");
         let read = with_exact_total_cap(10, listing_read(&database, &uri)).await?;
+        assert_eq!(read.payload["page"]["total_count"], total, "{uri}");
+    }
+    database.cleanup().await
+}
+
+/// Under `dedupe=registration` with a filter every filtered row of a resource is counted, so the
+/// bounded count can read more rows than the cap with no more entries than it. It then runs the
+/// full count and returns it when that is at most the cap, and null above.
+#[tokio::test]
+async fn a_filtered_registration_count_over_the_cap_in_rows_counts_entries() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_names(&database, 12, |_| BULK_ADDRESS, &[(4, 5), (6, 9)]).await?;
+    let (rows, entries): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(DISTINCT resource_id) FROM bigname_phase.project_address_listing
+         WHERE address = $1 AND listed AND token_holder",
+    )
+    .bind(BULK_ADDRESS)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!((rows, entries), (12, 10));
+    let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?relation=owner&dedupe=registration");
+    let (read, plans) = with_exact_total_cap(10, listing_plans(&database, &uri)).await?;
+    assert_eq!(read.payload["page"]["total_count"], json!(10), "{uri}");
+    let statements: Vec<&str> = plans.iter().map(|plan| plan.statement).collect();
+    assert!(
+        statements.contains(&"bounded_total") && statements.contains(&"total"),
+        "{uri}: {statements:?}"
+    );
+    for (count, total) in [("", Value::Null), ("&include=total_count", json!(10))] {
+        let uri = format!("{uri}{count}");
+        let read = with_exact_total_cap(9, listing_read(&database, &uri)).await?;
         assert_eq!(read.payload["page"]["total_count"], total, "{uri}");
     }
     database.cleanup().await
@@ -575,35 +697,21 @@ async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Res
     let held = format!("/v1/addresses/{BULK_ADDRESS}/names?namespace=ens&page_size=10");
     let read = listing_read(&database, &held).await?;
     assert_eq!(read.payload["data"].as_array().unwrap().len(), 5);
+    assert_eq!(read.paths, ["listing"], "{held}");
     database.cleanup().await
 }
 
-/// An address with no rows has no chain to check, so the read checks every chain and answers
-/// stale while one is rebuilt, as it cannot tell an empty address from one being rebuilt.
-#[tokio::test]
-async fn the_publication_check_reads_every_chain_for_an_address_with_no_rows() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_listing_with_a_rebuilt_chain(&database).await?;
-    let (status, payload) = bulk_listing_response(
-        &database,
-        &format!("/v1/addresses/{LISTING_EMPTY_ADDRESS}/names?namespace=ens"),
-    )
-    .await?;
-    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
-    assert_eq!(payload["error"]["code"], json!("stale"), "{payload}");
-    database.cleanup().await
-}
-
-/// A stored row on a chain no family marker covers is not listed. The total is the stored
-/// count, which counts it: Project writes no such row (`assert_address_listing`).
-#[tokio::test]
-async fn a_row_on_a_chain_with_no_publication_is_not_served() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_bulk_address_names(&database, 5).await?;
+/// A copy of bulk name `index`'s listing row on `chain_id`, under a name of its own: Project
+/// writes no such row, so each test that seeds one says what it pins.
+async fn copy_bulk_listing_row(
+    database: &TestDatabase,
+    chain_id: &str,
+    index: usize,
+) -> Result<()> {
     let copied = sqlx::query(
         "INSERT INTO bigname_phase.project_address_listing
-         SELECT 'unmarked-chain', address, 'ens:listing-unmarked', namespace,
-                'aaa-unmarked.eth', 'aaa-unmarked.eth', 'aaa-unmarked.eth', 'eth', namehash,
+         SELECT $3, address, 'ens:listing-copied', namespace,
+                'aaa-copied.eth', 'aaa-copied.eth', 'aaa-copied.eth', 'eth', namehash,
                 resource_id, token_holder, effective_controller, role_holder, listed,
                 former_owner, registry_child, registry_parent_logical_name_id,
                 registration_lead, public_authority, migrated, expires_key, registered_key,
@@ -613,10 +721,38 @@ async fn a_row_on_a_chain_with_no_publication_is_not_served() -> Result<()> {
          WHERE address = $1 AND logical_name_id = $2",
     )
     .bind(BULK_ADDRESS)
-    .bind(bulk_logical_name_id(4)?)
+    .bind(bulk_logical_name_id(index)?)
+    .bind(chain_id)
     .execute(&database.pool)
     .await?;
     assert_eq!(copied.rows_affected(), 1);
+    Ok(())
+}
+
+/// A row in the request's namespace on a chain being rebuilt refuses the read, with the
+/// namespace named and without. The row is an `ens` row on the basenames chain, so the route's
+/// `ens` admission passes and the refusal is the listing's own check.
+#[tokio::test]
+async fn a_row_on_a_rebuilt_chain_refuses_the_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_listing_with_a_rebuilt_chain(&database).await?;
+    copy_bulk_listing_row(&database, "base-mainnet", 4).await?;
+    for query in ["?namespace=ens", ""] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names{query}");
+        let (status, payload) = bulk_listing_response(&database, &uri).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {payload}");
+        assert_eq!(payload["error"]["code"], json!("stale"), "{uri}: {payload}");
+    }
+    database.cleanup().await
+}
+
+/// A stored row on a chain no family marker covers is not listed. The total is the stored
+/// count, which counts it: Project writes no such row (`assert_address_listing`).
+#[tokio::test]
+async fn a_row_on_a_chain_with_no_publication_is_not_served() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 5).await?;
+    copy_bulk_listing_row(&database, "unmarked-chain", 4).await?;
     for query in [
         "page_size=10&include=total_count",
         "page_size=10",
