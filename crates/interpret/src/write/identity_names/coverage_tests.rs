@@ -464,15 +464,26 @@ mod long_resolver_dns_name {
     }
 
     async fn interpreted_and_stored_whole(count: usize) -> TestResult {
-        let database = database(&format!("interpret_long_resolver_dns_name_{count}")).await?;
+        stored_whole(count, None).await
+    }
+
+    /// Interprets and writes one log of `count` labels into its own database and prints the
+    /// time. `pass` names the run when one test makes several.
+    async fn stored_whole(count: usize, pass: Option<&str>) -> TestResult {
+        let name = pass.map_or_else(
+            || format!("interpret_long_resolver_dns_name_{count}"),
+            |pass| format!("interpret_long_resolver_dns_name_{count}_{pass}"),
+        );
+        let database = database(&name).await?;
         let input = named_resource(&labels(count));
         let started = Instant::now();
         let output = interpret_checked(input)?;
         let interpreted = started.elapsed();
         write_output(&database, &output).await?;
         let elapsed = started.elapsed();
+        let pass = pass.map_or_else(String::new, |pass| format!(" pass={pass}"));
         println!(
-            "resolver_dns_name wall time: labels={count} elapsed_ms={} interpret_ms={} write_ms={}",
+            "resolver_dns_name wall time: labels={count} elapsed_ms={} interpret_ms={} write_ms={}{pass}",
             elapsed.as_millis(),
             interpreted.as_millis(),
             (elapsed - interpreted).as_millis(),
@@ -515,5 +526,15 @@ mod long_resolver_dns_name {
     #[tokio::test]
     async fn a_resolver_dns_name_of_40000_distinct_labels_is_stored_whole() -> TestResult {
         interpreted_and_stored_whole(40_000).await
+    }
+
+    /// Three runs in one process: 4,000 labels, then 120,000, then 4,000 again. The first run
+    /// takes the process's one-time costs, so the last shows the 4,000-label time without them.
+    #[tokio::test]
+    async fn a_resolver_dns_name_of_120000_distinct_labels_is_stored_whole_between_two_short_runs()
+    -> TestResult {
+        stored_whole(4_000, Some("warmup")).await?;
+        stored_whole(120_000, Some("main")).await?;
+        stored_whole(4_000, Some("after")).await
     }
 }
