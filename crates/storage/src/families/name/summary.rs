@@ -63,6 +63,9 @@ pub struct NameSummaryPublication {
     pub rows: BTreeMap<String, Value>,
     pub null_resolver_names: Vec<String>,
     pub current_history_relations: Vec<crate::families::records::CurrentHistoryRelation>,
+    /// The address listing rows of the composed names (`records::address_listing`), with the
+    /// relations.
+    pub address_listing: crate::families::records::AddressListingRows,
 }
 
 pub async fn compose_name_summaries(
@@ -123,7 +126,7 @@ async fn compose_summaries(
             .filter(|row| !list_keys::unsupported(&row.coverage)),
     )
     .await?;
-    let current_history_relations = if include_relations {
+    let (current_history_relations, address_listing) = if include_relations {
         crate::families::records::publication_relations(
             conn,
             publication,
@@ -134,7 +137,7 @@ async fn compose_summaries(
         )
         .await?
     } else {
-        Vec::new()
+        Default::default()
     };
     let null_resolver_names = if matches!(
         publication.chain_id.as_str(),
@@ -292,7 +295,47 @@ async fn compose_summaries(
         rows: rows.into_iter().collect(),
         null_resolver_names,
         current_history_relations,
+        address_listing,
     })
+}
+
+/// The address listing rows (`records::address_listing`) of `logical_name_ids` at
+/// `publication`, from the composition the name summaries are composed with
+/// ([`compose_name_summary_publication`]), for names the block's summary refresh did not compose.
+pub async fn compose_address_listing(
+    conn: &mut PgConnection,
+    publication: &FamilyPublication,
+    logical_name_ids: &[String],
+) -> Result<crate::families::records::AddressListingRows> {
+    if logical_name_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let surfaces = surfaces_at(&mut *conn, logical_name_ids, publication).await?;
+    let mut composed = load_chain(
+        &mut *conn,
+        publication,
+        &surfaces,
+        CoverageShape::Plain,
+        false,
+    )
+    .await?;
+    super::wrapper_fields::attach_published_wrapper_expiries(
+        conn,
+        composed
+            .values_mut()
+            .filter_map(|name| name.row.as_mut())
+            .filter(|row| !list_keys::unsupported(&row.coverage)),
+    )
+    .await?;
+    let rows: Vec<&crate::NameCurrentRow> = composed
+        .values()
+        .filter_map(|name| name.row.as_ref())
+        .collect();
+    Ok(
+        crate::families::records::publication_relations(conn, publication, &rows)
+            .await?
+            .1,
+    )
 }
 
 /// `zero_owner` of the name `named.logical_name_id` at the block `$2` of chain `$1` (the binds of
