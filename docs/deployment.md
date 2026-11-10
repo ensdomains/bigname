@@ -6344,3 +6344,44 @@ families. The composition pass derives every row in the names stream.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
+
+## Token lineage on a registered reservation
+
+The build that carries the [token lineage](glossary.md#token-lineage) in an ENSv2 registration
+that confirms an earlier reservation changes
+`crates/adapters/src/schema_v2/protocol/v2_registry.rs` and
+`crates/adapters/src/schema_v2/state_v2.rs`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain, and the
+projection content hash follows through it.
+
+What changes:
+
+- A `RegistrationGranted` from `LabelRegistered` for a label the registry had reserved carries
+  the reservation's `token_lineage_id` in its `after_state`, beside the `upstream_resource` and
+  `resource_id` it already carried.
+- Interpret restores a token's lineage from that row. Before, the restore of such a row cleared
+  the lineage the reservation row had restored. The next transfer or token regeneration for
+  that token after a restore then named its resource with no lineage. The writer refused the
+  row as a data-integrity error and Interpret stopped on that chain. A
+  restore happens at every batch boundary under the
+  [lookahead loader](glossary.md#lookahead-loader), at a process start and at a redo's first
+  batch.
+- A restore no longer clears a reservation's lineage when an older registration row names the
+  same resource without the key, or with a null one. A row that names a different resource
+  still attaches it with no lineage.
+- A registry whose registration also emits `TokenResource`, as the deployed PermissionedRegistry
+  does, was not affected
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L466-L472 @ ens_v2@a971bd64).
+- `/v1/diagnostics/events` shows the new key in those events' `after_state`. What the API serves
+  for names and registrations is otherwise unchanged.
+
+Rows written by an older build lack the key. They are rewritten by re-derivation, not in place.
+An existing deployment finishes the full-range Interpret redo and then the stamped Project redo
+it installs before the matching API serves, as the [handoff](#phase-runner-configuration)
+describes, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+matching runner and API binaries. The change rides the next re-derivation release and shares
+that release's one Interpret and Project redo pair with its other hash-rotating changes. Do not
+mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.
