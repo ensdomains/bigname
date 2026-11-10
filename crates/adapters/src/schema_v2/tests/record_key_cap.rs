@@ -445,6 +445,11 @@ fn a_long_dns_name_from_a_named_resource_is_observed_and_stored_whole() -> anyho
     }
     name.push(0);
     assert_eq!(name.len(), 3_301);
+    // The name must stay over 128 segments, the name segment cap, and over 127 labels,
+    // the most a 255-byte DNS name holds.
+    assert!(labels.len() > 128);
+    // 2,704 bytes is the most PostgreSQL holds in one btree index row.
+    assert!(name.len() > 2_704);
     let output = interpret_logs(
         manifest(
             4157,
