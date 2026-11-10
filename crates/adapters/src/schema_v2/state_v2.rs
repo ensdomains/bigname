@@ -95,16 +95,16 @@ impl State {
         let token_key = v2_key(&emitter, token_id);
         let mut replaced = Vec::new();
         let previous = self.v2_tokens.remove(&token_key);
-        let retained_reservation_resource = previous.as_ref().filter(|previous| {
+        // Keeps the label's reservation resource, or a link made before any label, as a restore does.
+        let retained = previous.as_ref().filter(|previous| {
+            let label = previous.raw_label.as_deref();
             previous.registration.is_none()
                 && registration.is_some()
-                && previous.raw_label.as_deref() == Some(raw_label)
+                && label.is_none_or(|label| label == raw_label)
         });
-        let upstream_resource =
-            retained_reservation_resource.and_then(|previous| previous.upstream_resource.clone());
-        let resource_id = retained_reservation_resource.and_then(|previous| previous.resource_id);
-        let token_lineage_id =
-            retained_reservation_resource.and_then(|previous| previous.token_lineage_id);
+        let upstream_resource = retained.and_then(|previous| previous.upstream_resource.clone());
+        let resource_id = retained.and_then(|previous| previous.resource_id);
+        let token_lineage_id = retained.and_then(|previous| previous.token_lineage_id);
         if let Some(previous) = previous.as_ref() {
             if previous.resolver.is_some() {
                 self.set_v2_resolver_token_index(&emitter, token_id, false);
