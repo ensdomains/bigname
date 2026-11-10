@@ -121,6 +121,7 @@ pub(super) async fn refresh(
     for chunk in names.chunks(CHUNK) {
         let fresh = compose(transaction, &publication, chunk).await?;
         retire_null_resolver_divergences(transaction, chain_id, &fresh.null_resolver_names).await?;
+        super::address_listing::stage(transaction, chain_id, chunk, &fresh.address_listing).await?;
         current_relations.extend(fresh.current_history_relations);
         let (rows, undo_rows) =
             replace_chunk(transaction, chain_id, &block, chunk, &fresh.rows).await?;

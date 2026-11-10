@@ -113,23 +113,11 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         } else {
             builder.push(" AND NOT ");
         }
-        // Use the same proof and timestamp join as load_name_migration_transition_timestamps.
         builder.push(format!(
             "EXISTS (SELECT 1 FROM {} migration_nc",
             source.names()
         ));
-        builder.push(r#"
-            JOIN bigname_phase.normalized_events proof
-              ON proof.normalized_event_id = CASE
-                WHEN migration_nc.provenance #>> '{authority_selection,proof_event_id}' ~ '^[0-9]+$'
-                THEN (migration_nc.provenance #>> '{authority_selection,proof_event_id}')::bigint END
-            JOIN bigname_phase.chain_lineage migration_lineage
-              ON migration_lineage.chain_id = proof.chain_id
-             AND migration_lineage.block_hash = proof.block_hash
-            WHERE migration_nc.logical_name_id = anc.logical_name_id
-              AND migration_nc.provenance #>> '{authority_selection,authority_arm}' = 'ens_v2'
-              AND migration_nc.provenance #>> '{authority_selection,proof_kind}' = "#);
-        builder.push_bind(crate::MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND);
+        push_migration_proof(builder, "migration_nc", "anc.logical_name_id");
         builder.push(")");
     }
     match dedupe_by {
@@ -398,6 +386,27 @@ pub(super) fn push_address_names_current_cursor_after<'a>(
     }
 }
 
+/// The ENSv1→ENSv2 migration proof of the composed name aliased `nc` whose id is `id`: the join
+/// to its `authority_selection` proof event and that event's lineage block, and the arm and proof
+/// kind, as `load_name_migration_transition_timestamps` reads them. The `is_migrated` filter
+/// wraps it in an `EXISTS` over the composed names, and the address listing family stores it.
+pub(crate) fn push_migration_proof(builder: &mut QueryBuilder<'_, Postgres>, nc: &str, id: &str) {
+    builder.push(format!(
+        r#"
+            JOIN bigname_phase.normalized_events proof
+              ON proof.normalized_event_id = CASE
+                WHEN {nc}.provenance #>> '{{authority_selection,proof_event_id}}' ~ '^[0-9]+$'
+                THEN ({nc}.provenance #>> '{{authority_selection,proof_event_id}}')::bigint END
+            JOIN bigname_phase.chain_lineage migration_lineage
+              ON migration_lineage.chain_id = proof.chain_id
+             AND migration_lineage.block_hash = proof.block_hash
+            WHERE {nc}.logical_name_id = {id}
+              AND {nc}.provenance #>> '{{authority_selection,authority_arm}}' = 'ens_v2'
+              AND {nc}.provenance #>> '{{authority_selection,proof_kind}}' = "#
+    ));
+    builder.push_bind(crate::MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND);
+}
+
 pub(super) fn push_address_names_current_order(
     builder: &mut QueryBuilder<'_, Postgres>,
     sort: AddressNamesCurrentSort,
@@ -519,7 +528,7 @@ pub(crate) fn push_registered_at_timestamp_expr(builder: &mut QueryBuilder<'_, P
 
 /// Push the first-observation timestamp read of a `name_current` row aliased `nc`: the paths the
 /// served `created_at` reads (composition always writes `registration.created_at`).
-fn push_created_at_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>) {
+pub(crate) fn push_created_at_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>) {
     push_json_timestamp_coalesce_expr(
         builder,
         &[&["registration", "created_at"], &["history", "created_at"]],
