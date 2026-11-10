@@ -22,6 +22,7 @@ use crate::{
             DiscoveryDraft, EventDraft, Interpreted, NameDraft, ResourceDraft, ensure_declared,
             permissions::{V2PermissionState, V2Vocabulary, v2_states},
         },
+        seam::TOKEN_LINEAGE_ID_KEY,
         state::{State, V2TokenState},
     },
 };
@@ -380,7 +381,7 @@ pub(super) fn permission(
     let (resource_id, token_lineage_id) = upstream_identity(raw, selected, event.resource);
     let upstream_resource = u256_word_hex(event.resource);
     let linked = state.v2_token_by_upstream_resource(&raw.emitting_address, &upstream_resource)?;
-    let (before, after) = v2_states(
+    let (before, mut after) = v2_states(
         selected,
         raw,
         V2Vocabulary::Registry,
@@ -399,6 +400,8 @@ pub(super) fn permission(
             }),
         },
     );
+    // A restore learns which lineages earlier batches drafted only from this key.
+    after[TOKEN_LINEAGE_ID_KEY] = json!(token_lineage_id.map(|id| id.to_string()));
     let mut output = single_event(
         kind,
         linked
