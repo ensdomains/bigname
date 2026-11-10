@@ -6315,7 +6315,11 @@ Ethereum Mainnet's text and reverse-name [hydration](glossary.md#hydration) read
 What changes for names and reverse records:
 
 - A name owner can set a text record, and an address owner its reverse name, to a string
-  containing a NUL byte. PostgreSQL text and jsonb cannot store a NUL. Before, when the head
+  containing a NUL byte
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105-L132 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f).
+  PostgreSQL text and jsonb cannot store a NUL. Before, when the head
   block's hydration read returned such a value, the block's write was refused and that chain's
   Project stopped, once under the supervised runner and again after every restart.
 - Now that read is a failed read, the same outcome as a malformed return. No value is written,
