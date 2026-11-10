@@ -426,7 +426,7 @@ pub(super) async fn explain(
     if !seams::listing_plans_wanted() {
         return Ok(());
     }
-    use sqlx::Execute;
+    use sqlx::{Arguments, Execute};
 
     let mut plans = Vec::with_capacity(2);
     for mode in ["force_custom_plan", "force_generic_plan"] {
