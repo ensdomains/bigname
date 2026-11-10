@@ -3606,26 +3606,15 @@ introduces it rebuilds Project from full history before serving the option; see
   On the ownership relations `page.total_count` counts the collection before
   its cursor, with the same relations, `q` and `match` predicate, `authority`
   set, `parent`, migration predicate and deduplication as the rows. It is exact
-  when the address has at most 1,000 candidate names, and `null` above that
-  unless `include=total_count` asks for the exact total. The candidate names are
-  counted before the `q`, `match`, `authority`, `parent` and migration filters:
-  the names on which some admission could make the address the `owner` or
-  `manager` (the address index of
-  [address collections](projections.md#address-and-child-collections)), its ENSv1
-  registry children with no name row, and, when the relation set includes
-  `role_holder` (as it does by default), the names of registrations on which it
-  holds an ENSv2 registry role, all in the requested namespace. An address with
-  more than 1,000 candidates therefore reports `null` even when its filtered
-  collection is small. Above the cap a page composes candidates in sort order,
-  in growing batches, and stops once later candidates can no longer change it,
-  so an ordinary page composes about as many names as it returns. A filter that
-  matches few names can still compose every candidate. `sort=created_at`
-  always composes every candidate first, a batch at a time, because a name's
-  first observation can be dated by a registrar event bound to it only later.
-  `include=total_count` does the same to count every group. The page itself
-  is then composed in sort order as above. On an address with tens of
-  thousands of names these reads can reach the request deadline
-  (`408 request_timeout`).
+  when the filtered collection has at most 1,000 entries, and `null` above that
+  unless `include=total_count` asks for the exact total. The rows and the total
+  are read from the address listing Project stores at each publication, one row
+  per name and address the relations hold, so a page reads about as many names as
+  it returns whatever the address holds, and the total counts the stored rows
+  without composing any name. A name whose surface or registration a reorg has
+  since taken off readable lineage leaves the page at once but stays in the total
+  until the next publication. Names with equal sort values list in name id order,
+  and `order=desc` lists exactly the reverse of `order=asc`.
   The flag changes no row, order or cursor and does not bind cursors, so a
   client can request it on the first page only.
   `owner` also lists names with no token for their registry owner, such as

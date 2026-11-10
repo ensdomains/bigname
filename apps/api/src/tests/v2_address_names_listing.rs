@@ -19,11 +19,18 @@ struct ListingRead {
 
 /// The route's answer read by the composed full read, which every listing page must equal.
 async fn listing_oracle<F: std::future::Future>(future: F) -> F::Output {
-    with_exact_total_cap(usize::MAX, future).await
+    bigname_storage::families::records::seams::with_composed_address_names(with_exact_total_cap(
+        usize::MAX,
+        future,
+    ))
+    .await
 }
 
 async fn listing_read(database: &TestDatabase, uri: &str) -> Result<ListingRead> {
-    let ((payload, batches), paths) = with_paths(with_batches(bulk_payload(database, uri))).await;
+    let ((payload, batches), paths) = with_paths(with_batches(
+        v2_address_names_payload_for_database(database, uri),
+    ))
+    .await;
     Ok(ListingRead {
         payload: payload?,
         batches,
@@ -401,7 +408,7 @@ async fn an_address_with_no_names_answers_empty() -> Result<()> {
         ],
     )
     .await?;
-    let former = bulk_payload(
+    let former = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{LISTING_EMPTY_ADDRESS}/names?relation=former_owner"),
     )
@@ -544,12 +551,11 @@ async fn cursors_issued_before_the_listing_continue_on_it() -> Result<()> {
     database.cleanup().await
 }
 
-/// The read checks the publication of each chain the address has rows on, or of every chain
-/// when it has none: a chain being rebuilt does not refuse an address it holds nothing on.
-#[tokio::test]
-async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_bulk_address_names(&database, 5).await?;
+/// The bulk fixture with the basenames chain's publication made unservable, as during its
+/// rebuild. The requests below name the `ens` namespace: a request naming none spans the rebuilt
+/// chain's namespace too and is refused before any read.
+async fn seed_listing_with_a_rebuilt_chain(database: &TestDatabase) -> Result<()> {
+    seed_bulk_address_names(database, 5).await?;
     let unservable = sqlx::query(
         "UPDATE bigname_phase.project_family_marker SET input_content_hash = 'another build'
          WHERE chain_id = 'base-mainnet'",
@@ -557,13 +563,30 @@ async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Res
     .execute(&database.pool)
     .await?;
     assert_eq!(unservable.rows_affected(), 1);
-    let held = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=10");
+    Ok(())
+}
+
+/// The read checks the publication of each chain the address has rows on: a chain being
+/// rebuilt does not refuse an address it holds nothing on.
+#[tokio::test]
+async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_listing_with_a_rebuilt_chain(&database).await?;
+    let held = format!("/v1/addresses/{BULK_ADDRESS}/names?namespace=ens&page_size=10");
     let read = listing_read(&database, &held).await?;
     assert_eq!(read.payload["data"].as_array().unwrap().len(), 5);
-    assert_eq!(read.paths, ["listing"]);
+    database.cleanup().await
+}
+
+/// An address with no rows has no chain to check, so the read checks every chain and answers
+/// stale while one is rebuilt, as it cannot tell an empty address from one being rebuilt.
+#[tokio::test]
+async fn the_publication_check_reads_every_chain_for_an_address_with_no_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_listing_with_a_rebuilt_chain(&database).await?;
     let (status, payload) = bulk_listing_response(
         &database,
-        &format!("/v1/addresses/{LISTING_EMPTY_ADDRESS}/names"),
+        &format!("/v1/addresses/{LISTING_EMPTY_ADDRESS}/names?namespace=ens"),
     )
     .await?;
     assert_eq!(status, StatusCode::CONFLICT, "{payload}");
@@ -571,7 +594,8 @@ async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Res
     database.cleanup().await
 }
 
-/// A stored row on a chain no publication covers is neither listed nor counted.
+/// A stored row on a chain no family marker covers is not listed. The total is the stored
+/// count, which counts it: Project writes no such row (`assert_address_listing`).
 #[tokio::test]
 async fn a_row_on_a_chain_with_no_publication_is_not_served() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -607,7 +631,7 @@ async fn a_row_on_a_chain_with_no_publication_is_not_served() -> Result<()> {
             pages.iter().map(page_body).collect::<Vec<_>>(),
             "{uri}"
         );
-        assert_eq!(pages[0]["page"]["total_count"], json!(5), "{uri}");
+        assert_eq!(pages[0]["page"]["total_count"], json!(6), "{uri}");
     }
     database.cleanup().await
 }

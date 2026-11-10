@@ -255,7 +255,7 @@ pub(crate) async fn get_address_names(
     )
     .await?;
 
-    let storage_page = bigname_storage::load_family_address_names_capped_page(
+    let storage_page = bigname_storage::load_address_names_listing_page(
         snapshot.conn().await?,
         &bigname_storage::AddressNamesPageRequest {
             address: &normalized_address,

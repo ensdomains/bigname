@@ -10,9 +10,10 @@ mod resolves_to_page;
 mod source;
 mod types;
 mod walk;
+pub(crate) use listing::load_stored_current_anchors;
+pub use listing::{load_address_former_owner_page, load_address_names_listing_page};
 #[cfg(any(test, feature = "test-support"))]
-pub use listing::load_composed_address_anchors;
-pub use listing::load_stored_address_anchors;
+pub use listing::{load_composed_address_anchors, load_stored_address_anchors};
 pub use page::{
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations,

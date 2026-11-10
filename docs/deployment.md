@@ -1455,6 +1455,7 @@ GRANT SELECT ON TABLE
     bigname_phase.project_address_name_fold,
     bigname_phase.project_address_controller_candidate,
     bigname_phase.project_address_name_index,
+    bigname_phase.project_address_listing,
     bigname_phase.project_address_history_anchor,
     bigname_phase.project_history_source,
     bigname_phase.project_history_source_edge,
@@ -6320,8 +6321,7 @@ families. The composition pass derives every row in the names stream.
   and its indexes empty, after taking the family marker table in `EXCLUSIVE` mode. It resets
   nothing and builds no index on a populated table. Apply it before starting the release: the
   family writer writes the table, so without it the first family block fails.
-- The API role needs `SELECT` on the new table before a later build reads it. This build's
-  readers do not read it.
+- The API role needs `SELECT` on the new table, which the address-names readers read.
 - A block derives again the rows of every name its summary and lookup refreshes composed, the
   surface-less ENSv1 registry children the child listing's work list names, and the registry
   children of each parent that work list derives whole.
@@ -6331,8 +6331,13 @@ families. The composition pass derives every row in the names stream.
   (`project_child_preimage_watermark`), from another chain. An undo keeps a healed name, as a
   rebuild at the restored block spells it. An imported label reaches the stored name only when
   its row is derived again for another reason (TYR-373/374).
-- The readers do not change in this build. The address-names route still composes every
-  candidate name at read.
+- The address-names route reads the stored listing for the ownership relations and
+  `relation=former_owner`, and the address events read takes its current anchors from it. A page
+  reads about as many names as it returns. The total counts stored rows, so a
+  name a reorg has taken off readable lineage stays counted until the next publication. Names
+  with equal sort values list in name id order, and `order=desc` is exactly the reverse of
+  `order=asc`, which changes the descending order inside tie groups. The reader files are
+  outside every content hash root and add no rotation.
 - The relation fold's storage files move from the reader sources to the composition sources, and
   the family step is in `crates/project/src`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The
