@@ -7,7 +7,8 @@
 //! A page lists the rows of the chains whose publication the read holds. Those are the chains
 //! with a family marker on which the address has a row in the request's namespace, and none when
 //! it has no such row (`held_publications`). A row the read filter would hide (its surface, the surface's
-//! block or its resource no longer canonical) stays out of the page; a registry child stands on
+//! block or its resource no longer canonical) stays out of the page, as does a row whose surface
+//! the compositor no longer reads (shadowed since the publication); a registry child stands on
 //! its publication alone. The total is the stored count and applies no such fence.
 //!
 //! Rows of one name on two chains are one entry, their relations merged. Under

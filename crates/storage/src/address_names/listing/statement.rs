@@ -8,14 +8,30 @@ use super::AddressNamesPageRequest;
 use crate::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
     AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue, NameQueryMatch,
-    UnixSeconds, families::records::seams, families::topology::MISSING_TIMESTAMP,
+    UnixSeconds,
+    families::{name::rendered::composed_surface_sql, records::seams, topology::MISSING_TIMESTAMP},
 };
 
 /// The read filter of a stored row, a probe of its name's surface and resource evaluated per
 /// row the index walk reaches: the surface, the surface's block and the resource on readable
 /// lineage, as `DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER` admits a composed row. A registry
-/// child has no surface and is read by its publication alone.
-pub(super) const FENCE: &str = "
+/// child has no surface and is read by its publication alone. The anchors read it as is, since
+/// they answer at the read's bound.
+pub(super) fn canonical_fence() -> String {
+    probe("")
+}
+
+/// [`canonical_fence`] with the surface also one the compositor reads now
+/// (`composed_surface_sql`), the fence of the page and of its registrations' relations. A surface
+/// Interpret has shadowed since the publication leaves the page at once, as the name loader the
+/// route reads it with drops it. The total is the stored count and does not apply it.
+pub(super) fn fence() -> String {
+    probe(&format!(" AND {}", composed_surface_sql("surface")))
+}
+
+fn probe(surface_rule: &str) -> String {
+    format!(
+        "
     AND (l.registry_child OR COALESCE((
         SELECT TRUE
         FROM bigname_phase.name_surfaces surface
@@ -26,12 +42,14 @@ pub(super) const FENCE: &str = "
         JOIN bigname_phase.chain_lineage resource_lineage
           ON resource_lineage.chain_id = resource.chain_id
          AND resource_lineage.block_hash = resource.block_hash
-        WHERE surface.logical_name_id = l.logical_name_id
+        WHERE surface.logical_name_id = l.logical_name_id{surface_rule}
           AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        LIMIT 1), FALSE))";
+        LIMIT 1), FALSE))"
+    )
+}
 
 /// One stored row of the page.
 #[derive(Clone, Debug, FromRow)]
@@ -310,7 +328,7 @@ impl<'a> Read<'a> {
         builder.push_bind(self.chains.to_vec());
         builder.push(")");
         self.push_entry_rows(&mut builder, true);
-        builder.push(FENCE);
+        builder.push(fence());
         if let Some(after) = after {
             builder.push(format!(" AND ({key}, l.logical_name_id"));
             if after.resource_id.is_some() {

@@ -6335,11 +6335,12 @@ families. The composition pass derives every row in the names stream.
   its row is derived again for another reason (TYR-373/374).
 - The address-names route reads the stored listing for the ownership relations and
   `relation=former_owner`, and the address events read takes its current anchors from it. A page
-  reads about as many names as it returns. The total counts stored rows, so a
-  name a reorg has taken off readable lineage stays counted until the next publication. Names
-  with equal sort values list in name id order, and `order=desc` is exactly the reverse of
-  `order=asc`, which changes the descending order inside tie groups. The reader files are
-  outside every content hash root and add no rotation.
+  reads about as many names as it returns. The total counts stored rows, so a name a reorg has
+  taken off readable lineage, or one Interpret has shadowed, leaves the page at once and stays
+  counted until the next publication. Names with equal sort values list in name id order, and
+  `order=desc` is exactly the reverse of `order=asc`, which changes the descending order inside
+  tie groups. A descending cursor issued before this release is refused with 400. Restart the
+  walk. The reader files are outside every content hash root and add no rotation.
 - The relation fold's storage files move from the reader sources to the composition sources, and
   the family step is in `crates/project/src`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The

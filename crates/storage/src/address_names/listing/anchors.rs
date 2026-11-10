@@ -14,7 +14,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::statement::FENCE;
+use super::statement::canonical_fence;
 use crate::{
     AddressNameRelation,
     address_names::push_address_names_current_query,
@@ -154,7 +154,7 @@ fn stored_statement(
         builder.push_bind(namespace.to_owned());
     }
     builder.push(format!(" AND ({})", held.join(" OR ")));
-    builder.push(FENCE);
+    builder.push(canonical_fence());
     builder
 }
 

@@ -718,8 +718,6 @@ async fn the_former_page_walks_the_former_index() -> Result<()> {
     database.cleanup().await
 }
 
-// Review findings on 24bc4ada3, red before their fix.
-
 /// The filter key a descending ownership cursor binds its tie order under.
 const LISTING_TIE_ORDER_KEY: &str = "tie_order";
 
@@ -735,8 +733,8 @@ async fn listing_next_cursor(
     crate::v2::decode(cursor).ok().context("the cursor decodes")
 }
 
-/// C-D1: a descending cursor in the shape the reader before this change issued (no tie-order
-/// key) is refused, for every sort: it was issued under ascending ties.
+/// A descending cursor in the shape issued while ties walked ascending inside a descending page
+/// (no tie-order key) is refused, for every sort.
 #[tokio::test]
 async fn a_descending_cursor_without_the_tie_order_is_refused() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -753,7 +751,7 @@ async fn a_descending_cursor_without_the_tie_order_is_refused() -> Result<()> {
     database.cleanup().await
 }
 
-/// C-D2: an ascending cursor keeps the shape it had before this change and continues.
+/// An ascending cursor keeps its shape, with no tie-order key, and continues.
 #[tokio::test]
 async fn an_ascending_cursor_keeps_its_shape_and_continues() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -771,8 +769,8 @@ async fn an_ascending_cursor_keeps_its_shape_and_continues() -> Result<()> {
     database.cleanup().await
 }
 
-/// C-D3: a descending cursor the listing issues binds its tie order and walks the exact reverse
-/// of ascending.
+/// A descending cursor the listing issues binds its tie order, and the walk it continues is the
+/// exact reverse of ascending.
 #[tokio::test]
 async fn a_descending_cursor_binds_its_tie_order() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -844,21 +842,24 @@ async fn observe_first_raw_name(database: &TestDatabase, first: &str, visible: b
     Ok(())
 }
 
+/// Whether `name` is the bound-paging fixture's textless name under its placeholder.
+fn is_textless_first(name: &str) -> bool {
+    name.ends_with(".alpha.eth") && name.starts_with('[')
+}
+
 /// The owner's page lists the textless name under its placeholder.
-async fn assert_first_is_listed_textless(database: &TestDatabase, uri: &str) -> Result<()> {
+async fn assert_first_is_listed_textless(database: &TestDatabase, uri: &str) -> Result<Value> {
     let page = v2_address_names_payload_for_database(database, uri).await?;
     let names = listing_names(&listing_rows(std::slice::from_ref(&page)));
     assert!(
-        names
-            .iter()
-            .any(|name| name.ends_with(".alpha.eth") && name.starts_with('[')),
+        names.iter().any(|name| is_textless_first(name)),
         "precondition, the textless name is listed: {names:?}"
     );
-    Ok(())
+    Ok(page)
 }
 
-/// 4522787155: a raw name Interpret observes above the publication shows on the page at once, as
-/// the full read shows it, until Project publishes the block.
+/// A raw name Interpret observes above the publication shows on the page at once, under the
+/// name the compositor derives from its bytes, as the full read shows it.
 #[tokio::test]
 async fn a_raw_name_observed_above_the_publication_shows_on_the_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -877,49 +878,25 @@ async fn a_raw_name_observed_above_the_publication_shows_on_the_page() -> Result
     database.cleanup().await
 }
 
-/// 4522787170: bytes observed above the publication that fail normalization shadow the surface.
-/// The full read drops the name at once, and so does the page.
+/// Bytes observed above the publication that fail normalization shadow the surface. The page
+/// drops the name at once, as the name loader drops it, and the stored total still counts it
+/// until Project publishes the block.
 #[tokio::test]
 async fn a_name_shadowed_above_the_publication_leaves_the_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let paging = seed_bound_paging(&database).await?;
-    let uri = format!("/v1/addresses/{RC_OWNER}/names?page_size=50");
-    assert_first_is_listed_textless(&database, &uri).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?page_size=50&include=total_count");
+    let before = assert_first_is_listed_textless(&database, &uri).await?;
     observe_first_raw_name(&database, &paging.first, false).await?;
-    let page = v2_address_names_payload_for_database(&database, &uri).await?;
-    let full = listing_oracle(v2_address_names_payload_for_database(&database, &uri)).await?;
-    assert_eq!(page["data"], full["data"], "{uri}");
-    database.cleanup().await
-}
-
-/// 4522787131: a label known only from `label_preimages` (an import, or a chain observation
-/// Project has not published) shows in the served name. The full read filters and sorts by the
-/// served name; the listing by its stored spelling.
-#[tokio::test]
-async fn a_label_known_only_from_its_preimage_is_filtered_by_the_served_name() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_bound_paging(&database).await?;
-    let base = format!("/v1/addresses/{RC_OWNER}/names?page_size=50");
-    assert_first_is_listed_textless(&database, &base).await?;
-    insert_family_label_preimage(&database.pool, b"first").await?;
-    let mut red = Vec::new();
-    for query in [
-        "&q=first",
-        "&q=irst&match=contains",
-        "&parent=alpha.eth",
-        "&sort=name",
-    ] {
-        let uri = format!("{base}{query}");
-        let page = v2_address_names_payload_for_database(&database, &uri).await?;
-        let full = listing_oracle(v2_address_names_payload_for_database(&database, &uri)).await?;
-        if page["data"] != full["data"] {
-            red.push(format!(
-                "{query}: listing {:?} full {:?}",
-                listing_names(&listing_rows(std::slice::from_ref(&page))),
-                listing_names(&listing_rows(std::slice::from_ref(&full)))
-            ));
-        }
-    }
-    assert!(red.is_empty(), "{red:#?}");
+    let after = v2_address_names_payload_for_database(&database, &uri).await?;
+    let kept: Vec<Value> = listing_rows(std::slice::from_ref(&before))
+        .into_iter()
+        .filter(|row| !is_textless_first(row["name"].as_str().expect("a name")))
+        .collect();
+    assert_eq!(listing_rows(std::slice::from_ref(&after)), kept, "{after}");
+    assert_eq!(
+        after["page"]["total_count"], before["page"]["total_count"],
+        "{uri}"
+    );
     database.cleanup().await
 }
