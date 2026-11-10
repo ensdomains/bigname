@@ -114,7 +114,7 @@ selector ends in exactly one of four outcomes:
 | Outcome | When | What is written |
 | --- | --- | --- |
 | Observed | The endpoint answered the aggregate and the selector's call returned a value or an empty answer. | The value, or the empty answer, with the block it was observed at. A successful empty answer replaces an earlier value. |
-| Failed call | The endpoint answered the aggregate and this selector's own call failed inside it, or returned data that cannot be decoded. | The overlay is cleared and the attempt recorded, so the reader serves the event-derived baseline. This is a fail-closed policy; it is not evidence that the value was cleared on chain. |
+| Failed call | The endpoint answered the aggregate and this selector's own call failed inside it, returned data that cannot be decoded, or returned a name or text value containing a NUL byte, which PostgreSQL cannot store. | The overlay is cleared and the attempt recorded, so the reader serves the event-derived baseline. This is a fail-closed policy; it is not evidence that the value was cleared on chain. |
 | Deferred | The selector's aggregate failed as a whole while the endpoint answered other calls at the same block, and the block had no call or time left to split it further. | No value is observed. The selector moves behind the rest of its queue and records the largest aggregate it may next be sent in; a reverse tuple keeps its name and the block it was observed at (see [Primary names](#primary-names)). |
 | Not observed | The endpoint did not serve the block, the block's reads ran out of time, or the block had no call left for the selector's first aggregate. | Nothing. The row, its value and the block the value was observed at are left exactly as they were, and the selector keeps its place. |
 
@@ -2792,12 +2792,18 @@ an explicit rerun. The failure is not converted into a successful publication.
 
 A block whose write PostgreSQL refuses for the value itself is not retried.
 The transaction rolls back with that value still first in line, so a retry
-would meet it again at the same head. Two shapes reach this:
+would meet it again at the same head. Two shapes are refused this way:
 
-- a string with a NUL byte, such as a text record or reverse name read from
-  the resolver over RPC (SQLSTATE class 22, data exception)
+- a string with a NUL byte or invalid UTF-8 (SQLSTATE class 22, data
+  exception)
 - a record key longer than an index row may be (SQLSTATE class 54, program
   limit exceeded).
+
+A text record or reverse name read from the resolver over RPC never reaches
+the first shape. A returned value with a NUL byte is a failed call, the same
+outcome as a malformed return: no value is written, the failure is counted, the
+selector waits out the failed-call retry delay, and the block publishes
+([follow-only hydration](#follow-only-hydration)).
 
 The runner marks that chain's Project row `failed`, with PostgreSQL's message
 in `last_error`, and that chain's supervisor stops with a data-integrity error.
