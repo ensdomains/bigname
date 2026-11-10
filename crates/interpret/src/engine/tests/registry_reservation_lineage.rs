@@ -16,14 +16,18 @@ use bigname_adapters::schema_v2::seam::{
 
 sol! {
     event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
+    event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId);
 }
 
 /// A contract no Sepolia manifest declares. It admits itself with `RegistryCreated()`.
 const ANNOUNCED_REGISTRY: &str = "0x00000000000000000000000000000000000000a9";
 const FIRST: i64 = SETUP_BLOCK;
 const SECOND: i64 = SETUP_BLOCK + 1;
+const THIRD: i64 = SETUP_BLOCK + 2;
 /// Far beyond every block timestamp here, which is the block number in seconds.
 const LIVE_EXPIRY: u64 = 1_900_000_000;
+/// One second before the first block's timestamp, so a reservation with it has already expired.
+const EXPIRED: u64 = FIRST as u64 - 1;
 const LABEL: &str = "reserved";
 
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +57,11 @@ fn reserved_token() -> U256 {
     let mut word = *keccak256(LABEL.as_bytes());
     word[28..].copy_from_slice(&0_u32.to_be_bytes());
     U256::from_be_bytes(word)
+}
+
+/// The label's token after one regeneration: the same label hash with token version 1.
+fn regenerated_token() -> U256 {
+    reserved_token() + U256::from(1)
 }
 
 fn owner() -> Address {
@@ -88,43 +97,74 @@ async fn insert_block(
     Ok(())
 }
 
+fn reserved_log(expiry: u64) -> alloy_primitives::LogData {
+    LabelReserved {
+        tokenId: reserved_token(),
+        labelHash: keccak256(LABEL.as_bytes()),
+        label: LABEL.to_owned(),
+        expiry,
+        sender: owner(),
+    }
+    .encode_log_data()
+}
+
+fn registered_log() -> alloy_primitives::LogData {
+    LabelRegistered {
+        tokenId: reserved_token(),
+        labelHash: keccak256(LABEL.as_bytes()),
+        label: LABEL.to_owned(),
+        owner: owner(),
+        expiry: LIVE_EXPIRY,
+        sender: owner(),
+    }
+    .encode_log_data()
+}
+
+fn mint_log() -> alloy_primitives::LogData {
+    TransferSingle {
+        operator: owner(),
+        from: Address::ZERO,
+        to: owner(),
+        id: reserved_token(),
+        value: U256::from(1),
+    }
+    .encode_log_data()
+}
+
+/// The owner transfers `token` to the holder.
+fn transfer_log(token: U256) -> alloy_primitives::LogData {
+    TransferSingle {
+        operator: owner(),
+        from: owner(),
+        to: holder(),
+        id: token,
+        value: U256::from(1),
+    }
+    .encode_log_data()
+}
+
+/// The registration's resource is the token id itself, as for every token version 0.
+fn token_resource_log() -> alloy_primitives::LogData {
+    TokenResource {
+        tokenId: reserved_token(),
+        resource: reserved_token(),
+    }
+    .encode_log_data()
+}
+
 /// The first block: the registry announces itself, reserves the label, then registers it to
 /// the owner and mints the token, with no `TokenResource`. The second block: the owner
 /// transfers the token.
 async fn insert_reserve_register_then_transfer(pool: &PgPool) -> TestResult {
-    let token = reserved_token();
-    let label_hash = keccak256(LABEL.as_bytes());
     insert_block(
         pool,
         FIRST,
         ANNOUNCED_REGISTRY,
         vec![
             RegistryCreated {}.encode_log_data(),
-            LabelReserved {
-                tokenId: token,
-                labelHash: label_hash,
-                label: LABEL.to_owned(),
-                expiry: LIVE_EXPIRY,
-                sender: owner(),
-            }
-            .encode_log_data(),
-            LabelRegistered {
-                tokenId: token,
-                labelHash: label_hash,
-                label: LABEL.to_owned(),
-                owner: owner(),
-                expiry: LIVE_EXPIRY,
-                sender: owner(),
-            }
-            .encode_log_data(),
-            TransferSingle {
-                operator: owner(),
-                from: Address::ZERO,
-                to: owner(),
-                id: token,
-                value: U256::from(1),
-            }
-            .encode_log_data(),
+            reserved_log(LIVE_EXPIRY),
+            registered_log(),
+            mint_log(),
         ],
     )
     .await?;
@@ -132,16 +172,7 @@ async fn insert_reserve_register_then_transfer(pool: &PgPool) -> TestResult {
         pool,
         SECOND,
         ANNOUNCED_REGISTRY,
-        vec![
-            TransferSingle {
-                operator: owner(),
-                from: owner(),
-                to: holder(),
-                id: token,
-                value: U256::from(1),
-            }
-            .encode_log_data(),
-        ],
+        vec![transfer_log(reserved_token())],
     )
     .await
 }
@@ -168,54 +199,132 @@ fn assert_loader(engine: &Engine, loader: Loader) -> TestResult {
     Ok(())
 }
 
-/// Interprets the first block, then the second with a new Engine, so the second block's
-/// adapter state is restored from the events the first block stored.
-async fn run_block_by_block(pool: &PgPool, loader: Loader) -> TestResult {
-    let first = loader.engine(pool);
-    first.run_batch(request(FIRST, FIRST, None)).await?;
-    assert_loader(&first, loader)?;
-    let resume = Marker {
-        number: FIRST,
-        hash: block_hash(FIRST),
-    };
-    let second = loader.engine(pool);
-    second
-        .run_batch(request(SECOND, SECOND, Some(resume)))
-        .await
-        .map_err(|error| {
-            format!(
-                "the {} loader refused the second block ({:?}): {error}",
-                loader.name(),
-                error.kind()
-            )
-        })?;
-    assert_loader(&second, loader)?;
+/// Interprets each block with a new Engine, so every block after the first restores its adapter
+/// state from the events the earlier blocks stored.
+async fn run_each_block(pool: &PgPool, loader: Loader, blocks: &[i64]) -> TestResult {
+    let mut resume = None;
+    for &block in blocks {
+        let engine = loader.engine(pool);
+        engine
+            .run_batch(request(block, block, resume.take()))
+            .await
+            .map_err(|error| {
+                format!(
+                    "the {} loader refused block {block} ({:?}): {error}",
+                    loader.name(),
+                    error.kind()
+                )
+            })?;
+        assert_loader(&engine, loader)?;
+        resume = Some(Marker {
+            number: block,
+            hash: block_hash(block),
+        });
+    }
     Ok(())
 }
 
-/// The resource and token lineage the reservation drafted.
-async fn reservation_identity(pool: &PgPool) -> TestResult<(Uuid, Uuid)> {
+/// The resource and token lineage the first block's `event_kind` row names.
+async fn drafted_identity(pool: &PgPool, event_kind: &str) -> TestResult<(Uuid, Uuid)> {
     let (resource, lineage): (Option<Uuid>, Option<String>) = sqlx::query_as(
         "SELECT resource_id, after_state ->> $3 FROM normalized_events
-         WHERE chain_id = $1 AND event_kind = 'RegistrationReserved' AND block_number = $2",
+         WHERE chain_id = $1 AND event_kind = $4 AND block_number = $2",
     )
     .bind(CHAIN)
     .bind(FIRST)
     .bind(TOKEN_LINEAGE_ID_KEY)
+    .bind(event_kind)
     .fetch_one(pool)
     .await?;
     let (Some(resource), Some(lineage)) = (resource, lineage) else {
-        return Err("a reservation names its token's resource and token lineage".into());
+        return Err(format!("{event_kind} names its token's resource and token lineage").into());
     };
     Ok((resource, Uuid::parse_str(&lineage)?))
 }
 
+/// The resource and token lineage the reservation drafted.
+async fn reservation_identity(pool: &PgPool) -> TestResult<(Uuid, Uuid)> {
+    drafted_identity(pool, "RegistrationReserved").await
+}
+
+/// The lineage was drafted once, in the first block, and the resource is still bound to it.
+async fn assert_one_lineage(pool: &PgPool, resource: Uuid, lineage: Uuid) -> TestResult {
+    let blocks: Vec<i64> = sqlx::query_scalar(
+        "SELECT block_number FROM token_lineages
+         WHERE chain_id = $1 AND token_lineage_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(lineage)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        blocks,
+        vec![FIRST],
+        "the token lineage must be drafted once, in the first block"
+    );
+    let bound: Option<Uuid> = sqlx::query_scalar(
+        "SELECT token_lineage_id FROM resources WHERE chain_id = $1 AND resource_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(resource)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(bound, Some(lineage), "the resource keeps its first lineage");
+    Ok(())
+}
+
+async fn transfers_at(pool: &PgPool, block: i64) -> TestResult<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = $3 AND block_number = $2",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .bind(TOKEN_CONTROL_TRANSFERRED_EVENT_KIND)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The token lineage the one `event_kind` row in `block` names.
+async fn lineage_named_by(pool: &PgPool, event_kind: &str, block: i64) -> TestResult<Option<Uuid>> {
+    let lineage: Option<String> = sqlx::query_scalar(
+        "SELECT after_state ->> $3 FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2 AND event_kind = $4",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .bind(TOKEN_LINEAGE_ID_KEY)
+    .bind(event_kind)
+    .fetch_one(pool)
+    .await?;
+    Ok(lineage.as_deref().map(Uuid::parse_str).transpose()?)
+}
+
+/// The token lineage the registration `LabelRegistered` produced in `block` names. Rows the
+/// adapter derives from registry state carry `derived_from` and are left out.
+async fn registration_lineage(pool: &PgPool, block: i64) -> TestResult<Option<Uuid>> {
+    let lineage: Option<String> = sqlx::query_scalar(
+        "SELECT after_state ->> $3 FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2 AND event_kind = 'RegistrationGranted'
+           AND after_state ->> 'source_event' = 'LabelRegistered'
+           AND after_state ->> 'derived_from' IS NULL",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .bind(TOKEN_LINEAGE_ID_KEY)
+    .fetch_one(pool)
+    .await?;
+    Ok(lineage.as_deref().map(Uuid::parse_str).transpose()?)
+}
+
+/// An announced registry is admitted forward from its announcement, so a registry that announces
+/// itself in an earlier block than its reservation takes this same path.
 async fn reserved_then_registered_token_keeps_its_lineage(loader: Loader) -> TestResult {
     let prefix = format!("interpret_reserved_registered_lineage_{}", loader.name());
     let database = sepolia_database(&prefix).await?;
     let pool = database.pool();
     insert_reserve_register_then_transfer(pool).await?;
-    run_block_by_block(pool, loader).await?;
+    run_each_block(pool, loader, &[FIRST, SECOND]).await?;
 
     let (resource, lineage) = reservation_identity(pool).await?;
     let blocks: Vec<i64> = sqlx::query_scalar(
@@ -270,4 +379,314 @@ async fn reserved_then_registered_token_keeps_its_lineage_across_a_lookahead_rel
 async fn reserved_then_registered_token_keeps_its_lineage_across_a_full_state_reload() -> TestResult
 {
     reserved_then_registered_token_keeps_its_lineage(Loader::FullState).await
+}
+
+/// The deployed registry links every registration to its resource with `TokenResource` and
+/// grants the owner's roles on it. The link names the lineage, so a restore keeps it.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L466-L472 @ ens_v2@a971bd64)
+async fn deployed_registration_order_keeps_its_lineage(loader: Loader) -> TestResult {
+    let prefix = format!("interpret_deployed_registration_lineage_{}", loader.name());
+    let database = sepolia_database(&prefix).await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        ANNOUNCED_REGISTRY,
+        vec![
+            RegistryCreated {}.encode_log_data(),
+            registered_log(),
+            mint_log(),
+            token_resource_log(),
+            EACRolesChanged {
+                resource: reserved_token(),
+                account: owner(),
+                oldRoleBitmap: U256::ZERO,
+                newRoleBitmap: U256::from(1),
+            }
+            .encode_log_data(),
+        ],
+    )
+    .await?;
+    insert_block(
+        pool,
+        SECOND,
+        ANNOUNCED_REGISTRY,
+        vec![transfer_log(reserved_token())],
+    )
+    .await?;
+    run_each_block(pool, loader, &[FIRST, SECOND]).await?;
+
+    let (resource, lineage) = drafted_identity(pool, "TokenResourceLinked").await?;
+    assert_one_lineage(pool, resource, lineage).await?;
+    let named: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT after_state ->> $3 FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2 AND event_kind = 'RegistrationGranted'
+           AND after_state ->> $3 IS NOT NULL",
+    )
+    .bind(CHAIN)
+    .bind(FIRST)
+    .bind(TOKEN_LINEAGE_ID_KEY)
+    .fetch_all(pool)
+    .await?;
+    let linked = lineage.to_string();
+    assert!(
+        named.iter().all(|named| *named == linked),
+        "a registration names the link's lineage or none: {named:?}"
+    );
+    assert_eq!(
+        transfers_at(pool, SECOND).await?,
+        1,
+        "the transfer after the restore is interpreted"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn deployed_registration_order_keeps_its_lineage_across_a_lookahead_reload() -> TestResult {
+    deployed_registration_order_keeps_its_lineage(Loader::Lookahead).await
+}
+
+#[tokio::test]
+async fn deployed_registration_order_keeps_its_lineage_across_a_full_state_reload() -> TestResult {
+    deployed_registration_order_keeps_its_lineage(Loader::FullState).await
+}
+
+/// A reserved label registered in the deployed order is linked to the reservation's resource,
+/// and the link names the lineage the reservation drafted.
+#[tokio::test]
+async fn reserved_then_deployed_registration_keeps_one_lineage() -> TestResult {
+    let database = sepolia_database("interpret_reserved_deployed_registration_lineage").await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        ANNOUNCED_REGISTRY,
+        vec![
+            RegistryCreated {}.encode_log_data(),
+            reserved_log(LIVE_EXPIRY),
+            registered_log(),
+            mint_log(),
+            token_resource_log(),
+        ],
+    )
+    .await?;
+    insert_block(
+        pool,
+        SECOND,
+        ANNOUNCED_REGISTRY,
+        vec![transfer_log(reserved_token())],
+    )
+    .await?;
+    run_each_block(pool, Loader::Lookahead, &[FIRST, SECOND]).await?;
+
+    let (resource, lineage) = reservation_identity(pool).await?;
+    assert_eq!(
+        drafted_identity(pool, "TokenResourceLinked").await?,
+        (resource, lineage),
+        "the link confirms the reservation's resource and lineage"
+    );
+    assert_one_lineage(pool, resource, lineage).await?;
+    assert_eq!(
+        transfers_at(pool, SECOND).await?,
+        1,
+        "the transfer after the restore is interpreted"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A reservation can expire before anyone registers its label. Registering it then keeps the
+/// token id, because the reservation minted no token to burn, so the lineage continues.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455-L460 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn expired_reservation_registered_again_keeps_its_lineage() -> TestResult {
+    let database = sepolia_database("interpret_expired_reservation_lineage").await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        ANNOUNCED_REGISTRY,
+        vec![RegistryCreated {}.encode_log_data(), reserved_log(EXPIRED)],
+    )
+    .await?;
+    insert_block(
+        pool,
+        SECOND,
+        ANNOUNCED_REGISTRY,
+        vec![registered_log(), mint_log()],
+    )
+    .await?;
+    insert_block(
+        pool,
+        THIRD,
+        ANNOUNCED_REGISTRY,
+        vec![transfer_log(reserved_token())],
+    )
+    .await?;
+    run_each_block(pool, Loader::Lookahead, &[FIRST, SECOND, THIRD]).await?;
+
+    let (resource, lineage) = reservation_identity(pool).await?;
+    assert_eq!(
+        registration_lineage(pool, SECOND).await?,
+        Some(lineage),
+        "the registration names the expired reservation's lineage"
+    );
+    assert_one_lineage(pool, resource, lineage).await?;
+    assert_eq!(
+        transfers_at(pool, THIRD).await?,
+        1,
+        "the transfer after the restore is interpreted"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Regenerating a token moves its resource and lineage to the new token id.
+#[tokio::test]
+async fn regenerated_reserved_token_keeps_its_lineage_across_reloads() -> TestResult {
+    let database = sepolia_database("interpret_regenerated_reservation_lineage").await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        ANNOUNCED_REGISTRY,
+        vec![
+            RegistryCreated {}.encode_log_data(),
+            reserved_log(LIVE_EXPIRY),
+            registered_log(),
+            mint_log(),
+        ],
+    )
+    .await?;
+    insert_block(
+        pool,
+        SECOND,
+        ANNOUNCED_REGISTRY,
+        vec![
+            TokenRegenerated {
+                oldTokenId: reserved_token(),
+                newTokenId: regenerated_token(),
+            }
+            .encode_log_data(),
+        ],
+    )
+    .await?;
+    insert_block(
+        pool,
+        THIRD,
+        ANNOUNCED_REGISTRY,
+        vec![transfer_log(regenerated_token())],
+    )
+    .await?;
+    run_each_block(pool, Loader::Lookahead, &[FIRST, SECOND, THIRD]).await?;
+
+    let (resource, lineage) = reservation_identity(pool).await?;
+    assert_eq!(
+        lineage_named_by(pool, "TokenRegenerated", SECOND).await?,
+        Some(lineage),
+        "the regeneration moves the reservation's lineage to the new token"
+    );
+    assert_one_lineage(pool, resource, lineage).await?;
+    assert_eq!(
+        transfers_at(pool, THIRD).await?,
+        1,
+        "the transfer of the regenerated token is interpreted"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A manifest-declared registry interprets the same logs the same way.
+#[tokio::test]
+async fn declared_registry_reserved_then_registered_keeps_its_lineage() -> TestResult {
+    let database = sepolia_database("interpret_declared_reservation_lineage").await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        ETH_REGISTRY,
+        vec![reserved_log(LIVE_EXPIRY), registered_log(), mint_log()],
+    )
+    .await?;
+    insert_block(
+        pool,
+        SECOND,
+        ETH_REGISTRY,
+        vec![transfer_log(reserved_token())],
+    )
+    .await?;
+    run_each_block(pool, Loader::Lookahead, &[FIRST, SECOND]).await?;
+
+    let (resource, lineage) = reservation_identity(pool).await?;
+    assert_eq!(
+        registration_lineage(pool, FIRST).await?,
+        Some(lineage),
+        "the registration names the reservation's lineage"
+    );
+    assert_one_lineage(pool, resource, lineage).await?;
+    assert_eq!(
+        transfers_at(pool, SECOND).await?,
+        1,
+        "the transfer after the restore is interpreted"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A reserved token with no registration has no registration row to restore.
+#[tokio::test]
+async fn reserved_token_transfer_after_a_reload_keeps_its_lineage() -> TestResult {
+    let database = sepolia_database("interpret_reserved_transfer_lineage").await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        ANNOUNCED_REGISTRY,
+        vec![
+            RegistryCreated {}.encode_log_data(),
+            reserved_log(LIVE_EXPIRY),
+        ],
+    )
+    .await?;
+    insert_block(
+        pool,
+        SECOND,
+        ANNOUNCED_REGISTRY,
+        vec![transfer_log(reserved_token())],
+    )
+    .await?;
+    run_each_block(pool, Loader::Lookahead, &[FIRST, SECOND]).await?;
+
+    let (resource, lineage) = reservation_identity(pool).await?;
+    assert_eq!(
+        lineage_named_by(pool, TOKEN_CONTROL_TRANSFERRED_EVENT_KIND, SECOND).await?,
+        Some(lineage),
+        "the transfer names the reservation's lineage"
+    );
+    assert_one_lineage(pool, resource, lineage).await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// With no batch boundary between the registration and the transfer there is no restore, so
+/// the adapter state keeps the lineage.
+#[tokio::test]
+async fn reserved_then_registered_same_batch_keeps_one_lineage() -> TestResult {
+    let database = sepolia_database("interpret_reserved_registered_same_batch_lineage").await?;
+    let pool = database.pool();
+    insert_reserve_register_then_transfer(pool).await?;
+    Engine::new(pool.clone())
+        .run_batch(request(FIRST, SECOND, None))
+        .await?;
+
+    let (resource, lineage) = reservation_identity(pool).await?;
+    assert_one_lineage(pool, resource, lineage).await?;
+    assert_eq!(
+        transfers_at(pool, SECOND).await?,
+        1,
+        "the transfer is interpreted"
+    );
+    database.cleanup().await?;
+    Ok(())
 }
