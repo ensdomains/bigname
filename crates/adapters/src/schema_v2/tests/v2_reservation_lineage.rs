@@ -264,3 +264,111 @@ fn reserved_then_registered_token_keeps_its_lineage_after_a_restore() -> anyhow:
     );
     Ok(())
 }
+
+/// Another registry resource, for a registration row that names a resource the token does not
+/// hold.
+const OTHER_RESOURCE: &str = "0x000000000000000000000000000000000000000000000000000000000000000b";
+
+/// The first batch's rows folded as a restore reads them, with the registration row rewritten by
+/// `edit`.
+fn prior_with_registration(
+    edit: impl FnOnce(&mut PriorEventInput),
+) -> anyhow::Result<(BatchOutput, Vec<PriorEventInput>)> {
+    let input = batch(
+        vec![declared_registry()],
+        Vec::new(),
+        1,
+        reserve_then_register(1),
+    );
+    let (first, _) = interpret_test_batch_incremental(input.clone(), None)?;
+    assert!(first.decode_skips.is_empty(), "{:?}", first.decode_skips);
+    let mut prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &input.blocks)?;
+    edit(
+        prior
+            .iter_mut()
+            .find(|event| event.event_kind == "RegistrationGranted")
+            .expect("the registration row is retained"),
+    );
+    Ok((first, prior))
+}
+
+/// The restored token's resource, upstream resource word and lineage.
+fn restored_resource(
+    output: &BatchOutput,
+    prior: Vec<PriorEventInput>,
+) -> anyhow::Result<(Option<Uuid>, Option<String>, Option<Uuid>)> {
+    let token = restored(output, prior)?
+        .v2_token(ANNOUNCED_REGISTRY, &token_word())
+        .expect("the restore installs the registered token");
+    Ok((
+        token.resource_id,
+        token.upstream_resource,
+        token.token_lineage_id,
+    ))
+}
+
+/// A registration row written before registrations carried the lineage names the reservation's
+/// resource and no lineage. Restored after the reservation row, it keeps the lineage the
+/// reservation row restored.
+#[test]
+fn restore_keeps_the_reserved_lineage_when_an_older_registration_row_names_none()
+-> anyhow::Result<()> {
+    let (first, prior) = prior_with_registration(|registration| {
+        registration
+            .after_state
+            .as_object_mut()
+            .expect("an after_state is an object")
+            .remove(seam::TOKEN_LINEAGE_ID_KEY);
+    })?;
+    let (resource_id, lineage) = reservation_identity(&first)?;
+    let (resource, _, restored_lineage) = restored_resource(&first, prior)?;
+    assert_eq!(resource, Some(resource_id));
+    assert_eq!(
+        restored_lineage,
+        Some(lineage),
+        "a registration row with no lineage must not clear the reservation's lineage"
+    );
+    Ok(())
+}
+
+/// A null lineage reads as no lineage, as every other reader of the key reads it.
+#[test]
+fn restore_keeps_the_reserved_lineage_when_a_registration_row_names_a_null_lineage()
+-> anyhow::Result<()> {
+    let (first, prior) = prior_with_registration(|registration| {
+        registration.after_state[seam::TOKEN_LINEAGE_ID_KEY] = serde_json::Value::Null;
+    })?;
+    let (resource_id, lineage) = reservation_identity(&first)?;
+    let (resource, _, restored_lineage) = restored_resource(&first, prior)?;
+    assert_eq!(resource, Some(resource_id));
+    assert_eq!(
+        restored_lineage,
+        Some(lineage),
+        "a null lineage must not clear the reservation's lineage"
+    );
+    Ok(())
+}
+
+/// A registration row with no lineage that names a resource the token does not hold attaches
+/// that resource with no lineage. The token's earlier lineage belongs to another resource.
+#[test]
+fn restore_takes_no_lineage_from_a_registration_row_naming_another_resource() -> anyhow::Result<()>
+{
+    let other = Uuid::from_u128(0x0b);
+    let (first, prior) = prior_with_registration(|registration| {
+        registration.resource_id = Some(other);
+        let after_state = registration
+            .after_state
+            .as_object_mut()
+            .expect("an after_state is an object");
+        after_state.remove(seam::TOKEN_LINEAGE_ID_KEY);
+        after_state.insert("upstream_resource".to_owned(), json!(OTHER_RESOURCE));
+        after_state.insert("resource_id".to_owned(), json!(other.to_string()));
+    })?;
+    assert_eq!(
+        restored_resource(&first, prior)?,
+        (Some(other), Some(OTHER_RESOURCE.to_owned()), None),
+        "the token takes the named resource and no lineage"
+    );
+    Ok(())
+}
