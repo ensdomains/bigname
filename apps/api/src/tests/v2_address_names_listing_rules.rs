@@ -717,3 +717,396 @@ async fn the_former_page_walks_the_former_index() -> Result<()> {
     }
     database.cleanup().await
 }
+
+/// The filter key a descending ownership cursor binds its tie order under.
+const LISTING_TIE_ORDER_KEY: &str = "tie_order";
+
+/// The next cursor of `uri`'s first page, decoded.
+async fn listing_next_cursor(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<crate::v2::CursorPayload> {
+    let page = v2_address_names_payload_for_database(database, uri).await?;
+    let cursor = page["page"]["next_cursor"]
+        .as_str()
+        .context("a next cursor")?;
+    crate::v2::decode(cursor).ok().context("the cursor decodes")
+}
+
+/// A descending cursor in the shape issued while ties walked ascending inside a descending page
+/// (no tie-order key) is refused, for every sort.
+#[tokio::test]
+async fn a_descending_cursor_without_the_tie_order_is_refused() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 7).await?;
+    for sort in ["name", "expires_at", "registered_at", "created_at"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order=desc&page_size=2");
+        let mut payload = listing_next_cursor(&database, &uri).await?;
+        payload.filters.remove(LISTING_TIE_ORDER_KEY);
+        let old = crate::v2::encode(&payload);
+        let (status, body) =
+            bulk_listing_response(&database, &format!("{uri}&cursor={old}")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{sort}: {body}");
+    }
+    database.cleanup().await
+}
+
+/// An ascending cursor keeps its shape, with no tie-order key, and continues.
+#[tokio::test]
+async fn an_ascending_cursor_keeps_its_shape_and_continues() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 7).await?;
+    for sort in ["name", "expires_at", "registered_at", "created_at"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&page_size=2");
+        let payload = listing_next_cursor(&database, &uri).await?;
+        assert!(
+            !payload.filters.contains_key(LISTING_TIE_ORDER_KEY),
+            "{sort}: {:?}",
+            payload.filters
+        );
+        assert_listing_matches_the_full_read(&database, &uri).await?;
+    }
+    database.cleanup().await
+}
+
+/// A descending cursor the listing issues binds its tie order, and the walk it continues is the
+/// exact reverse of ascending.
+#[tokio::test]
+async fn a_descending_cursor_binds_its_tie_order() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 7).await?;
+    for sort in ["name", "expires_at", "registered_at", "created_at"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order=desc&page_size=2");
+        let payload = listing_next_cursor(&database, &uri).await?;
+        assert!(
+            payload.filters.contains_key(LISTING_TIE_ORDER_KEY),
+            "{sort}: {:?}",
+            payload.filters
+        );
+        assert_listing_matches_the_full_read(&database, &uri).await?;
+    }
+    database.cleanup().await
+}
+
+/// What Interpret observes for the bound-paging fixture's textless `first.alpha.eth` above the
+/// published 240.
+#[derive(Clone, Copy, Debug)]
+enum FirstObserved {
+    /// Raw bytes that normalize: the surface stays active with `first.alpha.eth`.
+    Normalized,
+    /// Raw bytes that fail normalization: the surface is shadowed with them.
+    Unnormalized,
+    /// A witness with no raw labels: the surface is shadowed with an empty raw name.
+    Empty,
+}
+
+/// Gives the textless `first.alpha.eth` of the bound-paging fixture what `observed` names,
+/// witnessed at 241, above the published 240, as Interpret does in place.
+async fn observe_first_raw_name(
+    database: &TestDatabase,
+    first: &str,
+    observed: FirstObserved,
+) -> Result<()> {
+    let labels: Vec<&str> = match observed {
+        FirstObserved::Normalized => vec!["first", "alpha", "eth"],
+        FirstObserved::Unnormalized => vec!["FIRST", "alpha", "eth"],
+        FirstObserved::Empty => Vec::new(),
+    };
+    let mut dns = Vec::new();
+    for label in &labels {
+        dns.push(u8::try_from(label.len())?);
+        dns.extend(label.as_bytes());
+    }
+    dns.push(0);
+    let witness = "listing-first-preimage";
+    sqlx::query(
+        "UPDATE name_surfaces SET raw_name = $2, raw_labels = $3, dns_encoded_name = $4,
+             preimage_event_identity = $5,
+             visibility_state = CASE WHEN $6 THEN visibility_state ELSE 'shadow' END,
+             normalization_errors = CASE WHEN $6 THEN normalization_errors
+                 ELSE '[{\"error\": \"label is not normalized\"}]' END,
+             deactivation_reason = CASE WHEN $6 THEN deactivation_reason
+                 ELSE 'normalization_gate' END,
+             deactivated_at = CASE WHEN $6 THEN deactivated_at
+                 ELSE to_timestamp(1700000241) END
+         WHERE logical_name_id = $1 AND raw_name IS NULL",
+    )
+    .bind(first)
+    .bind(labels.join("."))
+    .bind(
+        labels
+            .iter()
+            .map(|label| (*label).to_owned())
+            .collect::<Vec<_>>(),
+    )
+    .bind(&dns)
+    .bind(witness)
+    .bind(matches!(observed, FirstObserved::Normalized))
+    .execute(&database.pool)
+    .await?;
+    let mut event = family_event(
+        witness,
+        Some(first),
+        None,
+        "PreimageObserved",
+        "ens_v1_registry_l1",
+        241,
+        0,
+        json!({"raw_labels": labels}),
+    );
+    event.before_state = json!({});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    Ok(())
+}
+
+/// Whether `name` is the bound-paging fixture's textless name under its placeholder.
+fn is_textless_first(name: &str) -> bool {
+    name.ends_with(".alpha.eth") && name.starts_with('[')
+}
+
+/// The owner's page lists the textless name under its placeholder.
+async fn assert_first_is_listed_textless(database: &TestDatabase, uri: &str) -> Result<Value> {
+    let page = v2_address_names_payload_for_database(database, uri).await?;
+    let names = listing_names(&listing_rows(std::slice::from_ref(&page)));
+    assert!(
+        names.iter().any(|name| is_textless_first(name)),
+        "precondition, the textless name is listed: {names:?}"
+    );
+    Ok(page)
+}
+
+/// The served names of the one page `uri` reads.
+async fn listing_page_names(database: &TestDatabase, uri: &str) -> Result<Vec<String>> {
+    let page = v2_address_names_payload_for_database(database, uri).await?;
+    Ok(listing_names(&listing_rows(std::slice::from_ref(&page))))
+}
+
+/// The stored name of the bound-paging fixture's `first` in the owner's listing row.
+async fn stored_first_name(database: &TestDatabase, first: &str) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT normalized_name FROM bigname_phase.project_address_listing
+         WHERE address = $1 AND logical_name_id = $2",
+    )
+    .bind(RC_OWNER)
+    .bind(first)
+    .fetch_one(&database.pool)
+    .await?)
+}
+
+/// The `q` filters a healed `first.alpha.eth` matches by its served spelling.
+const FIRST_QUERIES: [&str; 2] = ["&q=first", "&q=irst&match=contains"];
+
+/// Whether each of [`FIRST_QUERIES`] lists `first.alpha.eth` on the owner's page.
+async fn first_matched(database: &TestDatabase, base: &str) -> Result<Vec<bool>> {
+    let mut matched = Vec::new();
+    for query in FIRST_QUERIES {
+        let names = listing_page_names(database, &format!("{base}{query}")).await?;
+        matched.push(names.contains(&"first.alpha.eth".to_owned()));
+    }
+    Ok(matched)
+}
+
+/// A raw name Interpret observes above the publication shows on the page at once, under the
+/// name the compositor derives from its bytes, as the full read shows it. The filters read the
+/// stored spelling, so `q` matches it from the next publication, which respells the row and
+/// serves the same names.
+#[tokio::test]
+async fn a_raw_name_observed_above_the_publication_shows_on_the_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let paging = seed_bound_paging(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?page_size=50");
+    assert_first_is_listed_textless(&database, &uri).await?;
+    observe_first_raw_name(&database, &paging.first, FirstObserved::Normalized).await?;
+    let page = v2_address_names_payload_for_database(&database, &uri).await?;
+    let full = listing_oracle(v2_address_names_payload_for_database(&database, &uri)).await?;
+    assert_eq!(page_body(&page), page_body(&full), "{uri}");
+    assert!(
+        listing_names(&listing_rows(std::slice::from_ref(&page)))
+            .contains(&"first.alpha.eth".to_owned()),
+        "{page}"
+    );
+    assert!(is_textless_first(
+        &stored_first_name(&database, &paging.first).await?
+    ));
+    assert_eq!(first_matched(&database, &uri).await?, [false, false]);
+    publish_test_families(&database, 241).await?;
+    let published = v2_address_names_payload_for_database(&database, &uri).await?;
+    let full = listing_oracle(v2_address_names_payload_for_database(&database, &uri)).await?;
+    assert_eq!(page_body(&published), page_body(&full), "{uri}");
+    assert_eq!(
+        listing_names(&listing_rows(std::slice::from_ref(&published))),
+        listing_names(&listing_rows(std::slice::from_ref(&page)))
+    );
+    assert_eq!(
+        stored_first_name(&database, &paging.first).await?,
+        "first.alpha.eth"
+    );
+    assert_eq!(first_matched(&database, &uri).await?, [true, true]);
+    database.cleanup().await
+}
+
+/// A surface Interpret shadows above the publication, with bytes that fail normalization or
+/// with an empty raw name. The page drops the name at once, as the name loader drops it, and
+/// the stored total still counts it until Project publishes the block.
+#[tokio::test]
+async fn a_name_shadowed_above_the_publication_leaves_the_page() -> Result<()> {
+    for observed in [FirstObserved::Unnormalized, FirstObserved::Empty] {
+        let database = TestDatabase::new_migrated().await?;
+        let paging = seed_bound_paging(&database).await?;
+        let uri = format!("/v1/addresses/{RC_OWNER}/names?page_size=50&include=total_count");
+        let before = assert_first_is_listed_textless(&database, &uri).await?;
+        observe_first_raw_name(&database, &paging.first, observed).await?;
+        let after = v2_address_names_payload_for_database(&database, &uri).await?;
+        let kept: Vec<Value> = listing_rows(std::slice::from_ref(&before))
+            .into_iter()
+            .filter(|row| !is_textless_first(row["name"].as_str().expect("a name")))
+            .collect();
+        assert_eq!(
+            listing_rows(std::slice::from_ref(&after)),
+            kept,
+            "{observed:?}: {after}"
+        );
+        assert_eq!(
+            after["page"]["total_count"], before["page"]["total_count"],
+            "{observed:?}: {uri}"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// A label the chain reveals above the publication (a `PreimageObserved` at 241 with the
+/// preimage of `first`) shows in the served name at once. The filters read the stored spelling,
+/// chain data as of the publication, so `q` and `match=contains` miss the name until Project
+/// publishes the observing block, which respells the row.
+#[tokio::test]
+async fn a_label_revealed_above_the_publication_is_matched_from_the_next_publication() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let paging = seed_bound_paging(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?page_size=50");
+    assert_first_is_listed_textless(&database, &uri).await?;
+    insert_family_label_preimage(&database.pool, b"first").await?;
+    let mut event = family_event(
+        "listing-first-label",
+        Some(&paging.first),
+        None,
+        "PreimageObserved",
+        "ens_v1_registry_l1",
+        241,
+        0,
+        json!({"labelhash": paging.first_labelhash}),
+    );
+    event.before_state = json!({});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    assert!(
+        listing_page_names(&database, &uri)
+            .await?
+            .contains(&"first.alpha.eth".to_owned())
+    );
+    assert_eq!(first_matched(&database, &uri).await?, [false, false]);
+    publish_test_families(&database, 241).await?;
+    assert_eq!(
+        stored_first_name(&database, &paging.first).await?,
+        "first.alpha.eth"
+    );
+    assert!(
+        listing_page_names(&database, &uri)
+            .await?
+            .contains(&"first.alpha.eth".to_owned())
+    );
+    assert_eq!(first_matched(&database, &uri).await?, [true, true]);
+    database.cleanup().await
+}
+
+/// Gives the label `raw` a preimage as the rainbow import writes it: no block observed it.
+async fn import_label_preimage(database: &TestDatabase, raw: &[u8]) -> Result<()> {
+    let labelhash = insert_family_label_preimage(&database.pool, raw).await?;
+    sqlx::query(
+        "UPDATE label_preimages SET source_kind = 'ens_rainbow_import' WHERE labelhash = $1",
+    )
+    .bind(labelhash)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+/// An imported preimage is shown in the served name and never matched: no block observed it, so
+/// no publication respells the stored row. How filters and order learn an imported spelling is
+/// TYR-373's to settle before an import runs on a served database.
+#[tokio::test]
+async fn an_imported_preimage_is_shown_and_never_matched() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let paging = seed_bound_paging(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?page_size=50");
+    assert_first_is_listed_textless(&database, &uri).await?;
+    import_label_preimage(&database, b"first").await?;
+    for published in [false, true] {
+        if published {
+            publish_test_families(&database, 241).await?;
+        }
+        assert!(
+            listing_page_names(&database, &uri)
+                .await?
+                .contains(&"first.alpha.eth".to_owned()),
+            "published {published}"
+        );
+        assert_eq!(
+            first_matched(&database, &uri).await?,
+            [false, false],
+            "published {published}"
+        );
+        assert!(
+            is_textless_first(&stored_first_name(&database, &paging.first).await?),
+            "published {published}"
+        );
+    }
+    database.cleanup().await
+}
+
+/// `sort=name` orders by the stored spelling. An imported preimage of `first` heals the served
+/// name of every name below `[first].alpha.eth`, and `alpha.eth` sorts between the stored and
+/// the healed spelling: each name keeps its stored place, a one-row cursor walk in either order
+/// neither skips nor repeats one, and the full read, which sorts the served names, orders them
+/// otherwise.
+#[tokio::test]
+async fn sort_by_name_keeps_the_stored_order_across_a_healed_label() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let textless = seed_textless_fixture(&database, true).await?;
+    let base = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name");
+    let before = listing_page_names(&database, &format!("{base}&page_size=50")).await?;
+    import_label_preimage(&database, b"first").await?;
+    let page = listing_page_names(&database, &format!("{base}&page_size=50")).await?;
+    assert!(page.contains(&"first.alpha.eth".to_owned()), "{page:?}");
+    assert!(page.contains(&"alpha.eth".to_owned()), "{page:?}");
+    let bracket = tl_bracket(&textless.first);
+    let stored: Vec<String> = page
+        .iter()
+        .map(|name| {
+            name.split('.')
+                .map(|label| {
+                    if label == "first" {
+                        bracket.as_str()
+                    } else {
+                        label
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+        .collect();
+    assert_eq!(stored, before);
+    let asc = listing_walk_names(&database, &format!("{base}&page_size=1")).await?;
+    assert_eq!(asc, page);
+    let mut desc = listing_walk_names(&database, &format!("{base}&order=desc&page_size=1")).await?;
+    desc.reverse();
+    assert_eq!(desc, page);
+    let full = listing_oracle(walk_all_pages(&database, &format!("{base}&page_size=50"))).await?;
+    let full = listing_names(&listing_rows(&full));
+    assert_ne!(full, page, "the healed spelling sorts elsewhere");
+    let (mut full_sorted, mut page_sorted) = (full.clone(), page.clone());
+    full_sorted.sort();
+    page_sorted.sort();
+    assert_eq!(full_sorted, page_sorted);
+    database.cleanup().await
+}

@@ -4,17 +4,18 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
+use bigname_domain::normalization::normalize_name;
 use serde_json::json;
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::statement::{FENCE, Read, Row};
+use super::statement::{Read, Row, fence};
 use crate::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
     families::{
         name::{
             FamilyPublication,
-            rendered::{bracketed_label, rendered_name_sql},
+            rendered::{bracketed_label, composed_surface_sql, rendered_name_sql},
         },
         topology::{RegistryChildRow, load_owned_registry_children},
     },
@@ -187,7 +188,7 @@ async fn registration_relations(
          WHERE",
     );
     read.push_filters(&mut builder, "l");
-    builder.push(FENCE);
+    builder.push(fence());
     builder.push(" GROUP BY l.chain_id, l.resource_id");
     let rows: Vec<(String, Uuid, bool, bool, bool)> = builder
         .build_query_as()
@@ -244,8 +245,11 @@ async fn registry_children(
     Ok(children)
 }
 
-/// The served name of each entry whose stored name spells a label as `[labelhash]`: the name
-/// rendered from every usable preimage, as the composed reads serve it (`rendered::enrich`).
+/// The served name of each entry whose stored name spells a label as `[labelhash]`, read from
+/// the name's surface now, as the composed reads serve it: raw bytes observed since the
+/// publication give the normalized name and display name the compositor derives from them, and a
+/// surface still without bytes gives the name rendered from every usable preimage
+/// (`rendered::enrich`). Only the served text changes. The sort position stays the stored one.
 async fn enrich(conn: &mut PgConnection, entries: &mut [AddressNameCurrentEntry]) -> Result<()> {
     let ids: Vec<String> = entries
         .iter()
@@ -261,23 +265,38 @@ async fn enrich(conn: &mut PgConnection, entries: &mut [AddressNameCurrentEntry]
     if ids.is_empty() {
         return Ok(());
     }
-    let names: HashMap<String, String> = sqlx::query_as::<_, (String, String)>(&format!(
+    let rows = sqlx::query_as::<_, (String, Option<String>, String)>(&format!(
         "/* storage:address_names.listing_rendered_names */
-         SELECT surface.logical_name_id, {name}
+         SELECT surface.logical_name_id, surface.raw_name, {name}
          FROM bigname_phase.name_surfaces surface
-         WHERE surface.logical_name_id = ANY($1::text[]) AND surface.raw_name IS NULL",
-        name = rendered_name_sql("surface")
+         WHERE surface.logical_name_id = ANY($1::text[]) AND {composed}",
+        name = rendered_name_sql("surface"),
+        composed = composed_surface_sql("surface")
     ))
     .bind(&ids)
     .fetch_all(&mut *conn)
     .await
-    .context("failed to render the listed names of surfaces without raw bytes")?
-    .into_iter()
-    .collect();
+    .context("failed to read the current names of listed surfaces")?;
+    let mut names: HashMap<String, (String, String)> = HashMap::with_capacity(rows.len());
+    for (id, raw_name, rendered) in rows {
+        let served = match raw_name {
+            Some(raw_name) => {
+                let normalized = normalize_name(&raw_name).with_context(|| {
+                    format!("listed name surface {id} has an unreadable active raw_name")
+                })?;
+                (
+                    normalized.canonical_display_name,
+                    normalized.normalized_name,
+                )
+            }
+            None => (rendered.clone(), rendered),
+        };
+        names.insert(id, served);
+    }
     for entry in entries {
-        if let Some(name) = names.get(&entry.logical_name_id) {
-            entry.canonical_display_name.clone_from(name);
-            entry.normalized_name.clone_from(name);
+        if let Some((display, normalized)) = names.get(&entry.logical_name_id) {
+            entry.canonical_display_name.clone_from(display);
+            entry.normalized_name.clone_from(normalized);
         }
     }
     Ok(())
