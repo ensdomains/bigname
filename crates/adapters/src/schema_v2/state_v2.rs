@@ -380,23 +380,23 @@ impl State {
         token_id: &str,
         event: &crate::schema_v2::model::PriorEventInput,
     ) {
-        let after = &event.after_state;
         if let (Some(resource_id), Some(upstream_resource)) = (
             event.resource_id,
-            after.get("upstream_resource").and_then(Value::as_str),
+            event
+                .after_state
+                .get("upstream_resource")
+                .and_then(Value::as_str),
         ) {
-            // A row naming no lineage keeps the one the token holds for the same resource.
-            let held = self.v2_tokens.get(&v2_key(emitter, token_id));
-            let held = held.filter(|token| token.resource_id == Some(resource_id));
-            let held = held.and_then(|token| token.token_lineage_id);
-            let named = after.get("token_lineage_id").and_then(Value::as_str);
-            let named = named.and_then(|value| Uuid::parse_str(value).ok());
             self.attach_v2_unbound_resource(
                 emitter,
                 token_id,
                 upstream_resource.to_owned(),
                 resource_id,
-                named.or(held),
+                event
+                    .after_state
+                    .get("token_lineage_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok()),
             );
         }
     }
