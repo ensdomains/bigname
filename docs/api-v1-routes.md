@@ -3612,11 +3612,18 @@ introduces it rebuilds Project from full history before serving the option; see
   per name and address the relations hold, so a page reads about as many names as
   it returns whatever the address holds, and the total counts the stored rows
   without composing any name. A name whose surface or registration a reorg has
-  since taken off readable lineage leaves the page at once but stays in the total
-  until the next publication. Names with equal sort values list in name id order,
-  and `order=desc` lists exactly the reverse of `order=asc`.
+  since taken off readable lineage, or whose surface Interpret has since
+  shadowed, leaves the page at once but stays in the total until the next
+  publication. Names with equal sort values list in name id order, and
+  `order=desc` lists exactly the reverse of `order=asc`. A descending cursor
+  issued before this ordering is refused with `400 invalid_input`.
   The flag changes no row, order or cursor and does not bind cursors, so a
   client can request it on the first page only.
+  The `q`, `match` and `parent` filters and `sort=name` use the spelling bigname
+  had from chain data at the latest publication. A label or name the chain
+  reveals later is shown at once, and is matched and ordered from the next
+  publication. A label known only from an imported preimage is shown, and is not
+  matched or ordered by.
   `owner` also lists names with no token for their registry owner, such as
   unwrapped subnames and registry children with no lease, so `relation=owner&dedupe=registration`
   counts those as well. For the registrations an address holds, add
