@@ -717,3 +717,209 @@ async fn the_former_page_walks_the_former_index() -> Result<()> {
     }
     database.cleanup().await
 }
+
+// Review findings on 24bc4ada3, red before their fix.
+
+/// The filter key a descending ownership cursor binds its tie order under.
+const LISTING_TIE_ORDER_KEY: &str = "tie_order";
+
+/// The next cursor of `uri`'s first page, decoded.
+async fn listing_next_cursor(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<crate::v2::CursorPayload> {
+    let page = v2_address_names_payload_for_database(database, uri).await?;
+    let cursor = page["page"]["next_cursor"]
+        .as_str()
+        .context("a next cursor")?;
+    crate::v2::decode(cursor).ok().context("the cursor decodes")
+}
+
+/// C-D1: a descending cursor in the shape the reader before this change issued (no tie-order
+/// key) is refused, for every sort: it was issued under ascending ties.
+#[tokio::test]
+async fn a_descending_cursor_without_the_tie_order_is_refused() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 7).await?;
+    for sort in ["name", "expires_at", "registered_at", "created_at"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order=desc&page_size=2");
+        let mut payload = listing_next_cursor(&database, &uri).await?;
+        payload.filters.remove(LISTING_TIE_ORDER_KEY);
+        let old = crate::v2::encode(&payload);
+        let (status, body) =
+            bulk_listing_response(&database, &format!("{uri}&cursor={old}")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{sort}: {body}");
+    }
+    database.cleanup().await
+}
+
+/// C-D2: an ascending cursor keeps the shape it had before this change and continues.
+#[tokio::test]
+async fn an_ascending_cursor_keeps_its_shape_and_continues() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 7).await?;
+    for sort in ["name", "expires_at", "registered_at", "created_at"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&page_size=2");
+        let payload = listing_next_cursor(&database, &uri).await?;
+        assert!(
+            !payload.filters.contains_key(LISTING_TIE_ORDER_KEY),
+            "{sort}: {:?}",
+            payload.filters
+        );
+        assert_listing_matches_the_full_read(&database, &uri).await?;
+    }
+    database.cleanup().await
+}
+
+/// C-D3: a descending cursor the listing issues binds its tie order and walks the exact reverse
+/// of ascending.
+#[tokio::test]
+async fn a_descending_cursor_binds_its_tie_order() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 7).await?;
+    for sort in ["name", "expires_at", "registered_at", "created_at"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order=desc&page_size=2");
+        let payload = listing_next_cursor(&database, &uri).await?;
+        assert!(
+            payload.filters.contains_key(LISTING_TIE_ORDER_KEY),
+            "{sort}: {:?}",
+            payload.filters
+        );
+        assert_listing_matches_the_full_read(&database, &uri).await?;
+    }
+    database.cleanup().await
+}
+
+/// Gives the textless `first.alpha.eth` of the bound-paging fixture raw bytes witnessed at 241,
+/// above the published 240, as Interpret does in place; `visible` false gives it bytes that
+/// fail normalization, which shadow the surface.
+async fn observe_first_raw_name(database: &TestDatabase, first: &str, visible: bool) -> Result<()> {
+    let labels = if visible {
+        ["first", "alpha", "eth"]
+    } else {
+        ["FIRST", "alpha", "eth"]
+    };
+    let mut dns = Vec::new();
+    for label in labels {
+        dns.push(u8::try_from(label.len())?);
+        dns.extend(label.as_bytes());
+    }
+    dns.push(0);
+    let witness = "listing-first-preimage";
+    sqlx::query(
+        "UPDATE name_surfaces SET raw_name = $2, raw_labels = $3, dns_encoded_name = $4,
+             preimage_event_identity = $5
+         WHERE logical_name_id = $1 AND raw_name IS NULL",
+    )
+    .bind(first)
+    .bind(labels.join("."))
+    .bind(labels.map(str::to_owned).to_vec())
+    .bind(&dns)
+    .bind(witness)
+    .execute(&database.pool)
+    .await?;
+    if !visible {
+        sqlx::query(
+            "UPDATE name_surfaces SET visibility_state = 'shadow',
+                 normalization_errors = '[{\"error\": \"label is not normalized\"}]',
+                 deactivation_reason = 'normalization_gate', deactivated_at = to_timestamp(1700000241)
+             WHERE logical_name_id = $1",
+        )
+        .bind(first)
+        .execute(&database.pool)
+        .await?;
+    }
+    let mut observed = family_event(
+        witness,
+        Some(first),
+        None,
+        "PreimageObserved",
+        "ens_v1_registry_l1",
+        241,
+        0,
+        json!({"raw_labels": labels}),
+    );
+    observed.before_state = json!({});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[observed]).await?;
+    Ok(())
+}
+
+/// The owner's page lists the textless name under its placeholder.
+async fn assert_first_is_listed_textless(database: &TestDatabase, uri: &str) -> Result<()> {
+    let page = v2_address_names_payload_for_database(database, uri).await?;
+    let names = listing_names(&listing_rows(std::slice::from_ref(&page)));
+    assert!(
+        names
+            .iter()
+            .any(|name| name.ends_with(".alpha.eth") && name.starts_with('[')),
+        "precondition, the textless name is listed: {names:?}"
+    );
+    Ok(())
+}
+
+/// 4522787155: a raw name Interpret observes above the publication shows on the page at once, as
+/// the full read shows it, until Project publishes the block.
+#[tokio::test]
+async fn a_raw_name_observed_above_the_publication_shows_on_the_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let paging = seed_bound_paging(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?page_size=50");
+    assert_first_is_listed_textless(&database, &uri).await?;
+    observe_first_raw_name(&database, &paging.first, true).await?;
+    let page = v2_address_names_payload_for_database(&database, &uri).await?;
+    let full = listing_oracle(v2_address_names_payload_for_database(&database, &uri)).await?;
+    assert_eq!(page_body(&page), page_body(&full), "{uri}");
+    assert!(
+        listing_names(&listing_rows(std::slice::from_ref(&page)))
+            .contains(&"first.alpha.eth".to_owned()),
+        "{page}"
+    );
+    database.cleanup().await
+}
+
+/// 4522787170: bytes observed above the publication that fail normalization shadow the surface.
+/// The full read drops the name at once, and so does the page.
+#[tokio::test]
+async fn a_name_shadowed_above_the_publication_leaves_the_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let paging = seed_bound_paging(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?page_size=50");
+    assert_first_is_listed_textless(&database, &uri).await?;
+    observe_first_raw_name(&database, &paging.first, false).await?;
+    let page = v2_address_names_payload_for_database(&database, &uri).await?;
+    let full = listing_oracle(v2_address_names_payload_for_database(&database, &uri)).await?;
+    assert_eq!(page["data"], full["data"], "{uri}");
+    database.cleanup().await
+}
+
+/// 4522787131: a label known only from `label_preimages` (an import, or a chain observation
+/// Project has not published) shows in the served name. The full read filters and sorts by the
+/// served name; the listing by its stored spelling.
+#[tokio::test]
+async fn a_label_known_only_from_its_preimage_is_filtered_by_the_served_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bound_paging(&database).await?;
+    let base = format!("/v1/addresses/{RC_OWNER}/names?page_size=50");
+    assert_first_is_listed_textless(&database, &base).await?;
+    insert_family_label_preimage(&database.pool, b"first").await?;
+    let mut red = Vec::new();
+    for query in [
+        "&q=first",
+        "&q=irst&match=contains",
+        "&parent=alpha.eth",
+        "&sort=name",
+    ] {
+        let uri = format!("{base}{query}");
+        let page = v2_address_names_payload_for_database(&database, &uri).await?;
+        let full = listing_oracle(v2_address_names_payload_for_database(&database, &uri)).await?;
+        if page["data"] != full["data"] {
+            red.push(format!(
+                "{query}: listing {:?} full {:?}",
+                listing_names(&listing_rows(std::slice::from_ref(&page))),
+                listing_names(&listing_rows(std::slice::from_ref(&full)))
+            ));
+        }
+    }
+    assert!(red.is_empty(), "{red:#?}");
+    database.cleanup().await
+}
