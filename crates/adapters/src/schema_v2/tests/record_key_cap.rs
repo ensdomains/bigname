@@ -418,11 +418,11 @@ fn a_multibyte_text_key_is_measured_in_bytes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `count` distinct four-letter labels: `aaaa`, `aaab`, and so on.
+/// `count` distinct ten-letter labels: `aaaaaaaaaa`, `aaaaaaaaab`, and so on.
 fn distinct_labels(count: usize) -> Vec<Vec<u8>> {
     (0..count)
         .map(|index| {
-            (0..4_u32)
+            (0..10_u32)
                 .rev()
                 .map(|place| b"abcdefghijklmnopqrstuvwxyz"[index / 26_usize.pow(place) % 26])
                 .collect()
@@ -432,17 +432,19 @@ fn distinct_labels(count: usize) -> Vec<Vec<u8>> {
 
 /// An ENSv2 resolver's `NamedResource` names a resource by a DNS-encoded name of any length,
 /// from any address. The name builds no record key, so the cap never reads it, and no column a
-/// btree index reads carries the whole name. One log of 4,000 distinct labels is observed whole.
+/// btree index reads carries the whole name. One log of 300 distinct labels, more than the 127 a
+/// 255-byte DNS name can hold, in a DNS-encoded name of 3,301 bytes, longer than one btree index
+/// row holds, is observed whole.
 #[test]
 fn a_long_dns_name_from_a_named_resource_is_observed_and_stored_whole() -> anyhow::Result<()> {
-    let labels = distinct_labels(4_000);
+    let labels = distinct_labels(300);
     let mut name = Vec::new();
     for label in &labels {
         name.push(u8::try_from(label.len())?);
         name.extend_from_slice(label);
     }
     name.push(0);
-    assert_eq!(name.len(), 20_001);
+    assert_eq!(name.len(), 3_301);
     let output = interpret_logs(
         manifest(
             4157,
@@ -479,11 +481,11 @@ fn a_long_dns_name_from_a_named_resource_is_observed_and_stored_whole() -> anyho
         crate::schema_v2::common::namehash_raw(labels.iter().map(Vec::as_slice))
     );
     assert_eq!(surface.visibility_state, "active");
-    assert_eq!(surface.labelhashes.len(), 4_000);
+    assert_eq!(surface.labelhashes.len(), 300);
     let raw = surface.raw.as_ref().expect("the whole name is retained");
-    assert_eq!(raw.raw_labels.len(), 4_000);
-    assert_eq!(raw.raw_name.len(), 19_999);
-    assert_eq!(raw.dns_encoded_name.len(), 20_001);
-    assert_eq!(output.label_preimages.len(), 4_000);
+    assert_eq!(raw.raw_labels.len(), 300);
+    assert_eq!(raw.raw_name.len(), 3_299);
+    assert_eq!(raw.dns_encoded_name.len(), 3_301);
+    assert_eq!(output.label_preimages.len(), 300);
     Ok(())
 }

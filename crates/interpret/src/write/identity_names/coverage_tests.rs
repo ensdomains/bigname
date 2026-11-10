@@ -370,7 +370,10 @@ mod long_resolver_dns_name {
 
     use alloy_primitives::U256;
     use alloy_sol_types::{SolEvent, sol};
-    use bigname_adapters::schema_v2::{BatchInput, ManifestInput, RawBlockInput, RawLogInput};
+    use bigname_adapters::schema_v2::{
+        BatchInput, ManifestInput, RawBlockInput, RawLogInput,
+        seam::PREIMAGE_OBSERVATION_EVENT_KIND,
+    };
     use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
     use bigname_test_support::fixture_logs::interpret_checked;
     use time::OffsetDateTime;
@@ -424,7 +427,7 @@ mod long_resolver_dns_name {
                             "name": "NamedResource",
                             "fragment": "event NamedResource(uint256 indexed resource, bytes name)",
                             "emitter_roles": [],
-                            "normalized_events": ["PreimageObserved"]
+                            "normalized_events": [PREIMAGE_OBSERVATION_EVENT_KIND]
                         }]
                     }
                 })
