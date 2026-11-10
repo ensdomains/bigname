@@ -360,11 +360,14 @@ async fn stored_higher_priority_keeps_source_and_refreshes_observed_time() -> Te
     Ok(())
 }
 
-/// An ENSv2 resolver's `NamedResource` log, from any address, names a resource by a DNS-encoded
-/// name of any length. One log of thousands of distinct labels is interpreted and written whole:
-/// one name surface and one preimage per label. The surface's raw name is over 2,000 bytes, so
-/// it gets no search document and no btree index reads it. Each test prints how long
-/// interpreting and writing the log took, and asserts nothing about it.
+/// The `NamedResource` event allows a DNS-encoded name of any length, as unbounded `bytes`
+/// (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L521-L539 @ ens_v2@a971bd64).
+/// Interpret selects it from any emitting address (`is_match_all` in the adapter's
+/// `protocol.rs`), so an arbitrary contract can emit it. These tests give Interpret one such log
+/// of thousands of distinct labels. It is interpreted and written whole: one name surface and one
+/// preimage per label. The surface's raw name is over 2,000 bytes, so it gets no search document
+/// and no btree index reads it. Each test prints how long interpreting and writing the log took,
+/// and asserts nothing about it.
 mod long_resolver_dns_name {
     use std::time::Instant;
 

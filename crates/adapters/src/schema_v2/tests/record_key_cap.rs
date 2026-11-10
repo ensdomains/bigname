@@ -430,11 +430,13 @@ fn distinct_labels(count: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// An ENSv2 resolver's `NamedResource` names a resource by a DNS-encoded name of any length,
-/// from any address. The name builds no record key, so the cap never reads it, and no column a
-/// btree index reads carries the whole name. One log of 300 distinct labels, more than the 127 a
-/// 255-byte DNS name can hold, in a DNS-encoded name of 3,301 bytes, longer than one btree index
-/// row holds, is observed whole.
+/// The `NamedResource` event allows a DNS-encoded name of any length, as unbounded `bytes`
+/// (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L521-L539 @ ens_v2@a971bd64).
+/// Interpret selects it from any emitting address (`is_match_all` in `protocol.rs`), so an
+/// arbitrary contract can emit it. The name builds no record key, so the cap never reads it, and
+/// no column a btree index reads carries the whole name. One log of 300 distinct labels, more than
+/// the 127 a 255-byte DNS name can hold, in a DNS-encoded name of 3,301 bytes, longer than one
+/// btree index row holds, is observed whole.
 #[test]
 fn a_long_dns_name_from_a_named_resource_is_observed_and_stored_whole() -> anyhow::Result<()> {
     let labels = distinct_labels(300);
