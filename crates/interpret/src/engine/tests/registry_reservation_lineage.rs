@@ -675,3 +675,265 @@ async fn reserved_then_registered_same_batch_keeps_one_lineage() -> TestResult {
     database.cleanup().await?;
     Ok(())
 }
+
+/// A label the registry did not reserve.
+const OTHER_LABEL: &str = "other";
+
+/// The reserved label's token id registered under another label. Nothing in the log ties the
+/// token id to the label hash, so a registry with its own bytecode can emit it.
+fn other_label_registered_log() -> alloy_primitives::LogData {
+    LabelRegistered {
+        tokenId: reserved_token(),
+        labelHash: keccak256(OTHER_LABEL.as_bytes()),
+        label: OTHER_LABEL.to_owned(),
+        owner: owner(),
+        expiry: LIVE_EXPIRY,
+        sender: owner(),
+    }
+    .encode_log_data()
+}
+
+/// The token's resource word, as a transfer's `upstream_resource` names it.
+fn token_word() -> String {
+    format!("{:#066x}", reserved_token())
+}
+
+/// The resource and token lineage the registration `LabelRegistered` produced in `block` names.
+async fn registration_identity(
+    pool: &PgPool,
+    block: i64,
+) -> TestResult<(Option<Uuid>, Option<Uuid>)> {
+    let (resource, lineage): (Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT resource_id, after_state ->> $3 FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2 AND event_kind = 'RegistrationGranted'
+           AND after_state ->> 'source_event' = 'LabelRegistered'
+           AND after_state ->> 'derived_from' IS NULL",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .bind(TOKEN_LINEAGE_ID_KEY)
+    .fetch_one(pool)
+    .await?;
+    Ok((
+        resource,
+        lineage.as_deref().map(Uuid::parse_str).transpose()?,
+    ))
+}
+
+/// The resource, upstream resource word and token lineage the one transfer in `block` names.
+async fn transfer_identity(
+    pool: &PgPool,
+    block: i64,
+) -> TestResult<(Option<Uuid>, Option<String>, Option<Uuid>)> {
+    let (resource, upstream, lineage): (Option<Uuid>, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT resource_id, after_state ->> 'upstream_resource', after_state ->> $3
+             FROM normalized_events
+             WHERE chain_id = $1 AND block_number = $2 AND event_kind = $4",
+        )
+        .bind(CHAIN)
+        .bind(block)
+        .bind(TOKEN_LINEAGE_ID_KEY)
+        .bind(TOKEN_CONTROL_TRANSFERRED_EVENT_KIND)
+        .fetch_one(pool)
+        .await?;
+    Ok((
+        resource,
+        upstream,
+        lineage.as_deref().map(Uuid::parse_str).transpose()?,
+    ))
+}
+
+/// The first block: the registry announces itself, links the token to its resource with
+/// `TokenResource`, then registers the token's label to the owner and mints the token.
+fn link_then_register_logs() -> Vec<alloy_primitives::LogData> {
+    vec![
+        RegistryCreated {}.encode_log_data(),
+        token_resource_log(),
+        registered_log(),
+        mint_log(),
+    ]
+}
+
+/// A registry with its own bytecode can link a token to its resource before it registers the
+/// token's label. Nothing unbinds the resource, so the registration keeps it and so does the
+/// transfer after it. The deployed registry emits `TokenResource` after `LabelRegistered`, in
+/// the same call.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L472 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn token_resource_before_label_keeps_the_resource_in_one_batch() -> TestResult {
+    let database = sepolia_database("interpret_link_before_label_one_batch").await?;
+    let pool = database.pool();
+    let mut logs = link_then_register_logs();
+    logs.push(transfer_log(reserved_token()));
+    insert_block(pool, FIRST, ANNOUNCED_REGISTRY, logs).await?;
+    Engine::new(pool.clone())
+        .run_batch(request(FIRST, FIRST, None))
+        .await?;
+
+    let (resource, lineage) = drafted_identity(pool, "TokenResourceLinked").await?;
+    assert_eq!(
+        registration_identity(pool, FIRST).await?,
+        (Some(resource), Some(lineage)),
+        "the registration keeps the linked resource and lineage"
+    );
+    assert_eq!(
+        transfer_identity(pool, FIRST).await?,
+        (Some(resource), Some(token_word()), Some(lineage)),
+        "the transfer names the linked resource and lineage"
+    );
+    assert_one_lineage(pool, resource, lineage).await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The same logs with a restore before the transfer. The restore keeps the resource the link
+/// attached, so the transfer names what the one-batch run names.
+async fn token_resource_before_label_keeps_the_resource_across_a_reload(
+    loader: Loader,
+) -> TestResult {
+    let prefix = format!("interpret_link_before_label_reload_{}", loader.name());
+    let database = sepolia_database(&prefix).await?;
+    let pool = database.pool();
+    insert_block(pool, FIRST, ANNOUNCED_REGISTRY, link_then_register_logs()).await?;
+    insert_block(
+        pool,
+        SECOND,
+        ANNOUNCED_REGISTRY,
+        vec![transfer_log(reserved_token())],
+    )
+    .await?;
+    run_each_block(pool, loader, &[FIRST, SECOND]).await?;
+
+    let (resource, lineage) = drafted_identity(pool, "TokenResourceLinked").await?;
+    assert_eq!(
+        transfer_identity(pool, SECOND).await?,
+        (Some(resource), Some(token_word()), Some(lineage)),
+        "the transfer after the restore names the linked resource and lineage"
+    );
+    assert_one_lineage(pool, resource, lineage).await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn token_resource_before_label_keeps_the_resource_across_a_lookahead_reload() -> TestResult {
+    token_resource_before_label_keeps_the_resource_across_a_reload(Loader::Lookahead).await
+}
+
+#[tokio::test]
+async fn token_resource_before_label_keeps_the_resource_across_a_full_state_reload() -> TestResult {
+    token_resource_before_label_keeps_the_resource_across_a_reload(Loader::FullState).await
+}
+
+/// The link in one batch and the label in the next. The registration is interpreted from the
+/// restored link and keeps its resource.
+#[tokio::test]
+async fn token_resource_a_batch_before_its_label_keeps_the_resource() -> TestResult {
+    let database = sepolia_database("interpret_link_a_batch_before_label").await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        ANNOUNCED_REGISTRY,
+        vec![RegistryCreated {}.encode_log_data(), token_resource_log()],
+    )
+    .await?;
+    insert_block(
+        pool,
+        SECOND,
+        ANNOUNCED_REGISTRY,
+        vec![registered_log(), mint_log()],
+    )
+    .await?;
+    insert_block(
+        pool,
+        THIRD,
+        ANNOUNCED_REGISTRY,
+        vec![transfer_log(reserved_token())],
+    )
+    .await?;
+    run_each_block(pool, Loader::Lookahead, &[FIRST, SECOND, THIRD]).await?;
+
+    let (resource, lineage) = drafted_identity(pool, "TokenResourceLinked").await?;
+    assert_eq!(
+        registration_identity(pool, SECOND).await?,
+        (Some(resource), Some(lineage)),
+        "the registration keeps the restored link's resource and lineage"
+    );
+    assert_eq!(
+        transfer_identity(pool, THIRD).await?,
+        (Some(resource), Some(token_word()), Some(lineage)),
+        "the transfer names the linked resource and lineage"
+    );
+    assert_one_lineage(pool, resource, lineage).await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Registering the reserved token id under another label does not keep the reservation's
+/// resource, in one batch or across restores.
+async fn token_registered_under_another_label_drops_the_reserved_resource(
+    reload: bool,
+) -> TestResult {
+    let prefix = format!("interpret_other_label_drops_reservation_{reload}");
+    let database = sepolia_database(&prefix).await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        ANNOUNCED_REGISTRY,
+        vec![
+            RegistryCreated {}.encode_log_data(),
+            reserved_log(LIVE_EXPIRY),
+        ],
+    )
+    .await?;
+    insert_block(
+        pool,
+        SECOND,
+        ANNOUNCED_REGISTRY,
+        vec![other_label_registered_log(), mint_log()],
+    )
+    .await?;
+    insert_block(
+        pool,
+        THIRD,
+        ANNOUNCED_REGISTRY,
+        vec![transfer_log(reserved_token())],
+    )
+    .await?;
+    if reload {
+        run_each_block(pool, Loader::Lookahead, &[FIRST, SECOND, THIRD]).await?;
+    } else {
+        Engine::new(pool.clone())
+            .run_batch(request(FIRST, THIRD, None))
+            .await?;
+    }
+
+    reservation_identity(pool).await?;
+    assert_eq!(
+        registration_identity(pool, SECOND).await?,
+        (None, None),
+        "the registration under another label names no resource"
+    );
+    assert_eq!(
+        transfer_identity(pool, THIRD).await?,
+        (None, None, None),
+        "the transfer names no resource"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn token_registered_under_another_label_drops_the_reserved_resource_in_one_batch()
+-> TestResult {
+    token_registered_under_another_label_drops_the_reserved_resource(false).await
+}
+
+#[tokio::test]
+async fn token_registered_under_another_label_drops_the_reserved_resource_across_a_reload()
+-> TestResult {
+    token_registered_under_another_label_drops_the_reserved_resource(true).await
+}
