@@ -70,7 +70,9 @@ async fn v2_published_bindings_survive_later_interpret_closures() -> Result<()> 
     .await?;
     assert_eq!(generation_after, generation_before);
 
-    // Keeping the selected binding does not bypass fork invalidation.
+    // An orphaned binding hides the name from the resolution read at once. The ownership read
+    // serves the stored listing, which checks the name and its resource but not the binding, so
+    // the name stays listed until Project's undo rewrites its row.
     sqlx::query(
         "UPDATE surface_bindings SET canonicality_state='orphaned' WHERE surface_binding_id=$1",
     )
@@ -79,7 +81,7 @@ async fn v2_published_bindings_survive_later_interpret_closures() -> Result<()> 
     .await?;
     let ownership = v2_address_names_payload_for_database(&database, &routes[0]).await?;
     let resolution = v2_address_names_payload_for_database(&database, &routes[1]).await?;
-    assert!(!names(ownership["data"].as_array().expect("names")).contains(&"alpha.eth"));
+    assert!(names(ownership["data"].as_array().expect("names")).contains(&"alpha.eth"));
     assert!(!names(resolution["data"].as_array().expect("names")).contains(&"alpha.eth"));
     database.cleanup().await
 }

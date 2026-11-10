@@ -48,7 +48,7 @@ pub(crate) async fn load_stored_current_anchors(
     let mut snapshot = read_snapshot(pool).await?;
     let statement = || stored_statement(&address, namespace, wanted(relations), published);
     #[cfg(any(test, feature = "test-support"))]
-    super::statement::explain(&mut *snapshot, "anchors", || Ok(statement())).await?;
+    super::statement::explain(&mut snapshot, "anchors", || Ok(statement())).await?;
     let rows: Vec<(String, String, Uuid, bool)> = statement()
         .build_query_as()
         .fetch_all(&mut *snapshot)

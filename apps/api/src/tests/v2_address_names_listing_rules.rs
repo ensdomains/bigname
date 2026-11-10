@@ -212,7 +212,15 @@ async fn a_cursor_survives_a_write_between_pages() -> Result<()> {
     let cursor = first["page"]["next_cursor"].as_str().expect("a cursor");
     restore_listing_rows(&database).await?;
     stash_listing_rows(&database, &bulk_name_filter(&[6])?).await?;
-    let names = listing_walk_names(&database, &format!("{uri}&cursor={cursor}")).await?;
+    let mut names = Vec::new();
+    let mut cursor = Some(cursor.to_owned());
+    while let Some(after) = cursor {
+        let page = listing_read(&database, &format!("{uri}&cursor={after}"))
+            .await?
+            .payload;
+        names.extend(listing_names(&listing_rows(std::slice::from_ref(&page))));
+        cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+    }
     assert_eq!(names.len(), 5, "{names:?}");
     assert_eq!(names[0], format!("{}.eth", bulk_label(7)), "{names:?}");
     for gone in [4, 6] {

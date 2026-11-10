@@ -57,7 +57,7 @@ pub async fn load_address_former_owner_page(
         .collect();
     let statement = || former_statement(&address, &chains, filter, order, after.as_ref(), size);
     #[cfg(any(test, feature = "test-support"))]
-    super::statement::explain(&mut *snapshot, "former_page", statement).await?;
+    super::statement::explain(&mut snapshot, "former_page", statement).await?;
     let mut held: Vec<Former> = statement()?
         .build_query_as()
         .fetch_all(&mut *snapshot)
