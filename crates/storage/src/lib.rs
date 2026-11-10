@@ -47,6 +47,8 @@ pub use expiry::contract_expiry_reason;
 pub use families::name::rendered as rendered_name;
 pub use unix_seconds::UnixSeconds;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use address_names::load_composed_address_anchors;
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
     AddressNamesCurrentCappedPage, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
@@ -63,6 +65,7 @@ pub use address_names::{
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations, load_address_records_current_evm_page,
     load_address_records_current_page, load_family_address_names_capped_page,
+    load_stored_address_anchors,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
