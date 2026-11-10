@@ -515,7 +515,7 @@ include!("tests/v2_address_names_bounded.rs");
 include!("tests/v2_address_names_role_summary_batch.rs");
 include!("tests/v2_address_names_walk_steps.rs");
 include!("tests/v2_address_names_listing.rs");
-include!("tests/v2_address_names_listing_reads.rs");
+include!("tests/v2_address_names_listing_rules.rs");
 include!("tests/v2_address_names_memory.rs");
 include!("tests/v2_history_permission_changes.rs");
 include!("tests/v2_address_resolves_to.rs");

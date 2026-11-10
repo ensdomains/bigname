@@ -3540,7 +3540,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_owner. Former owners accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. relation=former_owner accepts only omitted dedupe or dedupe=name; dedupe=registration returns 400 invalid_input. |
-| `include` | query | array of enum `counts`, `role_summary`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the candidate cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner. |
+| `include` | query | array of enum `counts`, `role_summary`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -3809,10 +3809,9 @@ introduces it rebuilds Project from full history before serving the option; see
   and `include=role_summary` apply as for the authority relations;
   `include=total_count` returns `400 invalid_input`.
   An address with more than 1,000 candidate names, the names that may serve
-  records through a resolver record holding the address, is paged as the
-  ownership relations page one above their cap: candidates are composed in
-  sort order, in growing batches, until later candidates can no longer change
-  the page. `sort=created_at` first composes every candidate a batch at a
+  records through a resolver record holding the address, is paged by composing
+  its candidates in sort order, in growing batches, until later candidates can
+  no longer change the page. `sort=created_at` first composes every candidate a batch at a
   time, so on an address with tens of thousands of such names it can reach the
   request deadline (`408 request_timeout`).
 - Response shape: `data` is an array of record-shaped rows with `name`,
