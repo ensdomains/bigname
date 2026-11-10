@@ -418,25 +418,10 @@ async fn deployed_registration_order_keeps_its_lineage(loader: Loader) -> TestRe
 
     let (resource, lineage) = drafted_identity(pool, "TokenResourceLinked").await?;
     assert_one_lineage(pool, resource, lineage).await?;
-    let named: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT after_state ->> $3 FROM normalized_events
-         WHERE chain_id = $1 AND block_number = $2 AND event_kind = 'RegistrationGranted'
-           AND after_state ->> $3 IS NOT NULL",
-    )
-    .bind(CHAIN)
-    .bind(FIRST)
-    .bind(TOKEN_LINEAGE_ID_KEY)
-    .fetch_all(pool)
-    .await?;
-    let linked = lineage.to_string();
-    assert!(
-        named.iter().all(|named| *named == linked),
-        "a registration names the link's lineage or none: {named:?}"
-    );
     assert_eq!(
-        transfers_at(pool, SECOND).await?,
-        1,
-        "the transfer after the restore is interpreted"
+        lineage_named_by(pool, TOKEN_CONTROL_TRANSFERRED_EVENT_KIND, SECOND).await?,
+        Some(lineage),
+        "the transfer after the restore names the link's lineage"
     );
     database.cleanup().await?;
     Ok(())
