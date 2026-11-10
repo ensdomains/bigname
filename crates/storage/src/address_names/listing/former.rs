@@ -51,7 +51,7 @@ pub async fn load_address_former_owner_page(
     }
     let mut snapshot = db.into().snapshot().await?;
     seams::note_address_name_path("listing");
-    let chains: Vec<String> = super::held_publications(&mut snapshot, &address)
+    let chains: Vec<String> = super::held_publications(&mut snapshot, &address, filter.namespace)
         .await?
         .into_keys()
         .collect();

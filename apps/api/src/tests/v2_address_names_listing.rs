@@ -701,32 +701,17 @@ async fn the_publication_check_reads_the_chains_the_address_has_rows_on() -> Res
     database.cleanup().await
 }
 
-/// An address with no rows has no chain to check, so the read checks every chain and answers
-/// stale while one is rebuilt, as it cannot tell an empty address from one being rebuilt.
-#[tokio::test]
-async fn the_publication_check_reads_every_chain_for_an_address_with_no_rows() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_listing_with_a_rebuilt_chain(&database).await?;
-    let (status, payload) = bulk_listing_response(
-        &database,
-        &format!("/v1/addresses/{LISTING_EMPTY_ADDRESS}/names?namespace=ens"),
-    )
-    .await?;
-    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
-    assert_eq!(payload["error"]["code"], json!("stale"), "{payload}");
-    database.cleanup().await
-}
-
-/// A stored row on a chain no family marker covers is not listed. The total is the stored
-/// count, which counts it: Project writes no such row (`assert_address_listing`).
-#[tokio::test]
-async fn a_row_on_a_chain_with_no_publication_is_not_served() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_bulk_address_names(&database, 5).await?;
+/// A copy of bulk name `index`'s listing row on `chain_id`, under a name of its own: Project
+/// writes no such row, so each test that seeds one says what it pins.
+async fn copy_bulk_listing_row(
+    database: &TestDatabase,
+    chain_id: &str,
+    index: usize,
+) -> Result<()> {
     let copied = sqlx::query(
         "INSERT INTO bigname_phase.project_address_listing
-         SELECT 'unmarked-chain', address, 'ens:listing-unmarked', namespace,
-                'aaa-unmarked.eth', 'aaa-unmarked.eth', 'aaa-unmarked.eth', 'eth', namehash,
+         SELECT $3, address, 'ens:listing-copied', namespace,
+                'aaa-copied.eth', 'aaa-copied.eth', 'aaa-copied.eth', 'eth', namehash,
                 resource_id, token_holder, effective_controller, role_holder, listed,
                 former_owner, registry_child, registry_parent_logical_name_id,
                 registration_lead, public_authority, migrated, expires_key, registered_key,
@@ -736,10 +721,38 @@ async fn a_row_on_a_chain_with_no_publication_is_not_served() -> Result<()> {
          WHERE address = $1 AND logical_name_id = $2",
     )
     .bind(BULK_ADDRESS)
-    .bind(bulk_logical_name_id(4)?)
+    .bind(bulk_logical_name_id(index)?)
+    .bind(chain_id)
     .execute(&database.pool)
     .await?;
     assert_eq!(copied.rows_affected(), 1);
+    Ok(())
+}
+
+/// A row in the request's namespace on a chain being rebuilt refuses the read, with the
+/// namespace named and without. The row is an `ens` row on the basenames chain, so the route's
+/// `ens` admission passes and the refusal is the listing's own check.
+#[tokio::test]
+async fn a_row_on_a_rebuilt_chain_refuses_the_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_listing_with_a_rebuilt_chain(&database).await?;
+    copy_bulk_listing_row(&database, "base-mainnet", 4).await?;
+    for query in ["?namespace=ens", ""] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names{query}");
+        let (status, payload) = bulk_listing_response(&database, &uri).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {payload}");
+        assert_eq!(payload["error"]["code"], json!("stale"), "{uri}: {payload}");
+    }
+    database.cleanup().await
+}
+
+/// A stored row on a chain no family marker covers is not listed. The total is the stored
+/// count, which counts it: Project writes no such row (`assert_address_listing`).
+#[tokio::test]
+async fn a_row_on_a_chain_with_no_publication_is_not_served() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 5).await?;
+    copy_bulk_listing_row(&database, "unmarked-chain", 4).await?;
     for query in [
         "page_size=10&include=total_count",
         "page_size=10",

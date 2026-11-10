@@ -5,8 +5,8 @@
 //! afterwards. The page, its total and the registry children it reloads read one snapshot.
 //!
 //! A page lists the rows of the chains whose publication the read holds. Those are the chains
-//! with a family marker on which the address has a row, or every chain with a marker when it has
-//! none (`held_publications`). A row the read filter would hide (its surface, the surface's
+//! with a family marker on which the address has a row in the request's namespace, and none when
+//! it has no such row (`held_publications`). A row the read filter would hide (its surface, the surface's
 //! block or its resource no longer canonical) stays out of the page; a registry child stands on
 //! its publication alone. The total is the stored count and applies no such fence.
 //!
@@ -32,7 +32,7 @@ use super::{AddressNamesPageRequest, load_family_address_names_capped_page};
 use crate::{
     AddressNamesCurrentCappedPage,
     families::{
-        name::{FamilyPublication, all_servable_publications, servable_publication},
+        name::{FamilyPublication, servable_publication},
         records::seams,
     },
 };
@@ -62,7 +62,7 @@ async fn listing_page(
     exact_total: bool,
 ) -> Result<AddressNamesCurrentCappedPage> {
     let address = request.address.to_ascii_lowercase();
-    let publications = held_publications(conn, &address).await?;
+    let publications = held_publications(conn, &address, request.namespace).await?;
     let chains: Vec<String> = publications.keys().cloned().collect();
     let read = statement::Read::new(request, &address, &chains);
     let page_size = usize::try_from(request.page_size).context("page_size does not fit")?;
@@ -102,9 +102,13 @@ async fn listing_page(
 }
 
 /// The publications a read of `address` holds: those of the chains with a family marker on which
-/// the address has a stored row, one primary-key probe a marker, refusing a chain that is not
-/// servable; or, when the address has no row, every marker's, so a read during a rebuild answers
-/// stale rather than empty. The page lists only these chains' rows.
+/// the address has a stored row in `namespace` (any namespace when it is `None`), one probe a
+/// marker, refusing a chain that is not servable. With no such row no chain is checked and the
+/// set is empty: the route's own namespace admission stands, and a marker of another chain
+/// cannot refuse the read. The page lists only these chains' rows.
+///
+/// The probe reads every row of the address, listed or not, so a former-only row makes the
+/// ownership read check its chain too, which only adds a refusal while that chain rebuilds.
 ///
 /// A chain with no marker holds no stored row: Project writes the marker in the transaction that
 /// writes a chain's first rows, and a schema-migration that deletes a chain's marker must delete
@@ -114,31 +118,27 @@ async fn listing_page(
 pub(super) async fn held_publications(
     conn: &mut PgConnection,
     address: &str,
+    namespace: Option<&str>,
 ) -> Result<BTreeMap<String, FamilyPublication>> {
     let chains: Vec<String> = sqlx::query_scalar(
         "/* storage:address_names.listing_chains */
          SELECT marker.chain_id FROM bigname_phase.project_family_marker marker
          WHERE EXISTS (SELECT 1 FROM bigname_phase.project_address_listing l
-                       WHERE l.chain_id = marker.chain_id AND l.address = $1)
+                       WHERE l.chain_id = marker.chain_id AND l.address = $1
+                         AND ($2::text IS NULL OR l.namespace = $2))
          ORDER BY marker.chain_id",
     )
     .bind(address)
+    .bind(namespace)
     .fetch_all(&mut *conn)
     .await
     .with_context(|| format!("failed to find the chains {address} has listed names on"))?;
-    let publications = if chains.is_empty() {
-        all_servable_publications(conn).await?
-    } else {
-        let mut publications = Vec::with_capacity(chains.len());
-        for chain_id in &chains {
-            publications.push(servable_publication(conn, chain_id).await?);
-        }
-        publications
-    };
-    Ok(publications
-        .into_iter()
-        .map(|publication| (publication.chain_id.clone(), publication))
-        .collect())
+    let mut publications = BTreeMap::new();
+    for chain_id in chains {
+        let publication = servable_publication(conn, &chain_id).await?;
+        publications.insert(chain_id, publication);
+    }
+    Ok(publications)
 }
 
 /// The API's handlers need these futures `Send`. A read that breaks it fails to compile here, at
