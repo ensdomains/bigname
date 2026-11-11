@@ -941,7 +941,10 @@ impl Fixture {
             ("in ranges", RebuildRanges::Through(target)),
             ("block by block", RebuildRanges::Off),
         ] {
-            let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(ranges);
+            // One run, whatever the composition pass's partition count.
+            let options = FamilyOptions::new(CONTENT_HASH)
+                .with_rebuild_ranges(ranges)
+                .with_max_blocks_per_run(u64::MAX);
             let rebuilt = self
                 .apply_with(target, FamilyMode::Rebuild, &options)
                 .await

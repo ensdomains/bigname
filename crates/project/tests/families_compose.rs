@@ -558,7 +558,7 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
                     ("spans".to_owned(), 0),
                     ("spans".to_owned(), 1),
                     ("spans".to_owned(), 2),
-                    ("merge".to_owned(), 0),
+                    ("sums".to_owned(), 0),
                 ]
             } else {
                 vec![("leads".to_owned(), 0)]
@@ -922,12 +922,13 @@ async fn range_after_the_pass(events: u64, ends: &[i64]) -> Result<()> {
         .apply_with(25, FamilyMode::Rebuild, &options(RebuildRanges::Off))
         .await?;
     let expected = fixture.exact().await?;
-    // Ranges [10], [11, 12] and [13, 14], the pass (a chunk of names, the catalogue build's
+    // Ranges [10], [11, 12] and [13, 14], the pass (a chunk of names, the leads stream's one
+    // partition, the event count stream's one span and one partition, the catalogue build's
     // eight partitions in one span and one key partition, and its end), then single blocks 15
     // and 16 before the budget runs out.
     let low = options(RebuildRanges::Through(14))
         .with_compose_builder_partitions(1, 1)
-        .with_max_blocks_per_run(5 + (1 + 8 + 1) + 2);
+        .with_max_blocks_per_run(5 + (1 + 1 + 2 + 8 + 1) + 2);
     run_to(&fixture, 25, true, &low).await?;
     let (state, _, _, composed) = pass_state(&fixture).await?;
     ensure!(

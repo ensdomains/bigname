@@ -770,8 +770,8 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
 // Ranges double from one block only right after the reset: a run that resumes a rebuild starts
 // with a range as large as its budget. With a budget of eight, the first run commits [10],
 // [11, 12], [13 to 16] and [17]; the second commits [18 to 25] as one range. The third commits
-// [26 to 29] and the first four of the composition pass's ten steps, and the fourth the other
-// six and the target.
+// [26 to 29] and the first four of the composition pass's thirteen steps, the fourth the next
+// eight, and the fifth the pass's end and the target.
 #[tokio::test]
 async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Result<()> {
     let fixture = Fixture::new("families_range_resume_size", 40).await?;
@@ -805,8 +805,14 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
     let fourth = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
     assert_eq!(
         (fourth.blocks, fourth.ranges, fourth.compose_chunks),
-        (1, 0, 6),
-        "the rest of the composition pass, then the target on its own"
+        (0, 0, 8),
+        "the next eight steps of the composition pass"
+    );
+    let fifth = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
+    assert_eq!(
+        (fifth.blocks, fifth.ranges, fifth.compose_chunks),
+        (1, 0, 1),
+        "the pass's end, then the target on its own"
     );
     assert_eq!(fixture.journalled_blocks().await?, vec![29, 30]);
     assert_eq!(marker_state(&fixture).await?, "live");
@@ -912,7 +918,12 @@ async fn ranges_stop_five_blocks_below_the_safe_block() -> Result<()> {
     pointers(&fixture, 10..=29).await?;
     fixture.heads(40, 25, 20).await?;
     follow(&fixture, 10, 30).await?;
-    rebuild_equal(&fixture, 30, &FamilyOptions::new(CONTENT_HASH)).await?;
+    rebuild_equal(
+        &fixture,
+        30,
+        &FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(u64::MAX),
+    )
+    .await?;
     let mut expected = vec![20];
     expected.extend(21..=30);
     assert_eq!(fixture.journalled_blocks().await?, expected);
@@ -926,8 +937,13 @@ async fn without_a_safe_block_ranges_stop_256_blocks_below_the_target() -> Resul
     for block in (10..=290).step_by(10) {
         fixture.resolver_changed(block, 1, 1, R1).await?;
     }
+    // One run, whatever the composition pass's partition count.
     let rebuilt = fixture
-        .apply_with(300, FamilyMode::Rebuild, &FamilyOptions::new(CONTENT_HASH))
+        .apply_with(
+            300,
+            FamilyMode::Rebuild,
+            &FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(u64::MAX),
+        )
         .await?;
     let mut expected = vec![40];
     expected.extend((50..=290).step_by(10));

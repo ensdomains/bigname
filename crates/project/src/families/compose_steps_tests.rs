@@ -43,8 +43,8 @@ fn the_event_count_stream_reads_every_span_then_merges_every_partition() {
             ("spans", 0),
             ("spans", 1),
             ("spans", 2),
-            ("merge", 0),
-            ("merge", 1)
+            ("sums", 0),
+            ("sums", 1)
         ]
     );
     // S + K transactions.

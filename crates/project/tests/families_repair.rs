@@ -835,8 +835,9 @@ async fn edge_starting_at(fixture: &Fixture, block: i64) -> Result<()> {
 // ranges, on a fresh fixture each: the budget counts the blocks of a range as it counts single
 // blocks, and only the ranged runs that apply work below the target commit ranges. The ranged
 // runs also spend the budget on the composition pass, one block a chunk and one for its end: here
-// a chunk of names, the eight partitions of a catalogue build in one block span and one key
-// partition, and the end, ten blocks in all, so they see their own runs.
+// a chunk of names, the leads stream's one partition, the event count stream's one span and one
+// partition, the eight partitions of a catalogue build in one block span and one key partition,
+// and the end, thirteen blocks in all, so they see their own runs.
 #[tokio::test]
 async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
     // (work blocks, a discovery edge starting at, per run with ranges off, then with ranges:
@@ -853,6 +854,7 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
                 (7, 0, true),
                 (7, 0, true),
                 (7, 0, true),
+                (7, 0, true),
                 (12, 1, false),
             ],
         ),
@@ -862,6 +864,7 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
             &[(9, 3, true), (12, 1, false)],
             &[
                 (9, 3, true),
+                (9, 0, true),
                 (9, 0, true),
                 (9, 0, true),
                 (9, 0, true),
@@ -877,6 +880,7 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
                 (11, 1, true),
                 (11, 0, true),
                 (11, 0, true),
+                (11, 0, true),
                 (12, 1, false),
             ],
         ),
@@ -884,7 +888,13 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
             &[5, 12],
             None,
             &[(12, 2, false)],
-            &[(5, 1, true), (5, 0, true), (5, 0, true), (12, 1, false)],
+            &[
+                (5, 1, true),
+                (5, 0, true),
+                (5, 0, true),
+                (5, 0, true),
+                (12, 1, false),
+            ],
         ),
         (
             &[5, 7, 12],
@@ -892,6 +902,7 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
             &[(12, 3, false)],
             &[
                 (7, 2, true),
+                (7, 0, true),
                 (7, 0, true),
                 (7, 0, true),
                 (7, 0, true),
@@ -907,6 +918,7 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
                 (9, 0, true),
                 (9, 0, true),
                 (9, 0, true),
+                (9, 0, true),
                 (12, 1, false),
             ],
         ),
@@ -916,6 +928,7 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
             &[(9, 3, true), (12, 1, false)],
             &[
                 (9, 3, true),
+                (9, 0, true),
                 (9, 0, true),
                 (9, 0, true),
                 (9, 0, true),

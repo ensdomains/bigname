@@ -1405,8 +1405,9 @@ async fn the_build_refuses_an_uncomposed_name() -> Result<()> {
 }
 
 // A split written to the options' fields past the bounds, which the setter and the runner's
-// flags never give: the build refuses it at its first partition, before any partial is written,
-// and the record stays at the build's start.
+// flags never give: the pass refuses it at the first partition of its first stream that splits
+// as the build does, the leads stream, before any partial is written, and the record stays at
+// that stream's start.
 #[tokio::test]
 async fn the_build_refuses_a_split_past_its_bounds_at_its_start() -> Result<()> {
     let fixture = mixed("families_builder_bounds").await?;
@@ -1426,8 +1427,9 @@ async fn the_build_refuses_a_split_past_its_bounds_at_its_start() -> Result<()> 
         .fetch_one(&fixture.pool)
         .await?;
     let (stream, cursor) = pass_cursor(&fixture).await?;
+    // The leads stream, the pass's first stream split in partitions, refuses the split first.
     ensure!(
-        partials == 0 && stream == json!(3) && cursor.is_null(),
+        partials == 0 && stream == json!(7) && cursor.is_null(),
         "{partials} partials written, stream {stream}, cursor {cursor}"
     );
     fixture.cleanup().await

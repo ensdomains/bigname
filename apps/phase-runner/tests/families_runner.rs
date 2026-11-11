@@ -298,16 +298,26 @@ async fn a_range_event_cap_of_one_rebuilds_one_block_to_a_generation() -> Result
 // The cap alone, under the default budget: the rebuild completes in one batch. At the default cap
 // blocks 1 to 25 go in ranges [1], [2, 3], [4 to 7], [8 to 15] and [16 to 25], at a cap of 2 in
 // [1] then twelve ranges of two blocks. Then 26 to 29 and the target go one to a generation. The
-// composition pass between them advances no generation.
+// composition pass between them advances no generation. Its streams split in one span and one
+// key partition, as `budget_and_cap` sets them: at the default split the pass alone takes more
+// than the default budget.
 #[tokio::test]
 async fn the_range_event_cap_alone_bounds_the_ranges_of_a_one_batch_rebuild() -> Result<()> {
-    let expected = ranged_rebuild("families_cap_alone_default", FamilySettings::default()).await?;
+    let expected = ranged_rebuild(
+        "families_cap_alone_default",
+        budget_and_cap(FamilySettings::default().max_blocks_per_run, None),
+    )
+    .await?;
     ensure!(
         expected.batches == vec![(Some(HEAD), 5 + 4 + 1)],
         "{:?}",
         expected.batches
     );
-    let capped = ranged_rebuild("families_cap_alone", budget_and_cap(256, Some(2))).await?;
+    let capped = ranged_rebuild(
+        "families_cap_alone",
+        budget_and_cap(FamilySettings::default().max_blocks_per_run, Some(2)),
+    )
+    .await?;
     capped.require(&expected, "cap 2")?;
     ensure!(
         capped.batches == vec![(Some(HEAD), 13 + 4 + 1)],

@@ -490,9 +490,9 @@ async fn the_pass_counts_what_every_block_counts_over_many_runs() -> Result<()> 
             ("spans".to_owned(), 0),
             ("spans".to_owned(), 1),
             ("spans".to_owned(), 2),
-            ("merge".to_owned(), 0),
-            ("merge".to_owned(), 1),
-            ("merge".to_owned(), 2),
+            ("sums".to_owned(), 0),
+            ("sums".to_owned(), 1),
+            ("sums".to_owned(), 2),
         ] && seen_partials,
         "the stream walks each span and partition once: {walk:?}"
     );

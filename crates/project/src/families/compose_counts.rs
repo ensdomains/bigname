@@ -7,7 +7,7 @@
 //! of that range into block spans. The stream reads the events once:
 //!
 //! 1. `spans`: per block span, the span's per-key counts into `project_compose_event_count_work`.
-//! 2. `merge`: per key partition, the chain's stored counts of the partition deleted and the
+//! 2. `sums`: per key partition, the chain's stored counts of the partition deleted and the
 //!    span counts summed into them.
 //!
 //! Each partition deletes what it writes first, so a partition run again writes the same rows.
@@ -24,7 +24,7 @@ use crate::{
     families::{MAX_COMPOSE_BUILDER_BLOCK_SPANS, tables::EVENT_COUNT},
 };
 
-pub(crate) const STEPS: Steps = &[("spans", Parts::Spans), ("merge", Parts::Partitions)];
+pub(crate) const STEPS: Steps = &[("spans", Parts::Spans), ("sums", Parts::Partitions)];
 
 /// The stream's work table, cleared with the pass's other work tables.
 pub(crate) const WORK: &str = "project_compose_event_count_work";

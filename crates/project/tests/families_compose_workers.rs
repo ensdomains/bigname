@@ -694,6 +694,10 @@ async fn the_worker_count_may_change_between_runs() -> Result<()> {
         .await?;
     let mut runs = 0;
     let mut names_runs = 0;
+    // The child listing differs from the relation at every publication before the children
+    // stream finished: the first run's, which applied the ranges only, and each run that ended in
+    // the names, leads or children stream (`families_support/child_listing.rs`).
+    let mut unfinished = 1;
     loop {
         let workers = [3, 1, 2][runs % 3];
         let before = fixture.marker().await?.0;
@@ -710,6 +714,9 @@ async fn the_worker_count_may_change_between_runs() -> Result<()> {
             "run {runs} returned with open transactions: {open:?}"
         );
         let (at, chunks) = stream(&side).await?;
+        if matches!(at, Some(0 | 7 | 5)) {
+            unfinished += 1;
+        }
         if at == Some(0) {
             // Every chunk the record counts so far is a names chunk that committed its claim of
             // at most five ids with them. A claim gets fewer only when fewer than five ids are
@@ -741,6 +748,7 @@ async fn the_worker_count_may_change_between_runs() -> Result<()> {
         ensure!(runs < 2000, "the rebuild does not converge");
     }
     ensure!(names_runs > 3, "the names stream took {names_runs} runs");
+    fixture.expect_listing_skips(unfinished);
     require_composed_once(&fixture, probe_list(&fixture).await?).await?;
     require_equal(&fixture, &expected, "worker counts that change").await?;
     fixture.cleanup().await
