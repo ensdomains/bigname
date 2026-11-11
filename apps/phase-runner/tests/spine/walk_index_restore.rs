@@ -18,7 +18,8 @@
 //! | 14 | A build that fails | Error names the index and the cause, not retried, Project not started (the supervisor's non-zero exit on a not-retried error is the runner's existing behaviour) | `a_failed_build_stops_project_with_the_error_line` |
 //! | 15 | A stop during a build | Returns within the stop budget, the server build is cancelled, the leftover is rebuilt by the next entry, in the same process too, whatever cancelled the token | `a_stop_during_the_restore_cancels_the_build_and_leaves_a_rebuildable_leftover` |
 //! | 20 | The transfer node schema-migration | Adopts the runner's build, and the runner keeps the migration's | `the_transfer_node_migration_and_the_runner_build_each_others_index_once` |
-//! | 22 | The fresh baseline | Every listed definition is the baseline's, and the two lists are every index | `module_definitions_are_the_baselines` |
+//! | 22 | The fresh baseline | Every listed definition is the baseline's, and the three lists are every index | `module_definitions_are_the_baselines` |
+//! | 35 | Every advisory index missing, with a dropped index to rebuild | The dropped index is rebuilt, no advisory index is built | `restore_never_builds_an_advisory_index` |
 //! | 23 | Another login's build, `VACUUM` or `ANALYZE` on the table | Waits naming the backend, keeps the loop heartbeat fresh, then builds | `restore_waits_for_another_build_on_the_table` |
 //! | 25 | A build that failed, then another chain's Project entry in the same process, then a restart | The other chain stops with the same error and no build, the restart builds again | `a_failed_build_stops_every_chain_in_the_process_and_a_restart_builds_again` |
 //! | 27 | Storage over the batch loop's limit before the first build, on a completed Project row | Nothing built, the WARN with the breach, size and free disk on every poll, gauge 1, row left completed and no loop progress, then built once capacity recovers, gauge 0 | `a_breach_before_the_first_build_waits_without_writing_the_phase_row` |
@@ -33,7 +34,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_storage::walk_index_set::{DROP_LIST, IndexState, KEPT, load_drop_list_state};
+use bigname_storage::walk_index_set::{
+    ADVISORY, DROP_LIST, IndexState, KEPT, load_advisory_state, load_drop_list_state,
+};
 use phase_runner::{database::RunnerDatabase, walk_index_restore::IndexBuildSettings};
 use sqlx::{Connection, PgConnection};
 use tracing::instrument::WithSubscriber;
@@ -245,6 +248,40 @@ async fn restore_builds_a_missing_index() -> Result<()> {
     let mut after = index_oids(scratch.pool()).await?;
     after.remove(DROPPED);
     assert_eq!(after, others);
+    scratch.cleanup().await
+}
+
+/// The runner never builds an advisory index: an operator builds it before the schema-migration
+/// that adopts it, and the API serves without it.
+#[tokio::test]
+async fn restore_never_builds_an_advisory_index() -> Result<()> {
+    let scratch = ScratchDatabase::create("walk_index_restore_advisory").await?;
+    let chain_id = "walk-index-advisory";
+    completed_chain(&scratch, chain_id).await?;
+    drop_index(scratch.pool(), DROPPED).await?;
+    assert!(!ADVISORY.is_empty());
+    for index in ADVISORY {
+        drop_index(scratch.pool(), index.name).await?;
+    }
+
+    let (result, logs) = logged(project_redo(
+        &loopback_runner(&scratch, "walk-index-advisory-runner")?,
+        chain_id,
+        CancellationToken::new(),
+    ))
+    .await;
+    result?;
+
+    assert!(usable(scratch.pool(), DROPPED).await?, "{logs}");
+    for index in ADVISORY {
+        assert_eq!(
+            oid(scratch.pool(), index.name).await?,
+            None,
+            "{}: {logs}",
+            index.name
+        );
+        assert!(!logs.contains(index.name), "{logs}");
+    }
     scratch.cleanup().await
 }
 
@@ -927,9 +964,14 @@ async fn the_transfer_node_migration_and_the_runner_build_each_others_index_once
 async fn module_definitions_are_the_baselines() -> Result<()> {
     let scratch = ScratchDatabase::create("walk_index_restore_baseline").await?;
     let mut connection = scratch.pool().acquire().await?;
-    let states = load_drop_list_state(&mut connection)
+    let mut states = load_drop_list_state(&mut connection)
         .await?
         .context("the baseline has normalized_events")?;
+    states.extend(
+        load_advisory_state(&mut connection)
+            .await?
+            .context("the baseline has normalized_events")?,
+    );
     drop(connection);
     for status in &states {
         assert_eq!(
@@ -945,9 +987,10 @@ async fn module_definitions_are_the_baselines() -> Result<()> {
         .iter()
         .copied()
         .chain(DROP_LIST.iter().map(|index| index.name))
+        .chain(ADVISORY.iter().map(|index| index.name))
         .map(str::to_owned)
         .collect();
-    assert_eq!(listed.len(), KEPT.len() + DROP_LIST.len());
+    assert_eq!(listed.len(), KEPT.len() + DROP_LIST.len() + ADVISORY.len());
     let baseline: BTreeSet<String> = index_oids(scratch.pool()).await?.into_keys().collect();
     assert_eq!(baseline, listed);
     scratch.cleanup().await

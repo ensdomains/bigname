@@ -2167,20 +2167,29 @@ A recognized namespace with no available publication returns retryable `409 stal
   treated as omitted; a nonblank value containing only commas is invalid.
   This blank-parameter rule also applies to `type`. Repeated parameter names
   are invalid; send multiple values in one comma-separated value.
-- `record_key` selects one exact, nonempty, case-sensitive stored history key,
-  for example `addr:60`, `text:avatar`, `name`, or `abi:16`. Its URL-decoded
-  value is not trimmed, normalized, or split on commas. Empty values and keys
-  containing a NUL character return `400 invalid_input`. It is independent of
-  the narrower record-lookup key grammar. Matching rows are writes or clears
-  of that key plus record-version resets already within the route's history
-  scope, even when no earlier write of that key was retained. Other keys and
+- `record_key` selects one nonempty, case-sensitive stored history key.
+  Text records are stored as `text:<key>`, for example `text:avatar`,
+  `text:url`, `text:description`, `text:header`, or `text:com.twitter`. Other
+  records carry their own prefix, for example `addr:60`, `abi:16`,
+  `interface:<id>`, or `dns:zonehash`. A key with no colon is read as the text
+  record `text:<key>`, so `avatar` matches `text:avatar` and `Avatar` matches
+  `text:Avatar`. The three keys stored without a prefix are not rewritten:
+  `content` (the legacy `ContentChanged` record), `contenthash`, and `name`.
+  Apart from that one rule the URL-decoded value is not trimmed, normalized, or
+  split on commas, and a key that contains a colon is never rewritten. Empty
+  values and keys containing a NUL character return `400 invalid_input`. It is
+  independent of the narrower record-lookup key grammar. Matching rows are
+  writes or clears of that key plus record-version resets already within the
+  route's history scope, even when no earlier write of that key was retained. Other keys and
   resets outside that collection are excluded. A reset remains one reset row
   with no fabricated key/value; use `include=raw` to identify its
   `RecordVersionChanged` kind. Other explicit type/kind filters still apply,
   so `kind=RecordChanged` omits resets and incompatible filters match nothing.
   This filter adds no child-registration rows, reconstructs no effective
   resolution, and changes no resolver attribution. All these filters apply
-  before pagination and existing counts, and all bind the cursor.
+  before pagination and existing counts, and all bind the cursor. A cursor
+  binds the key as stored, so a cursor issued for `avatar` continues for
+  `text:avatar`.
 - `from_timestamp` and `to_timestamp` are inclusive bounds accepting decimal
   Unix seconds or RFC 3339 (`Z` or a numeric offset; fractional seconds
   allowed and retained for filtering). They are resolved to block
@@ -2748,7 +2757,7 @@ the controller a name's `manager` or `role_holder`.
 | `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
 | `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
 | `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
-| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `record_key` | query | string | no | none | Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets. |
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
@@ -4448,7 +4457,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
 | `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
 | `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
-| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `record_key` | query | string | no | none | Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets. |
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
@@ -4706,7 +4715,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
 | `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
 | `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
-| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `record_key` | query | string | no | none | Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets. |
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |

@@ -1,6 +1,6 @@
 //! The indexes `ops/walk-index-set/drop.sql` drops, in its order, with the statements
-//! `ops/walk-index-set/install.sql` builds them with and the definitions it checks, and the
-//! indexes Interpret keeps. `tests.rs` holds every entry to the scripts and the docs, and the
+//! `ops/walk-index-set/install.sql` builds them with and the definitions it checks, the
+//! indexes Interpret keeps, and the advisory indexes. `tests.rs` holds every entry to the scripts and the docs, and the
 //! phase-runner tests hold every definition to the fresh baseline.
 use super::DroppedIndex;
 
@@ -476,5 +476,41 @@ WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistryCreated'
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized')"#,
         definition: r#"CREATE INDEX normalized_events_project_v1_pointer_addressed_node_idx ON bigname_phase.normalized_events USING btree (chain_id, namespace, lower(COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text))), block_number) WHERE ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])) AND (COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text)) IS NOT NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))"#,
+    },
+];
+
+/// The advisory indexes on `normalized_events`: API read paths that are outside the walk index
+/// set. `drop.sql` leaves them, so Interpret keeps them current through a walk. An operator
+/// builds them with their own install script before the schema-migration that adopts them, the
+/// phase runner never builds them, and the API starts and serves without them, with a WARN
+/// naming each one that is not in place. Each holds the statement and the definition of
+/// `ops/record-history-indexes/install.sql`.
+pub const ADVISORY: &[DroppedIndex] = &[
+    DroppedIndex {
+        name: "normalized_events_record_key_history_idx",
+        create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_key_history_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        left(after_state ->> 'record_key', 256),
+        block_number DESC NULLS LAST
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')"#,
+        definition: r#"CREATE INDEX normalized_events_record_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, "left"((after_state ->> 'record_key'::text), 256), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))"#,
+    },
+    DroppedIndex {
+        name: "normalized_events_record_emitter_key_history_idx",
+        create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_emitter_key_history_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(raw_fact_ref ->> 'emitting_address'),
+        left(after_state ->> 'record_key', 256),
+        block_number DESC NULLS LAST
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')"#,
+        definition: r#"CREATE INDEX normalized_events_record_emitter_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), "left"((after_state ->> 'record_key'::text), 256), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))"#,
     },
 ];
