@@ -20,6 +20,8 @@ pub mod manifest_startup;
 pub mod metrics;
 pub mod phase;
 pub mod phase_lock;
+#[cfg(test)]
+mod phase_state_table_tests;
 mod progress_monitor;
 pub mod project_phase;
 mod redo_bounded_adoption;

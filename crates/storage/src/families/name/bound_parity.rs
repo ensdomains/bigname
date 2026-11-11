@@ -50,6 +50,7 @@ pub async fn assert_bound_name_pages_chain(
         None,
         1,
         false,
+        None,
     )
     .await?;
     ensure!(
@@ -65,6 +66,7 @@ pub async fn assert_bound_name_pages_chain(
         None,
         limit,
         true,
+        None,
     )
     .await?;
     let whole = listed.rows;
@@ -90,6 +92,7 @@ pub async fn assert_bound_name_pages_chain(
                 cursor.as_ref(),
                 size + 1,
                 true,
+                None,
             )
             .await?;
             ensure!(
@@ -132,6 +135,7 @@ pub async fn assert_bound_name_pages_chain(
             Some(&cursor_after(last)),
             2,
             true,
+            None,
         )
         .await?;
         ensure!(

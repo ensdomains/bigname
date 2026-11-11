@@ -50,18 +50,58 @@ fn rewind_cli_requires_an_exact_ancestor() {
 }
 
 #[test]
-fn terminal_chain_report_makes_run_command_fail() {
+fn terminal_chain_report_makes_redo_command_fail() {
     let report = SupervisorReport {
         stopped_chains: vec![(
             "broken-chain".to_owned(),
             RunnerError::data_integrity("bad lineage"),
         )],
+        failed_before_stop: 0,
     };
 
     let error = require_clean_supervisor_exit(report)
         .expect_err("a terminal chain failure must produce a nonzero main result");
     assert!(error.to_string().contains("broken-chain"));
     assert!(error.to_string().contains("DataIntegrity"));
+}
+
+#[test]
+fn run_command_exits_clean_after_a_stop_that_followed_a_chain_failure() {
+    let report = SupervisorReport {
+        stopped_chains: vec![(
+            "broken-chain".to_owned(),
+            RunnerError::data_integrity("bad lineage"),
+        )],
+        failed_before_stop: 1,
+    };
+
+    require_clean_stop(&report).expect("the failure was reported before the stop");
+}
+
+#[test]
+fn run_command_exits_clean_on_a_stop_with_no_chain_failure() {
+    require_clean_stop(&SupervisorReport::default()).expect("a clean stop exits 0");
+}
+
+#[test]
+fn run_command_fails_on_a_chain_that_failed_during_the_stop() {
+    let report = SupervisorReport {
+        stopped_chains: vec![
+            (
+                "broken-chain".to_owned(),
+                RunnerError::data_integrity("bad lineage"),
+            ),
+            (
+                "stopping-chain".to_owned(),
+                RunnerError::transient("settlement did not finish"),
+            ),
+        ],
+        failed_before_stop: 1,
+    };
+
+    let error = require_clean_stop(&report).expect_err("a failed stop must exit nonzero");
+    assert!(error.to_string().contains("stopping-chain"));
+    assert!(!error.to_string().contains("broken-chain"));
 }
 
 #[test]

@@ -143,7 +143,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_owner` (Unix seconds or RFC 3339) | `expires_before` (new) |
 | `expires_window` | repeated `GET /v1/names` query parameter: 1–32 disjoint finite `after..before` windows over exact `expires_at`, lower inclusive and upper exclusive; replaces scalar expiry bounds for that request | new in v2 |
 | `expires_window_index` | zero-based index of a `GET /v1/names` row’s matching `expires_window` in original request order; present only with repeated-window requests | new in v2 |
-| `parent` (query) | `GET /v1/names` and `GET /v1/addresses/{address}/names` filter: only names exactly one label below the given name, matched on the served name spelling rather than on the node or registry topology, so a bracketed labelhash label matches only names served with that bracketed spelling (a [rendered name](glossary.md#rendered-name) whose label has no verified text), except the labelhashes of `eth` and `base`, which normalization of the `parent` value spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
+| `parent` (query) | `GET /v1/names` and `GET /v1/addresses/{address}/names` filter: only names exactly one label below the given name. On `GET /v1/names` it matches the labelhash path, so a bracketed labelhash label names the node it hashes, and a name is listed whatever text its labels are served under, a [rendered name](glossary.md#rendered-name) label with no verified text included. On `GET /v1/addresses/{address}/names` it matches the served name spelling rather than the node or registry topology, so a bracketed labelhash label matches only names served with that bracketed spelling, except the labelhashes of `eth` and `base`, which normalization of the `parent` value spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
 | `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
@@ -777,15 +777,15 @@ Rules:
   deduplicated entries before the cursor.
   Address history returns `total_count=null` by default; `include=total_count`
   requests an exact total over the same filters and published snapshot as its
-  page. Other anchored history collections (name history and
-  `/v1/events` with a `name`, `registration_id`, `address`, or `resolver`
-  anchor) populate
-  it with a capped count over the page's exact filters: exact up to 10,000
-  product-visible rows and `null` beyond by default; `include=total_count`
-  requests an exact uncapped count on anchored history. The exception is a
+  page. Name history populates it with a capped count over the page's exact
+  filters: exact up to 10,000 product-visible rows and `null` beyond by
+  default. `include=total_count` requests an exact uncapped count.
+  `/v1/events` populates it only with `include=total_count`, which requests an
+  exact uncapped count when a `name`, `registration_id`, `address`, or
+  `resolver` anchors the read. The exception is a
   `/v1/events` read that only `resolver` or `contract_address` anchors, with
   no `name`, `registration_id`, or `address`. There `include=total_count`
-  counts exactly up to 100,000 rows and reports `null` beyond. On name history with
+  counts exactly up to 10,000 rows and reports `null` beyond. On name history with
   `include=child_registrations` the count covers the name's rows and its direct
   child registration rows together, each event once. It is always `null` for unanchored event
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
@@ -795,8 +795,8 @@ Rules:
   The registry overview's nested `referenced_by` page populates it only with
   `include=counts`.
   The resolver overview's nested `bound_names` page populates it only with
-  `include=total_count`, with the exact number of bound names on the page's
-  snapshot.
+  `include=total_count`, with the number of bound names on the page's
+  snapshot: exact up to 100,000 and `null` beyond.
   Other routes populate it only where a precomputed count makes it
   cheap or where they explicitly document `include=total_count`; they must not
   otherwise run unconditional full counts on the request path.
@@ -834,7 +834,9 @@ Rules:
   that provide it. `meta.as_of_token` is opaque and is the value to pass to
   `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
-  read is not clean. `meta.source` appears when the route supports `source`.
+  read is not clean. An indexed answer on the two `GET` records routes is the
+  exception: it always carries `meta.completeness`, which is `full` on a clean
+  read. `meta.source` appears when the route supports `source`.
 - Public reverse requests to `POST /v1/lookup` and all `GET /v1/search`
   requests disclose the chain scope selected by the request. A public reverse
   request or search without an explicit `namespace` accounts for the chains of
@@ -863,6 +865,9 @@ Rules:
 - There is no `meta` query parameter and no stripped envelope variant.
 - There are no `declared_state`/`verified_state` parallel trees and no `both`
   mode.
+- Cross-origin requests are allowed from any origin, without credentials. A
+  CORS preflight answer carries `Access-Control-Max-Age: 86400`, so a browser
+  may reuse it for up to a day, or for its own shorter limit.
 
 ## Field Budgets
 
@@ -1003,7 +1008,9 @@ trace, or execution-cache readback. The engine refuses a name whose selected
 `verified_authority_arms` the selected `ens_execution` manifest declares
 (`manifests.md` § `verified_authority_arms`); the routes report that refusal as
 `exact_name_authority_not_verifiable`, distinct from the
-`verified_records_not_supported` a row without an admitted topology reports. API requests, including diagnostics and verified fallback, are read-only.
+`verified_records_not_supported` a row without an admitted topology reports. API requests, including diagnostics and verified fallback, write no served or
+diagnostic state. Their one write is the label candidate a
+[name input](#name-inputs) proves, into a table no serving path reads.
 They never create, refresh, or clear the diagnostic
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
 After provider calls, verification rechecks the captured publication, canonical
@@ -1387,10 +1394,11 @@ spelling when the node no longer has one. A node whose
 [name surface](glossary.md#surface-name-surface) stores no raw label bytes has
 a name row and is addressed the same way: any of its labels may be spelled as
 its bracketed labelhash or as its text, since both spell the same node. The
-response serves the row's [rendered name](glossary.md#rendered-name) whichever
-spelling the request used, so a label reads as text only when bigname holds a
-preimage for it that passed normalization, and in brackets otherwise, `eth`
-and `base` included. An admitted ENSv1 `NewOwner` establishes that surface
+response serves the row's [rendered name](glossary.md#rendered-name), so a
+label reads as text when bigname holds a preimage for it that passed
+normalization, and in brackets otherwise, `eth` and `base` included. On name
+detail, subnames, and lookup, a label the request spells as text also reads as
+text, as described below. An admitted ENSv1 `NewOwner` establishes that surface
 without label bytes when its full labelhash path is proven from the root or a
 fully proven ancestor. A registry child whose ancestry remains unproven, a
 known normalization shadow, or a Basenames child with no name surface still
@@ -1399,6 +1407,49 @@ placeholder without making ordinary name routes available. Uppercase hex digits,
 rejected: the name routes return `400 invalid_input`, and lookup returns an
 in-band `invalid_name`. The octal-escape non-name form is never accepted as a
 name input.
+
+A plain label of a name input is also proof of that label's text. The node a
+route reads is the namehash of the normalized labels, so each label's text is
+the preimage of the labelhash at its position. Three routes use that proof in
+their own response. Wherever a served name carries the placeholder of a
+labelhash that a plain label of the request hashes to, it shows the label's
+normalized text instead:
+
+- `GET /v1/names/{name}`: `name`, `display_name`, and `canonical_name` on an
+  alias path.
+- `GET /v1/names/{name}/subnames`: `name` and `display_name` of every row. A
+  child's own label is not part of the request, so it keeps its placeholder
+  unless the request spells that same label elsewhere. A child label served in
+  its escape form ([non-name form](glossary.md#non-name-form)) is raw bytes, so
+  brackets inside it are never replaced. The parent labels after it are, and
+  their text is escape-encoded like the rest of that string.
+- `POST /v1/lookup`: `name` and `display_name` of every record of the batch,
+  the records of its address inputs included. Every name input of the batch
+  proves its labels for all of them.
+
+A bracketed label proves nothing, except that a bracketed `eth` or `base` is
+read as that text and so proves itself. A label that fails normalization is
+refused before any read. Nothing else in the response changes: cursors, order,
+totals, counts, and `meta` are those the bracketed spelling of the same node
+gets. Every other route, history included, serves the rendered name as before.
+
+After such a response is complete, the API also stages each label it showed
+this way as a candidate for the
+[rainbow-table preimage import](storage.md#rainbow-table-preimage-import), in
+`bigname_phase.ens_names`:
+
+- The records route stages the labels the name row it read serves as
+  placeholders, though its response carries no name.
+- This is the API's only database write. It is best effort and never changes
+  or delays the response
+  ([deployment](deployment.md#api-label-candidates)).
+- No serving path reads that table, so a staged label changes no answer by
+  itself. Once the operator's import proof-checks and stores it, every route
+  shows the text with no request proof.
+- The import keeps a preimage bigname already stores. One stored as not
+  normalized under an older normalizer stays bracketed on other routes until
+  `phase-runner redo --phase recompute-flags` repairs it
+  ([chain intake, "Redo and rewind"](chain-intake.md#redo-and-rewind)).
 
 ### Manager
 
@@ -1589,7 +1640,11 @@ Rules:
   `mismatch`.
 - `mismatch` is the verification state where a claimed answer verifies to a
   different value.
-- `completeness` is `full`, `partial`, or `unsupported`.
+- `completeness` is `full`, `partial`, or `unsupported`. On the two `GET` records
+  routes it says whether a record inventory an admitted resolver backs stands
+  behind an indexed answer
+  ([`GET /v1/names/{name}/records`](api-v1-routes.md#get-v1namesnamerecords)).
+  Verified answers and `POST /v1/lookup` do not set it.
 - Empty arrays and empty maps mean known-empty, not unknown.
 
 ### Resolver record answers and values
@@ -3563,7 +3618,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | --- | --- | --- | --- |
 | `labels` | nullable integer | optional | Current label count; only with include=counts. Exact when the registry holds at most 10,000 registrations under its name, and null otherwise or for a historical selection, where a current label count is not meaningful. |
 | `roles` | integer | optional | Count of observed nonzero declared role assignments; only with include=counts. |
-| `events` | nullable integer | optional | Count of product-visible events emitted by the registry, exact up to 100,000 and null above; only with include=counts. |
+| `events` | nullable integer | optional | Count of product-visible events emitted by the registry, exact up to 10,000 and null above; only with include=counts. |
 
 ### ReferencedBy
 

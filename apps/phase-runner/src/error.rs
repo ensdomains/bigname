@@ -22,6 +22,7 @@ pub struct RunnerError {
     redo_attempt_superseded: bool,
     stop_bound_expired: bool,
     not_retried: bool,
+    held_at_start_up: bool,
 }
 
 impl RunnerError {
@@ -33,6 +34,7 @@ impl RunnerError {
             redo_attempt_superseded: false,
             stop_bound_expired: false,
             not_retried: false,
+            held_at_start_up: false,
         }
     }
 
@@ -58,6 +60,19 @@ impl RunnerError {
             not_retried: true,
             ..self
         }
+    }
+
+    /// A phase lock met during a chain's start-up recovery. The supervisor runs the chain again
+    /// until it is free: it is usually the previous process's session, not yet reaped.
+    pub(crate) fn held_at_start_up(self) -> Self {
+        Self {
+            held_at_start_up: true,
+            ..self
+        }
+    }
+
+    pub fn is_held_at_start_up(&self) -> bool {
+        self.held_at_start_up
     }
 
     pub fn data_integrity(message: impl Into<String>) -> Self {
@@ -118,7 +133,9 @@ impl RunnerError {
     }
 
     pub fn is_retryable(&self) -> bool {
-        self.kind == ErrorKind::Transient && !self.stop_bound_expired && !self.not_retried
+        (self.kind == ErrorKind::Transient || self.held_at_start_up)
+            && !self.stop_bound_expired
+            && !self.not_retried
     }
 
     pub(crate) fn permits_pool_writes_after_error(&self) -> bool {
