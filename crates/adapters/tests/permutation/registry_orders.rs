@@ -8,7 +8,9 @@
 //! `LabelReserved`, mint, transfer and burn, `LabelUnregistered`, `TokenResource`,
 //! `ResolverUpdated`, `SubregistryUpdated`, `ExpiryUpdated`, `EACRolesChanged` and
 //! `TokenRegenerated`. It also draws the deployed registry's one-call registration and
-//! regeneration as single actions, so those orders mix with the rest.
+//! regeneration as single actions, so those orders mix with the rest. A third of the sequences
+//! open with the deployed re-registration of a name that has lapsed, and a quarter close with
+//! the deployed registration over a live reservation.
 //!
 //! Each sequence draws events from the declared Sepolia ETH registry and from an announced
 //! registry, and from two labels and three token versions. So one token can carry two labels and
@@ -61,6 +63,9 @@ pub const DEFAULT_CASES: u64 = 64;
 pub const DEFAULT_SEED: u64 = 0x7e51_9000;
 const CASE_STRIDE: u64 = 0x9fb2_1c65_1e98_df25;
 const SPLIT_SALT: u64 = 0x2545_f491_4f6c_dd1d;
+/// Side stream for the deployed re-registration opening, so the main draws stay as they were.
+const REREGISTER_SALT: u64 = 0x7f4a_7c15_9e37_79b9;
+const RESERVATION_SALT: u64 = 0x94d0_49bb_1331_11eb;
 const MAX_ACTIONS: usize = 10;
 const SHRINK_BUDGET: usize = 250;
 /// Findings shrunk per failure kind. Later ones are reported as drawn.
@@ -69,13 +74,19 @@ const BASE_BLOCK: i64 = 20_519_000;
 const BASE_TIMESTAMP: i64 = 1_700_000_000;
 const BLOCK_SECONDS: i64 = 12;
 const FAR_EXPIRY: u64 = 1_900_000_000;
-const LABELS: [&str; 2] = ["order", "other"];
+const LABELS: [&str; 3] = ["order", "other", "spare"];
+/// The labels drawn actions use. The last label is only the reservation close's, so nothing else
+/// ever holds it.
+const DRAWN_LABELS: usize = 2;
+const SPARE_LABEL: usize = 2;
 const ANNOUNCED: &str = "0x00000000000000000000000000000000f0051900";
 const RESOLVERS: [&str; 2] = [
     "0x00000000000000000000000000000000f0051901",
     "0x00000000000000000000000000000000f0051902",
 ];
 const SUBREGISTRY: &str = "0x00000000000000000000000000000000f0051903";
+/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48 @ ens_v2@a971bd64)
+const ROLE_WAS_RESERVED: u64 = 1 << 32;
 
 /// Orders the TYR-510 fix (#1420) changed: a label registered on a token that already holds a
 /// resource keeps it, and the token's live registration becomes the row the label stored. The
@@ -102,6 +113,14 @@ pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L460 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222-L224 @ ens_v2@a971bd64).
 pub const TYR_525: &str = "TYR-525";
+/// TYR-530: a `LabelReserved` over a token whose `LabelRegistered` was never minted. Either the
+/// split replay emits events the whole pass does not, among them the token's
+/// `AuthorityTransferred` and `ExpiryChanged`, or a later `RegistrationGranted` names the token's
+/// resource only in the whole pass. The deployed registry mints in the same call as every
+/// `LabelRegistered` and refuses a reservation over a live owned label
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L442 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L466-L468 @ ens_v2@a971bd64).
+pub const TYR_530: &str = "TYR-530";
 /// TYR-526: a pointer update and an unregister of a token, with or without a label, then a
 /// transfer of it. Only the whole pass marks the transfer's registry state as pending hydration.
 pub const TYR_526: &str = "TYR-526";
@@ -151,10 +170,95 @@ fn only_the_transfer_lineage_differs(text: &str) -> bool {
     whole == replayed
 }
 
-/// A `LabelRegistered` over a token whose registration is still live at the new label's block.
-fn reregisters_a_live_token(actions: &[Action], layout: Layout) -> bool {
-    let mut registered = BTreeMap::new();
+/// The registrations the model holds, with their expiries, so both TYR-525 shapes judge a label
+/// registered again by the same rule: it counts only while the held registration is live.
+#[derive(Default)]
+struct Registrations(BTreeMap<(Registry, Token), Expiry>);
+
+impl Registrations {
+    /// Applies one event at its block's timestamp. For a `LabelRegistered` over a held
+    /// registration, whether that registration is still live at `at`. A reservation or an
+    /// unregister ends the held registration, a renewal moves its expiry and a regeneration moves it
+    /// to the new token.
+    fn registers_again(&mut self, atom: Atom, at: i64) -> Option<bool> {
+        match atom {
+            Atom::Register {
+                registry,
+                token,
+                expiry,
+                ..
+            } => self
+                .0
+                .insert((registry, token), expiry)
+                .map(|before| !passed(before, at)),
+            Atom::Reserve {
+                registry, token, ..
+            }
+            | Atom::Unregister { registry, token } => {
+                self.0.remove(&(registry, token));
+                None
+            }
+            Atom::Renew {
+                registry,
+                token,
+                expiry,
+            } => {
+                if let Some(current) = self.0.get_mut(&(registry, token)) {
+                    *current = expiry;
+                }
+                None
+            }
+            Atom::Regenerate { registry, from, to } => {
+                if let Some(expiry) = self.0.remove(&(registry, from)) {
+                    self.0.insert((registry, to), expiry);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
+pub const PASSED_WHEN_EMITTED: &str = "TYR-525: a registration already passed when emitted";
+pub const CUT_TO_PASSED: &str = "TYR-525: a live expiry cut to a passed one";
+pub const AGAIN_WHILE_LIVE: &str = "TYR-525: a registration again while the first is live";
+pub const AGAIN_AFTER_LAPSE: &str = "a registration again after the first lapsed (not a ticket's)";
+pub const DEPLOYED_REREGISTRATION: &str =
+    "the deployed re-registration: the next token version over a lapsed registration";
+
+/// Which expiry and re-registration shapes an order reaches in `layout`, in one walk, so the
+/// TYR-525 tag and the sweep's shape counts read the same model.
+fn expiry_shapes(actions: &[Action], layout: Layout) -> BTreeSet<&'static str> {
+    let mut registrations = Registrations::default();
+    let mut expiries = BTreeMap::new();
+    let mut shapes = BTreeSet::new();
     for (atom, at) in timed_atoms(actions, layout) {
+        if let Atom::Register {
+            registry, token, ..
+        } = atom
+            && token.version > 0
+            && registrations
+                .0
+                .get(&(
+                    registry,
+                    Token {
+                        version: token.version - 1,
+                        ..token
+                    },
+                ))
+                .is_some_and(|before| passed(*before, at))
+        {
+            shapes.insert(DEPLOYED_REREGISTRATION);
+        }
+        match registrations.registers_again(atom, at) {
+            Some(true) => {
+                shapes.insert(AGAIN_WHILE_LIVE);
+            }
+            Some(false) => {
+                shapes.insert(AGAIN_AFTER_LAPSE);
+            }
+            None => {}
+        }
         match atom {
             Atom::Register {
                 registry,
@@ -162,34 +266,207 @@ fn reregisters_a_live_token(actions: &[Action], layout: Layout) -> bool {
                 expiry,
                 ..
             } => {
-                if registered
-                    .insert((registry, token), expiry)
-                    .is_some_and(|before| !passed(before, at))
-                {
-                    return true;
+                if passed(expiry, at) {
+                    shapes.insert(PASSED_WHEN_EMITTED);
                 }
+                expiries.insert((registry, token), expiry);
+            }
+            Atom::Reserve {
+                registry,
+                token,
+                expiry,
+                ..
+            } => {
+                expiries.insert((registry, token), expiry);
             }
             Atom::Renew {
                 registry,
                 token,
                 expiry,
             } => {
-                if let Some(current) = registered.get_mut(&(registry, token)) {
+                if let Some(&before) = expiries.get(&(registry, token))
+                    && !passed(before, at)
+                    && passed(expiry, at)
+                {
+                    shapes.insert(CUT_TO_PASSED);
+                }
+                if let Some(current) = expiries.get_mut(&(registry, token)) {
                     *current = expiry;
                 }
             }
             Atom::Unregister { registry, token } => {
-                registered.remove(&(registry, token));
+                expiries.remove(&(registry, token));
             }
             Atom::Regenerate { registry, from, to } => {
-                if let Some(expiry) = registered.remove(&(registry, from)) {
-                    registered.insert((registry, to), expiry);
+                if let Some(expiry) = expiries.remove(&(registry, from)) {
+                    expiries.insert((registry, to), expiry);
                 }
             }
             _ => {}
         }
     }
+    shapes
+}
+
+pub const LABEL_RETURNS: &str =
+    "TYR-525: a label registered back on a token id it left, which holds a resource";
+pub const RESERVED_OVER_UNMINTED: &str =
+    "TYR-530: a reservation over a registration that was never minted";
+pub const RELEASED_POINTER_TRANSFER: &str =
+    "TYR-526: a transfer after a pointer update and an unregister";
+pub const RELINK_AFTER_CLOSE: &str = "TYR-522 S-A3: a binding closed and linked again";
+
+/// Every shape the sweep counts sequences for: each known tag's order, the two TYR-510 orders, a
+/// registration again after the first lapsed, and the deployed re-registration. The default corpus
+/// must reach each.
+pub const NAMED_SHAPES: [&str; 11] = [
+    PASSED_WHEN_EMITTED,
+    CUT_TO_PASSED,
+    AGAIN_WHILE_LIVE,
+    LABEL_RETURNS,
+    AGAIN_AFTER_LAPSE,
+    DEPLOYED_REREGISTRATION,
+    RESERVED_OVER_UNMINTED,
+    RELEASED_POINTER_TRANSFER,
+    RELINK_AFTER_CLOSE,
+    TOKEN_RESOURCE_BEFORE_LABEL,
+    LABEL_OVER_RESERVATION,
+];
+
+/// The named shapes an order reaches in any layout the sweep runs.
+fn named_shapes(actions: &[Action]) -> BTreeSet<&'static str> {
+    let mut shapes = tyr_510_shapes(actions);
+    for (layout, _) in RUNS {
+        shapes.extend(expiry_shapes(actions, layout));
+    }
+    if transfers_a_released_pointer_token(actions) {
+        shapes.insert(RELEASED_POINTER_TRANSFER);
+    }
+    if returns_a_label_to_a_linked_token(actions) {
+        shapes.insert(LABEL_RETURNS);
+    }
+    if reserves_over_an_unminted_registration(actions) {
+        shapes.insert(RESERVED_OVER_UNMINTED);
+    }
+    if links_a_linked_token(actions) && relinks_a_closed_binding(actions) {
+        shapes.insert(RELINK_AFTER_CLOSE);
+    }
+    shapes
+}
+
+/// A `LabelRegistered` of a label on a token id it was registered on before another token held
+/// it, while that token's entry holds a resource.
+fn returns_a_label_to_a_linked_token(actions: &[Action]) -> bool {
+    let mut holders = BTreeMap::new();
+    let mut held = BTreeSet::new();
+    let mut linked = BTreeSet::new();
+    for atom in atoms(actions) {
+        match atom {
+            Atom::Link {
+                registry, token, ..
+            } => {
+                linked.insert((registry, token));
+            }
+            Atom::Unregister { registry, token } => {
+                linked.remove(&(registry, token));
+            }
+            Atom::Register {
+                registry,
+                token,
+                label,
+                ..
+            } => {
+                let moved = holders
+                    .insert((registry, label), token)
+                    .is_some_and(|previous| previous != token);
+                if moved
+                    && held.contains(&(registry, label, token))
+                    && linked.contains(&(registry, token))
+                {
+                    return true;
+                }
+                held.insert((registry, label, token));
+            }
+            _ => {}
+        }
+    }
     false
+}
+
+/// A `LabelReserved` over a token whose `LabelRegistered` no mint has followed.
+fn reserves_over_an_unminted_registration(actions: &[Action]) -> bool {
+    let mut unminted = BTreeSet::new();
+    for atom in atoms(actions) {
+        match atom {
+            Atom::Register {
+                registry, token, ..
+            } => {
+                unminted.insert((registry, token));
+            }
+            Atom::Mint {
+                registry, token, ..
+            }
+            | Atom::Unregister { registry, token } => {
+                unminted.remove(&(registry, token));
+            }
+            Atom::Reserve {
+                registry, token, ..
+            } if unminted.contains(&(registry, token)) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// TYR-530's two symptoms. The split replay emits only extra events, among them
+/// `AuthorityTransferred` and `ExpiryChanged`. Or a `RegistrationGranted`'s after states differ
+/// only in the whole pass naming `resource_id`.
+fn tyr_530_symptom(signature: &str, text: &str) -> bool {
+    let extra_events = signature == "the split replay derives a different event stream"
+        && text.contains("only in the whole pass (0):")
+        && text
+            .split_once("only in the split replay")
+            .is_some_and(|(_, split)| {
+                split.contains(":AuthorityTransferred:") && split.contains(":ExpiryChanged:")
+            });
+    extra_events
+        || (signature
+            == "an event's after_state differs between the whole pass and the split replay"
+            && text.contains(":RegistrationGranted:")
+            && only_the_whole_pass_names_the_resource(text))
+}
+
+fn only_the_whole_pass_names_the_resource(text: &str) -> bool {
+    let parse = |marker| {
+        after_state(text, marker)
+            .and_then(|state| serde_json::from_str::<serde_json::Value>(state).ok())
+            .and_then(|state| state.as_object().cloned())
+    };
+    let (Some(mut whole), Some(replayed)) = (parse("whole="), parse("replayed=")) else {
+        return false;
+    };
+    !replayed.contains_key("resource_id")
+        && whole.remove("resource_id").is_some()
+        && whole == replayed
+}
+
+/// The version-flip symptom: live state drops the token's resource and a restore keeps it.
+fn resource_dropped_live_kept_on_restore(signature: &str, text: &str) -> bool {
+    signature == "live state differs from a restore at upstream_resource"
+        && text
+            .split_once("first difference:\n")
+            .is_some_and(|(_, rest)| {
+                let mut lines = rest.lines().map(str::trim);
+                lines.next() == Some("live     upstream_resource: None,")
+                    && lines
+                        .next()
+                        .is_some_and(|line| line.starts_with("restored upstream_resource: Some("))
+            })
+}
+
+/// A `LabelRegistered` over a token whose registration is still live at the new label's block.
+fn reregisters_a_live_token(actions: &[Action], layout: Layout) -> bool {
+    expiry_shapes(actions, layout).contains(AGAIN_WHILE_LIVE)
 }
 
 /// The open ticket a failure belongs to, judged on its kind, the failure text and the order's
@@ -212,6 +489,14 @@ pub fn known_failure(
     if tyr_525_reregistration_symptom(signature, text) && reregisters_a_live_token(actions, layout)
     {
         return Some(TYR_525);
+    }
+    if resource_dropped_live_kept_on_restore(signature, text)
+        && returns_a_label_to_a_linked_token(actions)
+    {
+        return Some(TYR_525);
+    }
+    if tyr_530_symptom(signature, text) && reserves_over_an_unminted_registration(actions) {
+        return Some(TYR_530);
     }
     if signature.starts_with("an event's after_state differs")
         && only_the_whole_pass_is_pending_hydration(text)
@@ -288,65 +573,18 @@ fn relinks_a_closed_binding(actions: &[Action]) -> bool {
     false
 }
 
-/// A `LabelRegistered` whose expiry has passed at its own block, or over a token a registration
-/// still holds, or an `ExpiryUpdated` that moves a label's expiry from live to passed at its own
-/// block. A lapse later in the sequence, and a renewal of a label that had already lapsed, are
-/// orders the deployed registry emits and are not this ticket's.
+/// A `LabelRegistered` whose expiry has passed at its own block, or over a registration still live
+/// at that block, or an `ExpiryUpdated` that moves a label's expiry from live to passed at its own
+/// block. A lapse later in the sequence, a label registered again after the first lapsed, and a
+/// renewal of a label that had already lapsed are not this ticket's. The deployed registry emits
+/// the first and third. It re-registers a lapsed owned label under a new token version
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455-L460 @ ens_v2@a971bd64),
+/// so the model never sees that as a label registered again.
 fn emits_a_passed_or_live_label(actions: &[Action], layout: Layout) -> bool {
-    let mut registered = BTreeSet::new();
-    let mut expiries = BTreeMap::new();
-    for (atom, at) in timed_atoms(actions, layout) {
-        match atom {
-            Atom::Register {
-                registry,
-                token,
-                expiry,
-                ..
-            } => {
-                if passed(expiry, at) || !registered.insert((registry, token)) {
-                    return true;
-                }
-                expiries.insert((registry, token), expiry);
-            }
-            Atom::Reserve {
-                registry,
-                token,
-                expiry,
-                ..
-            } => {
-                expiries.insert((registry, token), expiry);
-            }
-            Atom::Renew {
-                registry,
-                token,
-                expiry,
-            } => {
-                if let Some(&before) = expiries.get(&(registry, token))
-                    && !passed(before, at)
-                    && passed(expiry, at)
-                {
-                    return true;
-                }
-                if let Some(current) = expiries.get_mut(&(registry, token)) {
-                    *current = expiry;
-                }
-            }
-            Atom::Unregister { registry, token } => {
-                registered.remove(&(registry, token));
-                expiries.remove(&(registry, token));
-            }
-            Atom::Regenerate { registry, from, to } => {
-                if registered.remove(&(registry, from)) {
-                    registered.insert((registry, to));
-                }
-                if let Some(expiry) = expiries.remove(&(registry, from)) {
-                    expiries.insert((registry, to), expiry);
-                }
-            }
-            _ => {}
-        }
-    }
-    false
+    let shapes = expiry_shapes(actions, layout);
+    [PASSED_WHEN_EMITTED, CUT_TO_PASSED, AGAIN_WHILE_LIVE]
+        .iter()
+        .any(|shape| shapes.contains(shape))
 }
 
 /// The diverging event's after states differ only in the whole pass marking the registry state as
@@ -527,8 +765,8 @@ pub enum Atom {
         registry: Registry,
         resource: Option<Token>,
         account: u8,
-        old: u8,
-        new: u8,
+        old: u64,
+        new: u64,
     },
     Regenerate {
         registry: Registry,
@@ -861,8 +1099,57 @@ pub fn generate(seed: u64) -> Case {
         let same_transaction = rng.chance(1, 4);
         actions.push(action(atoms, new_block, same_transaction));
     }
+    let mut side = Rng::new(seed ^ REREGISTER_SALT);
+    if side.chance(1, 3) {
+        let mut opening = deployed_reregistration_opening(&mut side);
+        opening.append(&mut actions);
+        actions = opening;
+    }
+    // After everything else, so it cannot move the re-registration opening's lapse.
+    if Rng::new(seed ^ RESERVATION_SALT).chance(1, 4) {
+        let mut side = Rng::new(seed ^ RESERVATION_SALT ^ 1);
+        actions.extend(deployed_reservation_close(&mut side));
+    }
     announce_before_use(&mut rng, &mut actions);
     Case { seed, actions }
+}
+
+/// The deployed registry registering a lapsed, owned name again, as an opening: a one-call
+/// registration in the first block that lapses before the next, any drawn action in its own
+/// block, then the re-registration in a block after that. Opening the sequence keeps the lapse
+/// between the two registrations in every layout but the one-block layout.
+fn deployed_reregistration_opening(rng: &mut Rng) -> Vec<Action> {
+    let registry = if rng.chance(1, 2) {
+        Registry::Declared
+    } else {
+        Registry::Announced
+    };
+    let token = Token {
+        label: rng.below(DRAWN_LABELS),
+        version: 0,
+    };
+    let (first, second) = (draw_actor(rng), draw_actor(rng));
+    // The announcement comes first so no later insertion can move the first registration out of
+    // the first block.
+    let mut registration = vec![Atom::Announce];
+    registration.extend(deployed_register(
+        registry,
+        token,
+        token.label,
+        first,
+        Expiry::Lapses(0),
+        None,
+    ));
+    let between = draw(rng);
+    vec![
+        action(registration, false, false),
+        action(between, true, false),
+        action(
+            deployed_reregister(registry, token, token.label, first, second, Expiry::Far),
+            true,
+            false,
+        ),
+    ]
 }
 
 fn action(atoms: Vec<Atom>, new_block: bool, same_transaction: bool) -> Action {
@@ -954,8 +1241,8 @@ fn draw(rng: &mut Rng) -> Vec<Atom> {
             registry,
             resource: (!rng.chance(1, 5)).then_some(token.resource()),
             account: owner,
-            old: rng.below(4) as u8,
-            new: rng.below(4) as u8,
+            old: rng.below(4) as u64,
+            new: rng.below(4) as u64,
         }],
         81..=84 => vec![Atom::Regenerate {
             registry,
@@ -974,7 +1261,7 @@ fn draw(rng: &mut Rng) -> Vec<Atom> {
 
 fn draw_token(rng: &mut Rng) -> Token {
     Token {
-        label: rng.below(LABELS.len()),
+        label: rng.below(DRAWN_LABELS),
         version: u32::from(rng.chance(1, 4)),
     }
 }
@@ -1035,6 +1322,110 @@ fn deployed_register(
         });
     }
     atoms
+}
+
+/// The deployed registry registering a label over its own live reservation, closing a sequence:
+/// the reservation of a label nothing else holds, then in a later block `register` keeps the token
+/// id and emits the one-call registration
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L436-L472 @ ens_v2@a971bd64).
+/// Far expiries, so the order holds in every layout.
+fn deployed_reservation_close(rng: &mut Rng) -> Vec<Action> {
+    let registry = if rng.chance(1, 2) {
+        Registry::Declared
+    } else {
+        Registry::Announced
+    };
+    let token = Token {
+        label: SPARE_LABEL,
+        version: 0,
+    };
+    let owner = draw_actor(rng);
+    vec![
+        action(
+            vec![
+                Atom::Announce,
+                Atom::Reserve {
+                    registry,
+                    token,
+                    label: token.label,
+                    expiry: Expiry::Far,
+                },
+            ],
+            true,
+            false,
+        ),
+        action(
+            deployed_register(registry, token, token.label, owner, Expiry::Far, None)
+                .into_iter()
+                .map(|atom| match atom {
+                    // `register` over a reservation adds ROLE_WAS_RESERVED to the owner's roles
+                    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@a971bd64).
+                    Atom::Roles {
+                        registry,
+                        resource,
+                        account,
+                        old,
+                        new,
+                    } => Atom::Roles {
+                        registry,
+                        resource,
+                        account,
+                        old,
+                        new: new | ROLE_WAS_RESERVED,
+                    },
+                    other => other,
+                })
+                .collect(),
+            true,
+            false,
+        ),
+    ]
+}
+
+/// `register` over a lapsed, owned label: burn the previous owner's token, bump the token and
+/// resource versions, then the one-call registration under the new token id with its mint,
+/// `TokenResource` for the new resource and the owner's roles. No `TokenRegenerated`
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455-L472 @ ens_v2@a971bd64).
+fn deployed_reregister(
+    registry: Registry,
+    token: Token,
+    label: usize,
+    from: u8,
+    owner: u8,
+    expiry: Expiry,
+) -> Vec<Atom> {
+    let next = token.next();
+    vec![
+        Atom::Burn {
+            registry,
+            token,
+            from,
+        },
+        Atom::Register {
+            registry,
+            token: next,
+            label,
+            owner,
+            expiry,
+        },
+        Atom::Mint {
+            registry,
+            token: next,
+            to: owner,
+        },
+        Atom::Link {
+            registry,
+            token: next,
+            resource: next,
+        },
+        Atom::Roles {
+            registry,
+            resource: Some(next),
+            account: owner,
+            old: 0,
+            new: 3,
+        },
+    ]
 }
 
 /// `_regenerate`: burn, `TokenRegenerated`, mint of the next version
@@ -1527,6 +1918,8 @@ pub struct Sweep {
     pub findings: Vec<Finding>,
     /// Per TYR-510 shape: runs that failed, runs that passed.
     pub tyr_510_shapes: BTreeMap<&'static str, [usize; 2]>,
+    /// Per named shape: sequences that reach it in any layout.
+    pub shape_sequences: BTreeMap<&'static str, usize>,
     pub atoms: BTreeMap<&'static str, usize>,
     pub labelled_registries: BTreeSet<Registry>,
     pub token_under_two_labels: usize,
@@ -1555,6 +1948,9 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
 pub fn sweep_case(wiring: &Wiring, generated: &Case, sweep: &mut Sweep) {
     sweep.sequences += 1;
     sweep.observe(&generated.actions);
+    for shape in named_shapes(&generated.actions) {
+        *sweep.shape_sequences.entry(shape).or_default() += 1;
+    }
     let shapes = tyr_510_shapes(&generated.actions);
     for (layout, split_kind) in RUNS {
         sweep.runs += 1;
@@ -1710,6 +2106,11 @@ impl Sweep {
                 bail!("the default corpus names no registration at depth {depth}:\n{self}");
             }
         }
+        for shape in NAMED_SHAPES {
+            if !self.shape_sequences.contains_key(shape) {
+                bail!("the default corpus never reaches the shape {shape:?}:\n{self}");
+            }
+        }
         for shape in TYR_510_SHAPES {
             if !self.tyr_510_shapes.contains_key(shape) {
                 bail!("the default corpus never reaches the TYR-510 shape {shape:?}:\n{self}");
@@ -1739,6 +2140,14 @@ impl fmt::Display for Sweep {
             self.named_grants,
             self.declared_stops
         )?;
+        for shape in NAMED_SHAPES {
+            let count = self.shape_sequences.get(shape).copied().unwrap_or(0);
+            let zero = if count == 0 { " ZERO HITS" } else { "" };
+            writeln!(
+                formatter,
+                "registry_orders shape {shape:?}: sequences={count}{zero}"
+            )?;
+        }
         for (shape, [red, green]) in &self.tyr_510_shapes {
             writeln!(
                 formatter,

@@ -5367,6 +5367,97 @@ fn registry_order_a_live_token_registered_again_then_transferred_diverges_until_
     )
 }
 
+/// Shrunk from seed 1143880151033430697: an announced registry registers and links a label on one
+/// token version, registers it on the other version in the next block, then back on the first.
+/// Live state drops the first token's resource and a restore keeps it. Pinned until TYR-525
+/// lands.
+#[test]
+fn registry_order_a_label_back_on_its_linked_token_diverges_until_tyr_525() -> Result<()> {
+    use crate::permutation::registry_orders::{Action, Atom, Expiry, Registry, Token};
+    let registry = Registry::Announced;
+    let linked = Token {
+        label: 1,
+        version: 1,
+    };
+    let other = Token {
+        label: 1,
+        version: 0,
+    };
+    let register = |token| Atom::Register {
+        registry,
+        token,
+        label: 1,
+        owner: 3,
+        expiry: Expiry::Far,
+    };
+    pinned_registry_order_failure(
+        "a label back on its linked token",
+        registry_orders::TYR_525,
+        "live state differs from a restore at upstream_resource",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            Action {
+                atoms: vec![
+                    register(linked),
+                    Atom::Link {
+                        registry,
+                        token: linked,
+                        resource: linked,
+                    },
+                ],
+                new_block: false,
+                same_transaction: false,
+            },
+            in_new_block(vec![register(other)]),
+            in_new_block(vec![register(linked)]),
+        ],
+    )
+}
+
+/// Shrunk from seed 2119274496: the declared registry registers a label without minting it,
+/// reserves the same label on the same token in the next transaction, then links the token's
+/// resource in the next block. The split replay emits events the whole pass does not. Pinned until
+/// TYR-530 lands.
+#[test]
+fn registry_order_a_reservation_over_an_unminted_registration_diverges_until_tyr_530() -> Result<()>
+{
+    use crate::permutation::registry_orders::{Action, Atom, Expiry, Registry, Token};
+    let registry = Registry::Declared;
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    pinned_registry_order_failure(
+        "a reservation over an unminted registration",
+        registry_orders::TYR_530,
+        "the split replay derives a different event stream",
+        &[
+            in_new_block(vec![Atom::Register {
+                registry,
+                token,
+                label: 0,
+                owner: 1,
+                expiry: Expiry::Far,
+            }]),
+            Action {
+                atoms: vec![Atom::Reserve {
+                    registry,
+                    token,
+                    label: 0,
+                    expiry: Expiry::Far,
+                }],
+                new_block: false,
+                same_transaction: false,
+            },
+            in_new_block(vec![Atom::Link {
+                registry,
+                token,
+                resource: token,
+            }]),
+        ],
+    )
+}
+
 /// Shrunk from seed 1494661391878574169: the declared registry registers a label whose expiry has
 /// passed and links it, registers the same token again in the same block with an expiry that
 /// lapses before the next block, and a later block sets its resolver. The split replay derives a
@@ -5560,8 +5651,8 @@ fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result
 #[test]
 fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     use crate::permutation::registry_orders::{
-        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522_S_A3, TYR_525, TYR_526, Token,
-        known_failure,
+        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522_S_A3, TYR_525, TYR_526, TYR_530,
+        Token, known_failure,
     };
     let registry = Registry::Announced;
     let token = Token {
@@ -5627,6 +5718,7 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     let pending_on_replay = "after_state\n      whole={\"a\":1}\n   replayed={\"a\":1,\"registry_hydration_pending\":true}";
     let other = "after_state\n      whole={\"to\":\"0x01\"}\n   replayed={\"to\":\"0x02\"}";
     let rebased_twice = "batch-boundary artifact {\"rebased_attributions\": 2}";
+    let rebased_once = "batch-boundary artifact {\"rebased_attributions\": 1}";
     let third = "live state differs from a restore at token_lineage_id";
     let transfer_lineage = "event x:TokenControlTransferred:0 diverges between the whole-sequence pass and the split replay:\n  after_state\n      whole={\"a\":1,\"token_lineage_id\":null,\"upstream_resource\":null}\n   replayed={\"a\":1,\"token_lineage_id\":\"l\",\"upstream_resource\":\"r\"}";
     let transfer_lineage_and_more = "event x:TokenControlTransferred:0 diverges between the whole-sequence pass and the split replay:\n  after_state\n      whole={\"a\":1,\"token_lineage_id\":null}\n   replayed={\"a\":2,\"token_lineage_id\":\"l\"}";
@@ -5639,6 +5731,55 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     let lapsed_then_again = vec![
         block(vec![register(Expiry::Lapses(0)), link]),
         block(vec![filler]),
+        block(vec![register(Expiry::Far)]),
+    ];
+    let dropped = "live state differs from a restore at upstream_resource";
+    let dropped_text = "x\n    first difference:\n      live     upstream_resource: None,\n      restored upstream_resource: Some(\n";
+    let resolver_differs = "live state differs from a restore at resolver";
+    let other_version = Token {
+        label: 0,
+        version: 1,
+    };
+    let flipped = vec![
+        block(vec![register(Expiry::Far), link]),
+        block(vec![Atom::Register {
+            registry,
+            token: other_version,
+            label: 0,
+            owner: 1,
+            expiry: Expiry::Far,
+        }]),
+        block(vec![register(Expiry::Far)]),
+    ];
+    let extra_events = "only in the whole pass (0): \n  only in the split replay (5): x:AuthorityTransferred:t:3\n    x:ExpiryChanged:t:4";
+    let extra_other_events =
+        "only in the whole pass (0): \n  only in the split replay (1): x:SurfaceBound:t:3";
+    let granted_resource = "event x:RegistrationGranted:0 diverges between the whole-sequence pass and the split replay:\n  after_state\n      whole={\"a\":1,\"resource_id\":\"r\"}\n   replayed={\"a\":1}";
+    let granted_resource_and_more = "event x:RegistrationGranted:0 diverges between the whole-sequence pass and the split replay:\n  after_state\n      whole={\"a\":1,\"resource_id\":\"r\"}\n   replayed={\"a\":2}";
+    let mint = Atom::Mint {
+        registry,
+        token,
+        to: 1,
+    };
+    let reserved_unminted_then_linked = vec![
+        block(vec![register(Expiry::Far), reserve(Expiry::Far)]),
+        block(vec![link]),
+    ];
+    let reserved_minted_then_linked = vec![
+        block(vec![register(Expiry::Far), mint, reserve(Expiry::Far)]),
+        block(vec![link]),
+    ];
+    let reserved_unminted_then_registered = vec![
+        block(vec![register(Expiry::Far), reserve(Expiry::Far)]),
+        block(vec![register(Expiry::Far)]),
+    ];
+    let reserved_minted_then_registered = vec![
+        block(vec![register(Expiry::Far), mint, reserve(Expiry::Far)]),
+        block(vec![register(Expiry::Far)]),
+    ];
+    let reserved_between = vec![
+        block(vec![register(Expiry::Far), link]),
+        block(vec![reserve(Expiry::Far)]),
         block(vec![register(Expiry::Far)]),
     ];
     let expired = vec![block(vec![register(Expiry::Past)])];
@@ -5740,8 +5881,43 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             "a re-registration after the first lapsed, two events re-attributed",
             rebased_twice,
             "",
+            lapsed_then_again.clone(),
+            None,
+        ),
+        (
+            "a re-registration after the first lapsed, retirement flags",
+            flags,
+            "",
+            lapsed_then_again.clone(),
+            None,
+        ),
+        (
+            "a re-registration after the first lapsed, one event re-attributed",
+            rebased_once,
+            "",
             lapsed_then_again,
             None,
+        ),
+        (
+            "a re-registration after a reservation, one event re-attributed",
+            rebased_once,
+            "",
+            reserved_between,
+            None,
+        ),
+        (
+            "a live re-registration, retirement flags",
+            flags,
+            "",
+            live_again.clone(),
+            Some(TYR_525),
+        ),
+        (
+            "a live re-registration, one event re-attributed",
+            rebased_once,
+            "",
+            live_again.clone(),
+            Some(TYR_525),
         ),
         (
             "a live re-registration, a transfer's lineage",
@@ -5775,7 +5951,72 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             "a live re-registration, a third symptom",
             third,
             "",
+            live_again.clone(),
+            None,
+        ),
+        // TYR-525, a label registered back on a token id it left.
+        (
+            "a label back on its linked token, the resource dropped live",
+            dropped,
+            dropped_text,
+            flipped.clone(),
+            Some(TYR_525),
+        ),
+        (
+            "a label back on its linked token, another field",
+            resolver_differs,
+            "",
+            flipped,
+            None,
+        ),
+        (
+            "the resource dropped live, no label moved",
+            dropped,
+            dropped_text,
             live_again,
+            None,
+        ),
+        // TYR-530.
+        (
+            "a reservation over an unminted registration, extra events",
+            stream,
+            extra_events,
+            reserved_unminted_then_linked.clone(),
+            Some(TYR_530),
+        ),
+        (
+            "a reservation over an unminted registration, other extra events",
+            stream,
+            extra_other_events,
+            reserved_unminted_then_linked,
+            None,
+        ),
+        (
+            "a reservation over a minted registration, extra events",
+            stream,
+            extra_events,
+            reserved_minted_then_linked,
+            None,
+        ),
+        (
+            "a reservation over an unminted registration, the resource only in the whole pass",
+            after,
+            granted_resource,
+            reserved_unminted_then_registered.clone(),
+            Some(TYR_530),
+        ),
+        (
+            "a reservation over an unminted registration, the resource and another field",
+            after,
+            granted_resource_and_more,
+            reserved_unminted_then_registered,
+            None,
+        ),
+        (
+            "a reservation over a minted registration, the resource only in the whole pass",
+            after,
+            granted_resource,
+            reserved_minted_then_registered,
             None,
         ),
         // TYR-526.
@@ -5944,5 +6185,112 @@ fn registry_order_sweep_runs_every_layout_after_a_known_failure() -> Result<()> 
         sweep.findings.iter().all(|finding| finding.known.is_some()),
         "{sweep}"
     );
+    Ok(())
+}
+
+/// The deployed registry registering a lapsed, owned name again. `register` burns the previous
+/// owner's token, bumps the token and resource versions, then emits `LabelRegistered` for the new
+/// token id, its mint, `TokenResource` for the new resource and the owner's roles
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L429-L472 @ ens_v2@a971bd64).
+/// The name lapses between blocks, so the one-block layout, where every event shares a
+/// timestamp, cannot hold this order. Every other layout and split runs, for the declared and an
+/// announced registry, and must converge.
+#[test]
+fn registry_order_deployed_reregistration_after_a_lapse_converges_in_every_split() -> Result<()> {
+    use crate::permutation::registry_orders::{
+        Atom, Expiry, Layout, Pointer, RUNS, Registry, Token,
+    };
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let first = Token {
+        label: 0,
+        version: 0,
+    };
+    let second = Token {
+        label: 0,
+        version: 1,
+    };
+    let other = Token {
+        label: 1,
+        version: 0,
+    };
+    let mut failures = Vec::new();
+    for registry in [Registry::Declared, Registry::Announced] {
+        let register = |token: Token, label, owner, expiry| {
+            vec![
+                Atom::Register {
+                    registry,
+                    token,
+                    label,
+                    owner,
+                    expiry,
+                },
+                Atom::Mint {
+                    registry,
+                    token,
+                    to: owner,
+                },
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+                Atom::Roles {
+                    registry,
+                    resource: Some(token),
+                    account: owner,
+                    old: 0,
+                    new: 3,
+                },
+            ]
+        };
+        let mut lapsing = register(first, 0, 1, Expiry::Lapses(1));
+        lapsing.push(Atom::Resolver {
+            registry,
+            token: first,
+            to: Pointer::Other(0),
+        });
+        let mut again = vec![Atom::Burn {
+            registry,
+            token: first,
+            from: 1,
+        }];
+        again.extend(register(second, 0, 2, Expiry::Far));
+        let opening = match registry {
+            Registry::Declared => Atom::RootEth,
+            Registry::Announced => Atom::Announce,
+        };
+        let actions = vec![
+            in_new_block(vec![opening]),
+            in_new_block(lapsing),
+            in_new_block(register(other, 1, 3, Expiry::Far)),
+            in_new_block(again),
+            in_new_block(vec![Atom::Transfer {
+                registry,
+                token: second,
+                from: 2,
+                to: 3,
+            }]),
+        ];
+        for (layout, split_kind) in RUNS {
+            if layout == Layout::OneBlock {
+                continue;
+            }
+            if let Err(error) = registry_orders::check(&wiring, &actions, layout, split_kind, 0) {
+                failures.push(format!(
+                    "{registry:?} {layout:?} {split_kind:?}: {}\n{}\n  {error:#}",
+                    registry_orders::signature(&error),
+                    registry_orders::describe(&actions, layout)
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "{} runs of the deployed re-registration failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
     Ok(())
 }
