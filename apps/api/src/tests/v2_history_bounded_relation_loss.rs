@@ -582,3 +582,155 @@ async fn self_transfer_after_a_later_acquisition_admits_no_older_events() -> Res
     );
     database.cleanup().await
 }
+
+/// The events route's current-relation anchors of `address` at `bound`: the stored listing's,
+/// with the name count of every composition that read made, and the composed read's.
+async fn stored_and_composed_anchors(
+    database: &TestDatabase,
+    address: &str,
+    relations: Option<&[bigname_storage::AddressNameRelation]>,
+    bound: &std::collections::BTreeMap<String, i64>,
+) -> Result<(
+    std::collections::BTreeSet<(String, Uuid)>,
+    Vec<usize>,
+    std::collections::BTreeSet<(String, Uuid)>,
+)> {
+    let (stored, batches) = with_batches(bigname_storage::load_stored_address_anchors(
+        &database.pool,
+        address,
+        None,
+        relations,
+        bound,
+    ))
+    .await;
+    let composed = bigname_storage::load_composed_address_anchors(
+        &database.pool,
+        address,
+        None,
+        relations,
+        bound,
+    )
+    .await?;
+    Ok((stored?, batches, composed))
+}
+
+// The stored anchors of a holder that transfers its token to itself above the bound: today's
+// read admits the name through the same-holder rule whether the stored row was derived at the
+// bound with no cited block at or below it, or one publication past the bound with the cited
+// block above it. The stored read admits it too, and composes nothing while every stored row's
+// cited block is at or below the bound.
+#[tokio::test]
+async fn a_self_transfer_above_the_bound_keeps_the_stored_anchor() -> Result<()> {
+    const NAME: &str = "stored-self-transfer.eth";
+    let owner: &[bigname_storage::AddressNameRelation] =
+        &[bigname_storage::AddressNameRelation::TokenHolder];
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_6900).await?;
+    let mut grant = v2_history_event(
+        "stored-self-transfer-grant",
+        Some(&logical_name_id),
+        Some(resource),
+        "RegistrationGranted",
+        205,
+    );
+    grant.after_state["registrant"] = json!(BOUNDED_ADDRESS);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+    publish_test_families(&database, 240).await?;
+    let expected = std::collections::BTreeSet::from([(logical_name_id.clone(), resource)]);
+
+    let (stored, batches, composed) =
+        stored_and_composed_anchors(&database, BOUNDED_ADDRESS, Some(owner), &bounded_at(240))
+            .await?;
+    assert_eq!(composed, expected);
+    assert_eq!(stored, composed, "held at the bound");
+    assert!(batches.is_empty(), "held at the bound: {batches:?}");
+
+    let mut self_transfer = v2_history_event(
+        "stored-self-transfer-241",
+        Some(&logical_name_id),
+        Some(resource),
+        "TokenControlTransferred",
+        241,
+    );
+    self_transfer.before_state = json!({ "from": BOUNDED_ADDRESS });
+    self_transfer.after_state = json!({ "source_event": "Transfer", "to": BOUNDED_ADDRESS });
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[self_transfer]).await?;
+    publish_test_families(&database, 241).await?;
+    let block: Option<i64> = sqlx::query_scalar(
+        "SELECT token_holder_block FROM bigname_phase.project_address_listing
+         WHERE address = $1 AND logical_name_id = $2",
+    )
+    .bind(BOUNDED_ADDRESS)
+    .bind(&logical_name_id)
+    .fetch_one(&database.pool)
+    .await?;
+    let (stored, _, composed) =
+        stored_and_composed_anchors(&database, BOUNDED_ADDRESS, Some(owner), &bounded_at(240))
+            .await?;
+    assert_eq!(composed, expected, "derived one publication past the bound");
+    assert_eq!(stored, composed, "derived one publication past the bound");
+    assert_eq!(
+        block,
+        Some(241),
+        "the row derived at 241 cites the self-transfer"
+    );
+
+    // A row derived at a publication below its cited event stores no block: the writer keeps a
+    // cited block only at or below its publication (`families/records/address_listing.rs`).
+    sqlx::query(
+        "UPDATE bigname_phase.project_address_listing SET token_holder_block = NULL
+         WHERE address = $1 AND logical_name_id = $2",
+    )
+    .bind(BOUNDED_ADDRESS)
+    .bind(&logical_name_id)
+    .execute(&database.pool)
+    .await?;
+    let (stored, _, composed) =
+        stored_and_composed_anchors(&database, BOUNDED_ADDRESS, Some(owner), &bounded_at(241))
+            .await?;
+    assert_eq!(composed, expected, "derived with no cited block");
+    assert_eq!(stored, composed, "derived with no cited block");
+    database.cleanup().await
+}
+
+// The stored anchors equal the composed ones for a bulk holder at its publication and at a
+// lowered bound some registrations lie above, and for a holder of surface-less registry
+// children; at the publication the stored read composes nothing.
+#[tokio::test]
+async fn stored_anchors_equal_the_composed_anchors() -> Result<()> {
+    use bigname_storage::AddressNameRelation::{EffectiveController, TokenHolder};
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_bulk_address_names(&database, 30).await?;
+    let at =
+        |block: i64| std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(), block)]);
+    for relations in [
+        None,
+        Some(&[TokenHolder][..]),
+        Some(&[EffectiveController][..]),
+    ] {
+        for block in [4000, 3006, 2999] {
+            let (stored, batches, composed) =
+                stored_and_composed_anchors(&database, BULK_ADDRESS, relations, &at(block)).await?;
+            assert_eq!(stored, composed, "{relations:?} at {block}");
+            if block == 4000 {
+                assert_eq!(composed.len(), 30, "{relations:?}");
+                assert!(batches.is_empty(), "{relations:?}: {batches:?}");
+            }
+        }
+    }
+    database.cleanup().await?;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_children_fixture(&database).await?;
+    for block in [240, 206] {
+        let (stored, batches, composed) =
+            stored_and_composed_anchors(&database, RC_OWNER, None, &bounded_at(block)).await?;
+        assert_eq!(stored, composed, "at {block}");
+        if block == 240 {
+            assert!(batches.is_empty(), "{batches:?}");
+        }
+    }
+    database.cleanup().await
+}

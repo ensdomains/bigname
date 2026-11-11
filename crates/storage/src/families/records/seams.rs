@@ -19,6 +19,66 @@ mod scoped {
         static WALK_FILTER_NAMES: Arc<Mutex<Vec<usize>>>;
         static WALK_CREATED_AT_CLEARED: String;
         static LEGACY_WALK_BATCHES: ();
+        static COMPOSED_ADDRESS_NAMES: ();
+        static AFTER_LISTING_PAGE: ListingPageHook;
+        static LISTING_PLANS: Arc<Mutex<Vec<ListingPlan>>>;
+    }
+
+    /// The plans of one listing statement: with its values, run (`EXPLAIN (ANALYZE, BUFFERS)`),
+    /// and generic, with none (`EXPLAIN (GENERIC_PLAN)`).
+    #[derive(Clone, Debug)]
+    pub struct ListingPlan {
+        pub statement: &'static str,
+        pub custom: serde_json::Value,
+        pub generic: serde_json::Value,
+    }
+
+    /// Runs `future` appending to `plans` the plans of every statement the stored address
+    /// listing reads run in it, each explained before it runs.
+    pub async fn with_listing_plans<F: Future>(
+        plans: Arc<Mutex<Vec<ListingPlan>>>,
+        future: F,
+    ) -> F::Output {
+        LISTING_PLANS.scope(plans, future).await
+    }
+
+    pub(crate) fn listing_plans_wanted() -> bool {
+        LISTING_PLANS.try_with(|_| ()).is_ok()
+    }
+
+    pub(crate) fn note_listing_plan(plan: ListingPlan) {
+        let _ = LISTING_PLANS.try_with(|plans| {
+            if let Ok(mut plans) = plans.lock() {
+                plans.push(plan);
+            }
+        });
+    }
+
+    /// A step run between a listing page's rows and its total.
+    pub type ListingPageHook =
+        Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+    /// Runs `future` with `GET /v1/addresses/{address}/names` on the ownership relations
+    /// composing its page from the address index, as it did before the stored listing. Tests
+    /// compare the listing's pages with it.
+    pub async fn with_composed_address_names<F: Future>(future: F) -> F::Output {
+        COMPOSED_ADDRESS_NAMES.scope((), future).await
+    }
+
+    pub(crate) fn composed_address_names() -> bool {
+        COMPOSED_ADDRESS_NAMES.try_with(|_| ()).is_ok()
+    }
+
+    /// Runs `future` with `hook` awaited after each listing page reads its rows and before it
+    /// reads its total.
+    pub async fn with_listing_page_hook<F: Future>(hook: ListingPageHook, future: F) -> F::Output {
+        AFTER_LISTING_PAGE.scope(hook, future).await
+    }
+
+    pub(crate) async fn after_listing_page() {
+        if let Ok(step) = AFTER_LISTING_PAGE.try_with(|hook| hook()) {
+            step.await;
+        }
     }
 
     /// Passive work/stage observations for one caller. No selection or write behavior changes.
@@ -142,7 +202,7 @@ mod scoped {
         COMPOSED_NAME_BATCHES.scope(batches, future).await
     }
 
-    pub(in crate::families::records) fn note_composed_batch(names: usize) {
+    pub(crate) fn note_composed_batch(names: usize) {
         let _ = COMPOSED_NAME_BATCHES.try_with(|batches| {
             if let Ok(mut batches) = batches.lock() {
                 batches.push(names);
@@ -197,18 +257,20 @@ const EXACT_TOTAL_CAP: usize = 1_000;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use scoped::{
-    candidate_statement, lookup_work_timer, note_lookup_work, with_address_name_paths,
-    with_compose_chunk, with_composed_name_batches, with_exact_total_cap,
-    with_inventory_read_counter, with_legacy_walk_batches, with_lookup_work,
+    ListingPageHook, ListingPlan, candidate_statement, lookup_work_timer, note_lookup_work,
+    with_address_name_paths, with_compose_chunk, with_composed_address_names,
+    with_composed_name_batches, with_exact_total_cap, with_inventory_read_counter,
+    with_legacy_walk_batches, with_listing_page_hook, with_listing_plans, with_lookup_work,
     with_role_read_counter, with_walk_created_at_cleared, with_walk_filter_names,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::{
-    compose_chunk, exact_total_cap, legacy_walk_batches, note_address_name_path, note_walk_filter,
-    walk_created_at_cleared,
+    after_listing_page, compose_chunk, composed_address_names, exact_total_cap,
+    legacy_walk_batches, listing_plans_wanted, note_address_name_path, note_composed_batch,
+    note_listing_plan, note_walk_filter, walk_created_at_cleared,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use scoped::{note_composed_batch, note_inventory_read, note_role_read};
+pub(super) use scoped::{note_inventory_read, note_role_read};
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn exact_total_cap() -> usize {
@@ -237,7 +299,15 @@ pub(crate) fn compose_chunk() -> usize {
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
-pub(super) fn note_composed_batch(_names: usize) {}
+pub(crate) fn note_composed_batch(_names: usize) {}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn composed_address_names() -> bool {
+    false
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) async fn after_listing_page() {}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn note_inventory_read(_resources: usize) {}

@@ -13,7 +13,7 @@ use axum::Json;
 use bigname_storage::UnixSeconds;
 use bigname_storage::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentRow,
-    families::records::{FormerOwnerFilter, load_family_former_owner_page},
+    families::records::FormerOwnerFilter,
 };
 
 use crate::AppState;
@@ -95,7 +95,7 @@ pub(super) async fn get_address_former_owners(
         expires_before: params.expires_before,
         parent,
     };
-    let page = load_family_former_owner_page(
+    let page = bigname_storage::load_address_former_owner_page(
         snapshot.conn().await?,
         &filter,
         match order {

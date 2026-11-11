@@ -208,8 +208,8 @@ async fn v2_address_names_sort_by_created_at_is_first_observation_with_identity_
         Some(5),
     )
     .await?;
-    // shared-one and shared-two were first observed at the same block: identity breaks the tie
-    // the same way in both directions.
+    // shared-one and shared-two were first observed at the same block: identity breaks the tie,
+    // and descending order is the exact reverse of ascending.
     assert_eq!(
         row_names(&asc),
         [
@@ -231,8 +231,8 @@ async fn v2_address_names_sort_by_created_at_is_first_observation_with_identity_
     assert_eq!(
         row_names(&desc),
         [
-            "shared-one.eth",
             "shared-two.eth",
+            "shared-one.eth",
             "gamma.eth",
             "beta.eth",
             "alpha.eth"
@@ -275,7 +275,7 @@ async fn v2_address_names_sort_by_created_at_is_first_observation_with_identity_
     .await?;
     assert_eq!(
         row_names(&owned),
-        ["shared-one.eth", "shared-two.eth", "gamma.eth", "alpha.eth"]
+        ["shared-two.eth", "shared-one.eth", "gamma.eth", "alpha.eth"]
     );
 
     // A created_at cursor resumes only a created_at page of the same order.
