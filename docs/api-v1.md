@@ -774,9 +774,7 @@ Rules:
   group. Relation sets that require post-filtering retain `total_count=null`;
   use the address-name GET collection for an exact single-relation count.
   Address-name ownership collections return the exact count of their filtered,
-  deduplicated entries before the cursor when the address has at most 1,000
-  candidate names, and with `include=total_count` up to 10,000. Above that it
-  is `null`.
+  deduplicated entries before the cursor.
   Address history returns `total_count=null` by default; `include=total_count`
   requests an exact total over the same filters and published snapshot as its
   page. Name history populates it with a capped count over the page's exact

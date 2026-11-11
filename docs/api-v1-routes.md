@@ -3678,17 +3678,15 @@ introduces it rebuilds Project from full history before serving the option; see
   counts those as well. For the registrations an address holds, add
   `parent=eth`: `GET /v1/addresses/{address}/names?relation=owner&parent=eth&dedupe=registration&page_size=1&include=total_count`
   returns a `page.total_count` with one entry per `.eth` registration the
-  address holds, a wrapped `.eth` name once, and no subname, for an address
-  with at most 10,000 candidate names and `null` above that;
+  address holds, a wrapped `.eth` name once, and no subname;
   `parent=base.eth&namespace=basenames` counts Basenames registrations. The count
   covers the registrations this route lists: it misses a `.eth` name with no name
   surface that `registerOnly` granted onto a registry record another address owns
   (a known residual below), and it lists no Basenames registry child without a name
   row. A name
   count uses `dedupe=name`.
-  With `include=total_count` this GET route supplies exact totals, up to
-  10,000 candidate names, even for single relations whose `POST /v1/lookup`
-  result count remains unknown.
+  With `include=total_count` this GET route supplies exact totals even for
+  single relations whose `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
   the complete `q` value as an ENSIP-15 name prefix and normalizes it with the
   same normalizer used for indexed names before comparing it directly with the
