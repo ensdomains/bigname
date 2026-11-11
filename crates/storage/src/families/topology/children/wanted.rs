@@ -10,8 +10,8 @@
 //! of a node in a namespace, and the probe is a unique-index lookup whatever the planner's
 //! statistics say. The Project writer runs this statement during a redo, on tables rebuilt
 //! moments before, where a probe by namespace and node may take any index that leads with the
-//! namespace and read the whole namespace once per child. The namespace and node conditions stay
-//! as a recheck.
+//! namespace and read the whole namespace once per child. The probe has no namespace or node
+//! condition besides the id, so no other index can serve it.
 //!
 //! Each probe is its own subquery (`OFFSET 0`), so its cost follows the children wanted, never
 //! the planner's estimate of the parents: the Project writer derives a block's touched children
@@ -38,7 +38,6 @@ pub(super) fn push<'a>(builder: &mut QueryBuilder<'a, Postgres>, children: &'a [
             CROSS JOIN LATERAL (
                 SELECT child.* FROM bigname_phase.name_surfaces child
                 WHERE child.logical_name_id = scope.namespace || ':' || wanted.node
-                  AND child.namespace = scope.namespace AND lower(child.namehash) = wanted.node
                 OFFSET 0
             ) child
         ), wanted_registration AS MATERIALIZED (

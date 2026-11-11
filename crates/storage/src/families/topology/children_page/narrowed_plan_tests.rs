@@ -15,7 +15,9 @@ const CHUNK: i64 = 1_000;
 const SKEWED_OTHERS: i64 = 99;
 /// The parents of the many-parents case: one per child, and a former parent for 200 of them.
 const MANY: i64 = 1_200;
-/// The children `1..=SURFACED` have a surface of their own, read by `wanted_child`.
+/// On the fixture without statistics the children `1..=SURFACED` have a surface of their own,
+/// read by `wanted_child`. The fixture with statistics keeps none, the shape on which the
+/// namespace and node probe once took `name_surfaces_project_parent_key_idx`.
 const SURFACED: i64 = 500;
 /// Every plan cache mode: the custom plan, the generic plan, and PostgreSQL's own choice.
 const PLAN_MODES: [&str; 3] = ["force_custom_plan", "force_generic_plan", "auto"];
@@ -49,8 +51,8 @@ fn condition(scan: &Value) -> Option<&str> {
 /// with child `10_000 + k` each, beside `install`'s parent and its 2,000 children. Many: parents
 /// `m<k>` with child `20_000 + k` for k up to 1,000, and parents `m<1_000 + k>` that listed
 /// child `20_000 + k` for k up to 200 before it moved (an earlier position). The children
-/// `1..=SURFACED` also get a surface, with the id every surface has (`<namespace>:<namehash>`).
-async fn seed(conn: &mut PgConnection) -> Result<()> {
+/// `1..=surfaced` also get a surface, with the id every surface has (`<namespace>:<namehash>`).
+async fn seed(conn: &mut PgConnection, surfaced: i64) -> Result<()> {
     raw_sql(&format!(
         "INSERT INTO name_surfaces(logical_name_id, namespace, raw_name, raw_labels,
              dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
@@ -76,7 +78,7 @@ async fn seed(conn: &mut PgConnection) -> Result<()> {
          SELECT 'ens:' || node, 'ens', 'c' || n || '.eth', ARRAY['c' || n, 'eth'], '\\x00', node,
              ARRAY[node, 'eth'], 'fixture', 'active', '{CHAIN}', 'block', 100, 'canonical'
          FROM (SELECT n, '0x' || lpad(to_hex(n), 64, '0') AS node
-               FROM generate_series(1, {SURFACED}) n) children;"
+               FROM generate_series(1, {surfaced}) n) children;"
     ))
     .execute(&mut *conn)
     .await?;
@@ -109,7 +111,8 @@ async fn narrowed_plans(prefix: &str, statistics: bool) -> Result<()> {
     let result = async {
         let mut conn = database.pool().acquire().await?;
         install_with(&mut conn, statistics).await?;
-        seed(&mut conn).await?;
+        let surfaced = if statistics { 0 } else { SURFACED };
+        seed(&mut conn, surfaced).await?;
         let skewed_kept = CHUNK - SKEWED_OTHERS;
         ensure!(
             CHILDREN > skewed_kept,
@@ -146,7 +149,7 @@ async fn narrowed_plans(prefix: &str, statistics: bool) -> Result<()> {
             ))
             .execute(&mut *conn)
             .await?;
-            let surfaced = children.iter().filter(|&&n| n <= SURFACED).count();
+            let found = children.iter().filter(|&&n| n <= surfaced).count();
             for mode in PLAN_MODES {
                 raw_sql(&format!("SET plan_cache_mode = {mode}"))
                     .execute(&mut *conn)
@@ -161,7 +164,7 @@ async fn narrowed_plans(prefix: &str, statistics: bool) -> Result<()> {
                 .await?;
                 let cell = format!("{case}, {mode}, statistics {statistics}");
                 check(&plan, parents.len(), &cell)?;
-                check_child_probe(&plan, nodes.len(), surfaced, &cell)?;
+                check_child_probe(&plan, nodes.len(), found, &cell)?;
             }
         }
         Ok(())
@@ -220,7 +223,8 @@ fn rows_read(scan: &Value) -> f64 {
         * loops
 }
 
-/// The checks of `wanted_child`'s probe: every executed surface read keyed on a wanted node goes
+/// The checks of `wanted_child`'s probe: every executed surface read keyed on a wanted child's
+/// node (not the parents' probe, which is keyed on the wanted parent ids) goes
 /// through `name_surfaces_pkey`, returns at most one row per loop, and reads no more rows than
 /// there are wanted children, and together they find each surfaced child once.
 fn check_child_probe(plan: &Value, wanted: usize, surfaced: usize, cell: &str) -> Result<()> {
@@ -233,7 +237,7 @@ fn check_child_probe(plan: &Value, wanted: usize, surfaced: usize, cell: &str) -
             [condition(scan), scan["Filter"].as_str()]
                 .into_iter()
                 .flatten()
-                .any(|text| text.contains("wanted"))
+                .any(|text| text.contains("wanted") && text.contains(".node"))
         })
         .collect();
     ensure!(
