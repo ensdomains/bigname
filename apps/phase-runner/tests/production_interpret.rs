@@ -11651,3 +11651,153 @@ fn test_timing() -> TimingConfig {
 fn block_hash(chain_id: &str, block: i64) -> String {
     format!("{chain_id}-block-{block}")
 }
+
+/// TYR-521 F5, as validation. `EXTEND_STAMP` keeps `redo_mode` (`redo_stamp.rs:37-49`), so a
+/// required range merged into an interrupted flag recomputation is carried by that
+/// recomputation. This asks whether the rerun the runner then asks for re-derives the stamped
+/// blocks. A stale `after_state` on block 1 stands for the derived rows the required redo exists
+/// to rewrite. The control chain shows an Interpret redo over the same range rewrites it.
+#[tokio::test]
+async fn a_required_range_merged_into_an_interrupted_recompute_is_rederived_by_its_rerun()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_flags_merged_required").await?;
+    let pool = scratch.pool();
+    let tampered = |chain: &'static str| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM normalized_events
+             WHERE chain_id = $1 AND block_number = 1 AND after_state ? 'tampered'",
+        )
+        .bind(chain)
+        .fetch_one(pool)
+        .await
+    };
+    let tamper = |chain: &'static str| async move {
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = COALESCE(after_state, '{}'::jsonb) || '{\"tampered\": true}'::jsonb
+             WHERE chain_id = $1 AND block_number = 1",
+        )
+        .bind(chain)
+        .execute(pool)
+        .await
+    };
+
+    // Control: an Interpret redo over 1..=2 rewrites block 1.
+    let control = "interpret-flags-merged-control";
+    seed_fixture(pool, control, &[(1, "alice"), (2, "bob")]).await?;
+    run_engine(pool, control, 0, 2, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(pool, control, 2).await?;
+    tamper(control).await?;
+    assert!(
+        tampered(control).await? > 0,
+        "block 1 holds no events to tamper"
+    );
+    recompute_runner(&scratch, control, "flags-merged-control-runner")?
+        .redo(
+            &chain_config(control)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(1, 2)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(
+        tampered(control).await?,
+        0,
+        "the control redo did not rewrite block 1"
+    );
+
+    // The case: a flag recomputation of 2..=2 interrupted after its write.
+    let chain = "interpret-flags-merged-required";
+    seed_fixture(pool, chain, &[(1, "alice"), (2, "bob")]).await?;
+    run_engine(pool, chain, 0, 2, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(pool, chain, 2).await?;
+    let interrupted_runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_and_project(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(InterruptAfterRecomputePhase {
+                engine: Engine::new(pool.clone()),
+            }),
+            Arc::new(ProjectPhase::new(pool.clone())),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        "flags-merged-interrupted-runner",
+        test_timing(),
+    )?;
+    interrupted_runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(2, 2)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the test interpret phase must interrupt recompute after its write");
+
+    // A required redo from block 1 lands on it, as `redo_stamp::stamp` merges one: the union of
+    // 2..=2 and 1..=(cursor 2), through `EXTEND_STAMP` itself.
+    let extended = sqlx::query(phase_runner::EXTEND_STAMP)
+        .bind(chain)
+        .bind("interpret")
+        .bind(1_i64)
+        .bind(2_i64)
+        .bind(1_i64)
+        .bind(2_i64)
+        .execute(pool)
+        .await?;
+    assert_eq!(extended.rows_affected(), 1);
+    tamper(chain).await?;
+    assert!(
+        tampered(chain).await? > 0,
+        "block 1 holds no events to tamper"
+    );
+    let marker: (String, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT redo_mode, redo_from_block_number, redo_to_block_number, last_error
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        (marker.0.as_str(), marker.1, marker.2),
+        ("recompute_flags", 1, 2)
+    );
+
+    // The rerun a normal start asks for.
+    let refusal = PhaseStore::new(pool.clone())
+        .start_phase(
+            chain,
+            PhaseName::Interpret,
+            &phase_runner::phase::RunMode::Normal,
+        )
+        .await
+        .expect_err("a normal start must refuse the interrupted recompute");
+    assert!(
+        refusal
+            .to_string()
+            .contains("--phase recompute-flags --from-block 1 --to-block 2"),
+        "{refusal}"
+    );
+    recompute_runner(&scratch, chain, "flags-merged-rerun-runner")?
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(1, 2)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret' AND redo_in_progress",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    let stale = tampered(chain).await?;
+    assert!(
+        stale == 0,
+        "the rerun completed (interpret redo markers left: {pending}) and {stale} stamped events \
+         on block 1 were not re-derived"
+    );
+    scratch.cleanup().await
+}
