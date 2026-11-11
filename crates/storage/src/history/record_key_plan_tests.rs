@@ -369,17 +369,9 @@ fn plan_shapes() -> Vec<KeyShape> {
                 &scoped,
             );
         }
-        add(
-            "row 23 no window, resolver",
-            key_filter(
-                "text:avatar",
-                order,
-                KeyScope::Resolver(KEY_CHAIN, LARGE),
-                None,
-            ),
-            None,
-            &[EMITTER_KEY_INDEX, RESET_ARM],
-        );
+        // Row 23, a record row with no block, is only readable without a block window, which
+        // a served read always carries, so its plan is not pinned here. Its rows and order are
+        // in `record_key_pages_match_the_plain_statement` ("no window" reads).
         add(
             "G-13 resolver outside the window",
             key_filter(
