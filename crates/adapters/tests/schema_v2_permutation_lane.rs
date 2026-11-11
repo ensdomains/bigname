@@ -5108,10 +5108,11 @@ fn registry_order_finding_an_expired_registration_linked_in_one_transaction() ->
     )
 }
 
-/// Shrunk from seeds 9135676728762764436 and 6413280996045462611: a registration with no
-/// `TokenResource`, a role grant on its resource in the same transaction, and another grant in a
-/// later block. The split replay re-emits the token lineage the first grant anchored, anchored at
-/// the later grant, which the writer's upsert guard rejects.
+/// Shrunk from seeds 9135676728762764436 and 6413280996045462611 in the first sweep: a
+/// registration with no `TokenResource`, a role grant on its resource in the same transaction, and
+/// another grant in a later block. The split replay re-emits the token lineage the first grant
+/// anchored, anchored at the later grant, which the writer's upsert guard rejects. The same kind
+/// of refusal as TYR-522, on the token lineage instead of the surface binding.
 #[test]
 fn registry_order_finding_role_grants_on_an_unlinked_registration() -> Result<()> {
     use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
@@ -5258,6 +5259,86 @@ fn registry_order_finding_a_live_token_registered_again() -> Result<()> {
                     to: Pointer::Other(0),
                 },
             ]),
+        ],
+    )
+}
+
+/// Shrunk from seed 1494661391878574169: the declared registry registers a label whose expiry has
+/// passed and links it, registers the same token again in the same block with an expiry that
+/// lapses before the next block, and a later block sets its resolver. The split replay derives a
+/// different expiry release than the whole pass.
+#[test]
+fn registry_order_finding_an_expired_token_registered_again_until_the_next_block() -> Result<()> {
+    use crate::permutation::registry_orders::{Action, Atom, Expiry, Pointer, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let registry = Registry::Declared;
+    let register = |owner, expiry| Atom::Register {
+        registry,
+        token,
+        label: 0,
+        owner,
+        expiry,
+    };
+    registry_order_finding(
+        "an expired token registered again until the next block",
+        &[
+            in_new_block(vec![Atom::RootEth]),
+            in_new_block(vec![
+                register(1, Expiry::Past),
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+            ]),
+            Action {
+                atoms: vec![register(2, Expiry::Lapses(1))],
+                new_block: false,
+                same_transaction: false,
+            },
+            in_new_block(vec![Atom::Resolver {
+                registry,
+                token,
+                to: Pointer::Other(0),
+            }]),
+        ],
+    )
+}
+
+/// Shrunk from seed 14847395240998665607: an announced registry points a token it never
+/// registered at itself, unregisters the token in the next transaction, and transfers it in a
+/// later block. Only the whole pass marks the transfer's registry state as pending hydration.
+#[test]
+fn registry_order_finding_a_transfer_of_an_unregistered_pointer_token() -> Result<()> {
+    use crate::permutation::registry_orders::{Action, Atom, Pointer, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let registry = Registry::Announced;
+    registry_order_finding(
+        "a transfer of an unregistered pointer token",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            in_new_block(vec![Atom::Subregistry {
+                registry,
+                token,
+                to: Pointer::Announced,
+            }]),
+            Action {
+                atoms: vec![Atom::Unregister { registry, token }],
+                new_block: false,
+                same_transaction: false,
+            },
+            in_new_block(vec![Atom::Transfer {
+                registry,
+                token,
+                from: 2,
+                to: 2,
+            }]),
         ],
     )
 }
