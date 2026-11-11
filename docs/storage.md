@@ -974,6 +974,25 @@ populated upgrades must first use the [concurrent installer](../ops/history-regi
 No facts, memberships, markers or hash inputs change, so this addition requires no Interpret
 or Project reset and an existing rebuild can continue from its recorded progress.
 
+The historical address membership statement (`push_historical_address_matches_query` in
+`crates/storage/src/history/address_evidence.rs`), which `/v1/events?address=`,
+`/v1/diagnostics/events?address=` and the address history walker send, reads three read-only
+indexes on `normalized_events`. The normalized-events baseline and
+`20261112120000_normalized_events_address_key_indexes.sql` install them, and populated upgrades
+require the [concurrent prebuild](../ops/address-key-indexes/README.md):
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_address_registrant_idx` | the `registrant` probe: rows whose `after_state` has a `registrant` key, by the lowercased value |
+| `normalized_events_address_to_idx` | the `to` probe, which the token holder and ENSv2 controller arms share: rows with a `to` key, by the lowercased value |
+| `normalized_events_address_owner_idx` | the `owner` probe of the registry owner arm: rows with an `owner` key, by the lowercased value |
+
+Their predicates name no event kind, visibility or canonicality state, so one probe text serves
+every flag combination, diagnostics included, and the statement applies those filters after the
+probes. They change no rows, hash inputs, catalogue encoding or phase markers and require no
+replay. The earlier kind-partial `normalized_events_address_*_match_idx` indexes stay installed
+and no statement reads them.
+
 Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
 `normalized_events` for its registry root role branch, installed by the normalized-events
 baseline and `20261005120000_normalized_events_address_root_permission_idx.sql` and changing no
@@ -1142,11 +1161,19 @@ moves the citation without changing the holder; the earliest transfer in the ran
 address as its sender, which proves the address held the name at the bound. The three
 kinds of historical events are: a `RegistrationGranted` whose `registrant` is the address, a
 `TokenControlTransferred` whose `to` is the address, and an `AuthorityTransferred` whose `owner`
-is the address, each compared lowercased. One partial expression index per kind keys those rows
-by the lowercased value: `normalized_events_address_registrant_match_idx`,
-`normalized_events_address_token_holder_match_idx`, and
-`normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
-identical to the query text. Each candidate arm probes the name, resource, node, resolver/record
+is the address, each compared lowercased. The membership statement
+(`push_historical_address_matches_query` in `crates/storage/src/history/address_evidence.rs`)
+reads them through one subquery per key, `registrant`, `to` and `owner`. Each subquery holds only
+the key's lowercased match and the key's presence, ends in `OFFSET 0`, and reads one partial
+expression index over every row that carries the key: `normalized_events_address_registrant_idx`,
+`normalized_events_address_to_idx`, and `normalized_events_address_owner_idx`. The event kind,
+visibility, canonicality, namespace, publication bound and arm filters all apply after the
+subqueries. PostgreSQL keeps no statistics on a partial index's expression and estimates every
+address alike, so a merged statement combined the address probes with
+`normalized_events_projection_idx` over every grant and transfer of the chain. The fence leaves
+the planner no such clause to combine. A row that holds the address under two keys comes from two
+subqueries and yields one anchor. The indexes' expressions and predicates must stay identical to
+the subqueries' text. Each candidate arm probes the name, resource, node, resolver/record
 key, or selected link through the corresponding index. A lateral planning boundary keeps event
 probes keyed by that address's evidence even at large cardinalities. The database may sort and
 spill all address-specific candidates before returning the first batch; this bounds API memory,

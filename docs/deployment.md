@@ -6848,3 +6848,43 @@ depends on planner statistics, which a redo's freshly rebuilt tables may not hav
 - It needs no schema-migration and no new index. `name_surfaces_project_parent_key_idx` stays as
   it is.
 - The release that carries it redoes Project anyway, so it adds no redo of its own.
+
+## Address membership probes keyed inside a planning fence
+
+`GET /v1/events?address=…`, `GET /v1/diagnostics/events?address=…` and the address history walker
+first list the names and resources an address held in the past
+([table ownership](storage.md#table-ownership)). Before this build that statement estimated every
+address at PostgreSQL's default selectivity, because the planner keeps no statistics on a partial
+index's expression. Against that estimate it combined the address probes with
+`normalized_events_projection_idx` over every grant and transfer of the chain on each call. The
+statement now reads each address key, `registrant`, `to` and `owner`, through its own subquery that
+holds only the key's match and presence, and applies every other filter afterwards. Three new
+partial indexes, one per key, serve those subqueries.
+
+- The rows are the same for every route and flag combination. No response changes.
+- It rotates the [projection content hash](glossary.md#projection-content-hash), because the
+  statement is built in a hashed composition file
+  (`crates/storage/src/history/address_evidence.rs`). The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not move.
+- The rotation is formal. Project's publication statement in the same file is unchanged, so the
+  full-range Project redo rewrites `project_address_history_anchor` and every other projected row
+  to the same values. The release that carries the change redoes Project anyway, so it adds no
+  redo of its own.
+- It adds schema-migration `20261112120000_normalized_events_address_key_indexes.sql` and no
+  table, manifest or setting. The manifest-authority fingerprint and the compiled watch plan are
+  unchanged, so stamp no Ingest redo.
+
+Roll it out in this order:
+
+1. Build the three indexes with `ops/address-key-indexes/install.sql`, as its
+   [README](../ops/address-key-indexes/README.md) describes, on every database the build is
+   deployed to. The runner and the API keep running while it builds, and the previous image does
+   not read them.
+2. Apply the schema-migrations. The schema-migration adopts the prebuilt indexes by name and
+   reviewed definition, and refuses a populated table without them.
+3. Swap the image under the release's re-derivation boundary.
+
+The indexes join the drop list of the [walk index set](storage.md#walk-index-set). The API refuses
+to start without them unless `BIGNAME_API_WALK_INDEX_SET_CHECK=warn`, because without them each
+probe reads `normalized_events` sequentially. The earlier kind-partial
+`normalized_events_address_*_match_idx` indexes stay installed until a later build drops them.
