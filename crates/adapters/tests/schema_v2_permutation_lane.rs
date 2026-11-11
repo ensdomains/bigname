@@ -5987,3 +5987,110 @@ fn registry_order_sweep_runs_every_layout_after_a_known_failure() -> Result<()> 
     );
     Ok(())
 }
+
+/// The deployed registry registering a lapsed, owned name again. `register` burns the previous
+/// owner's token, bumps the token and resource versions, then emits `LabelRegistered` for the new
+/// token id, its mint, `TokenResource` for the new resource and the owner's roles
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L429-L472 @ ens_v2@a971bd64).
+/// The name lapses between blocks, so the one-block layout, where every event shares a
+/// timestamp, cannot hold this order. Every other layout and split runs, for the declared and an
+/// announced registry, and must converge.
+#[test]
+fn registry_order_deployed_reregistration_after_a_lapse_converges_in_every_split() -> Result<()> {
+    use crate::permutation::registry_orders::{
+        Atom, Expiry, Layout, Pointer, RUNS, Registry, Token,
+    };
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let first = Token {
+        label: 0,
+        version: 0,
+    };
+    let second = Token {
+        label: 0,
+        version: 1,
+    };
+    let other = Token {
+        label: 1,
+        version: 0,
+    };
+    let mut failures = Vec::new();
+    for registry in [Registry::Declared, Registry::Announced] {
+        let register = |token: Token, label, owner, expiry| {
+            vec![
+                Atom::Register {
+                    registry,
+                    token,
+                    label,
+                    owner,
+                    expiry,
+                },
+                Atom::Mint {
+                    registry,
+                    token,
+                    to: owner,
+                },
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+                Atom::Roles {
+                    registry,
+                    resource: Some(token),
+                    account: owner,
+                    old: 0,
+                    new: 3,
+                },
+            ]
+        };
+        let mut lapsing = register(first, 0, 1, Expiry::Lapses(1));
+        lapsing.push(Atom::Resolver {
+            registry,
+            token: first,
+            to: Pointer::Other(0),
+        });
+        let mut again = vec![Atom::Burn {
+            registry,
+            token: first,
+            from: 1,
+        }];
+        again.extend(register(second, 0, 2, Expiry::Far));
+        let opening = match registry {
+            Registry::Declared => Atom::RootEth,
+            Registry::Announced => Atom::Announce,
+        };
+        let actions = vec![
+            in_new_block(vec![opening]),
+            in_new_block(lapsing),
+            in_new_block(register(other, 1, 3, Expiry::Far)),
+            in_new_block(again),
+            in_new_block(vec![Atom::Transfer {
+                registry,
+                token: second,
+                from: 2,
+                to: 3,
+            }]),
+        ];
+        for (layout, split_kind) in RUNS {
+            if layout == Layout::OneBlock {
+                continue;
+            }
+            if let Err(error) = registry_orders::check(&wiring, &actions, layout, split_kind, 0) {
+                failures.push(format!(
+                    "{registry:?} {layout:?} {split_kind:?}: {}\n{}\n  {error:#}",
+                    registry_orders::signature(&error),
+                    registry_orders::describe(&actions, layout)
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "{} runs of the deployed re-registration failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+    Ok(())
+}

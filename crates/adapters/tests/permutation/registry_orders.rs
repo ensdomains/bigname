@@ -157,10 +157,11 @@ fn only_the_transfer_lineage_differs(text: &str) -> bool {
 struct Registrations(BTreeMap<(Registry, Token), Expiry>);
 
 impl Registrations {
-    /// Applies one event at its block's timestamp. True for a `LabelRegistered` over a
-    /// registration still live at `at`. A reservation or an unregister ends the held registration,
-    /// a renewal moves its expiry and a regeneration moves it to the new token.
-    fn registers_again_while_live(&mut self, atom: Atom, at: i64) -> bool {
+    /// Applies one event at its block's timestamp. For a `LabelRegistered` over a held
+    /// registration, whether that registration is still live at `at`. A reservation or an
+    /// unregister ends the held registration, a renewal moves its expiry and a regeneration moves it
+    /// to the new token.
+    fn registers_again(&mut self, atom: Atom, at: i64) -> Option<bool> {
         match atom {
             Atom::Register {
                 registry,
@@ -170,13 +171,13 @@ impl Registrations {
             } => self
                 .0
                 .insert((registry, token), expiry)
-                .is_some_and(|before| !passed(before, at)),
+                .map(|before| !passed(before, at)),
             Atom::Reserve {
                 registry, token, ..
             }
             | Atom::Unregister { registry, token } => {
                 self.0.remove(&(registry, token));
-                false
+                None
             }
             Atom::Renew {
                 registry,
@@ -186,25 +187,124 @@ impl Registrations {
                 if let Some(current) = self.0.get_mut(&(registry, token)) {
                     *current = expiry;
                 }
-                false
+                None
             }
             Atom::Regenerate { registry, from, to } => {
                 if let Some(expiry) = self.0.remove(&(registry, from)) {
                     self.0.insert((registry, to), expiry);
                 }
-                false
+                None
             }
-            _ => false,
+            _ => None,
         }
     }
 }
 
+pub const PASSED_WHEN_EMITTED: &str = "TYR-525: a registration already passed when emitted";
+pub const CUT_TO_PASSED: &str = "TYR-525: a live expiry cut to a passed one";
+pub const AGAIN_WHILE_LIVE: &str = "TYR-525: a registration again while the first is live";
+pub const AGAIN_AFTER_LAPSE: &str = "a registration again after the first lapsed (not a ticket's)";
+
+/// Which expiry and re-registration shapes an order reaches in `layout`, in one walk, so the
+/// TYR-525 tag and the sweep's shape counts read the same model.
+fn expiry_shapes(actions: &[Action], layout: Layout) -> BTreeSet<&'static str> {
+    let mut registrations = Registrations::default();
+    let mut expiries = BTreeMap::new();
+    let mut shapes = BTreeSet::new();
+    for (atom, at) in timed_atoms(actions, layout) {
+        match registrations.registers_again(atom, at) {
+            Some(true) => {
+                shapes.insert(AGAIN_WHILE_LIVE);
+            }
+            Some(false) => {
+                shapes.insert(AGAIN_AFTER_LAPSE);
+            }
+            None => {}
+        }
+        match atom {
+            Atom::Register {
+                registry,
+                token,
+                expiry,
+                ..
+            } => {
+                if passed(expiry, at) {
+                    shapes.insert(PASSED_WHEN_EMITTED);
+                }
+                expiries.insert((registry, token), expiry);
+            }
+            Atom::Reserve {
+                registry,
+                token,
+                expiry,
+                ..
+            } => {
+                expiries.insert((registry, token), expiry);
+            }
+            Atom::Renew {
+                registry,
+                token,
+                expiry,
+            } => {
+                if let Some(&before) = expiries.get(&(registry, token))
+                    && !passed(before, at)
+                    && passed(expiry, at)
+                {
+                    shapes.insert(CUT_TO_PASSED);
+                }
+                if let Some(current) = expiries.get_mut(&(registry, token)) {
+                    *current = expiry;
+                }
+            }
+            Atom::Unregister { registry, token } => {
+                expiries.remove(&(registry, token));
+            }
+            Atom::Regenerate { registry, from, to } => {
+                if let Some(expiry) = expiries.remove(&(registry, from)) {
+                    expiries.insert((registry, to), expiry);
+                }
+            }
+            _ => {}
+        }
+    }
+    shapes
+}
+
+pub const RELEASED_POINTER_TRANSFER: &str =
+    "TYR-526: a transfer after a pointer update and an unregister";
+pub const RELINK_AFTER_CLOSE: &str = "TYR-522 S-A3: a binding closed and linked again";
+
+/// Every shape the sweep counts sequences for: each known tag's order, the two TYR-510 orders,
+/// and a registration again after the first lapsed. The default corpus must reach each.
+pub const NAMED_SHAPES: [&str; 8] = [
+    PASSED_WHEN_EMITTED,
+    CUT_TO_PASSED,
+    AGAIN_WHILE_LIVE,
+    AGAIN_AFTER_LAPSE,
+    RELEASED_POINTER_TRANSFER,
+    RELINK_AFTER_CLOSE,
+    TOKEN_RESOURCE_BEFORE_LABEL,
+    LABEL_OVER_RESERVATION,
+];
+
+/// The named shapes an order reaches in any layout the sweep runs.
+fn named_shapes(actions: &[Action]) -> BTreeSet<&'static str> {
+    let mut shapes = tyr_510_shapes(actions);
+    for (layout, _) in RUNS {
+        shapes.extend(expiry_shapes(actions, layout));
+    }
+    if transfers_a_released_pointer_token(actions) {
+        shapes.insert(RELEASED_POINTER_TRANSFER);
+    }
+    if links_a_linked_token(actions) && relinks_a_closed_binding(actions) {
+        shapes.insert(RELINK_AFTER_CLOSE);
+    }
+    shapes
+}
+
 /// A `LabelRegistered` over a token whose registration is still live at the new label's block.
 fn reregisters_a_live_token(actions: &[Action], layout: Layout) -> bool {
-    let mut registrations = Registrations::default();
-    timed_atoms(actions, layout)
-        .into_iter()
-        .any(|(atom, at)| registrations.registers_again_while_live(atom, at))
+    expiry_shapes(actions, layout).contains(AGAIN_WHILE_LIVE)
 }
 
 /// The open ticket a failure belongs to, judged on its kind, the failure text and the order's
@@ -309,59 +409,10 @@ fn relinks_a_closed_binding(actions: &[Action]) -> bool {
 /// renewal of a label that had already lapsed are orders the deployed registry emits and are not
 /// this ticket's.
 fn emits_a_passed_or_live_label(actions: &[Action], layout: Layout) -> bool {
-    let mut registrations = Registrations::default();
-    let mut expiries = BTreeMap::new();
-    for (atom, at) in timed_atoms(actions, layout) {
-        if registrations.registers_again_while_live(atom, at) {
-            return true;
-        }
-        match atom {
-            Atom::Register {
-                registry,
-                token,
-                expiry,
-                ..
-            } => {
-                if passed(expiry, at) {
-                    return true;
-                }
-                expiries.insert((registry, token), expiry);
-            }
-            Atom::Reserve {
-                registry,
-                token,
-                expiry,
-                ..
-            } => {
-                expiries.insert((registry, token), expiry);
-            }
-            Atom::Renew {
-                registry,
-                token,
-                expiry,
-            } => {
-                if let Some(&before) = expiries.get(&(registry, token))
-                    && !passed(before, at)
-                    && passed(expiry, at)
-                {
-                    return true;
-                }
-                if let Some(current) = expiries.get_mut(&(registry, token)) {
-                    *current = expiry;
-                }
-            }
-            Atom::Unregister { registry, token } => {
-                expiries.remove(&(registry, token));
-            }
-            Atom::Regenerate { registry, from, to } => {
-                if let Some(expiry) = expiries.remove(&(registry, from)) {
-                    expiries.insert((registry, to), expiry);
-                }
-            }
-            _ => {}
-        }
-    }
-    false
+    let shapes = expiry_shapes(actions, layout);
+    [PASSED_WHEN_EMITTED, CUT_TO_PASSED, AGAIN_WHILE_LIVE]
+        .iter()
+        .any(|shape| shapes.contains(shape))
 }
 
 /// The diverging event's after states differ only in the whole pass marking the registry state as
@@ -1542,6 +1593,8 @@ pub struct Sweep {
     pub findings: Vec<Finding>,
     /// Per TYR-510 shape: runs that failed, runs that passed.
     pub tyr_510_shapes: BTreeMap<&'static str, [usize; 2]>,
+    /// Per named shape: sequences that reach it in any layout.
+    pub shape_sequences: BTreeMap<&'static str, usize>,
     pub atoms: BTreeMap<&'static str, usize>,
     pub labelled_registries: BTreeSet<Registry>,
     pub token_under_two_labels: usize,
@@ -1570,6 +1623,9 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
 pub fn sweep_case(wiring: &Wiring, generated: &Case, sweep: &mut Sweep) {
     sweep.sequences += 1;
     sweep.observe(&generated.actions);
+    for shape in named_shapes(&generated.actions) {
+        *sweep.shape_sequences.entry(shape).or_default() += 1;
+    }
     let shapes = tyr_510_shapes(&generated.actions);
     for (layout, split_kind) in RUNS {
         sweep.runs += 1;
@@ -1725,6 +1781,11 @@ impl Sweep {
                 bail!("the default corpus names no registration at depth {depth}:\n{self}");
             }
         }
+        for shape in NAMED_SHAPES {
+            if !self.shape_sequences.contains_key(shape) {
+                bail!("the default corpus never reaches the shape {shape:?}:\n{self}");
+            }
+        }
         for shape in TYR_510_SHAPES {
             if !self.tyr_510_shapes.contains_key(shape) {
                 bail!("the default corpus never reaches the TYR-510 shape {shape:?}:\n{self}");
@@ -1754,6 +1815,14 @@ impl fmt::Display for Sweep {
             self.named_grants,
             self.declared_stops
         )?;
+        for shape in NAMED_SHAPES {
+            let count = self.shape_sequences.get(shape).copied().unwrap_or(0);
+            let zero = if count == 0 { " ZERO HITS" } else { "" };
+            writeln!(
+                formatter,
+                "registry_orders shape {shape:?}: sequences={count}{zero}"
+            )?;
+        }
         for (shape, [red, green]) in &self.tyr_510_shapes {
             writeln!(
                 formatter,
