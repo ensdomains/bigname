@@ -368,6 +368,14 @@ jobs:
         timeout-minutes: 20
         run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
 
+      # Probe only: the generated registry orders' report.
+      - name: Generated registry orders report (probe)
+        if: always() && matrix.name == 'core' && (github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/'))
+        run: |
+          bin="$(ls -t target/debug/deps/schema_v2_permutation_lane-* | grep -v '\.d$' | head -1)"
+          cd crates/adapters
+          "$GITHUB_WORKSPACE/$bin" generated_registry_orders_converge --nocapture --test-threads=1
+
       - name: Report stalled test databases
         if: always() && (github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/'))
         run: |
