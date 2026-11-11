@@ -17,7 +17,9 @@ two arms per chain of its window: the key's `RecordChanged` rows and the chain's
 Read forward, each index returns one chain's rows newest first. Read backward, it returns them
 oldest first, with rows without a block first, which is the `order=asc` page order. Each indexes
 the first 256 characters of the key, at most 1,024 bytes, so a row with a key of any length can
-be written. The arm matches that prefix in the index and the whole key on the row. It reads at
+be written. Stored keys longer than the indexed prefix exist. The arm matches that prefix in the
+index and the whole key on the row, so keys that share their first 256 characters are told
+apart. It reads at
 most one page of index entries, and none for a key with no write on the chain, whether the key
 is common, rare, or unknown. The reset arm reads `normalized_events_projection_idx` and sorts
 the chain's resets, which are few.
@@ -103,8 +105,8 @@ missing from that list could no longer be asked for. Before a build that reads t
 a database, list the bare keys that database stores. The query reads one entry of
 `normalized_events_record_key_history_idx` per distinct stored key prefix on each chain, so it
 needs the index. It lists the first 256 characters of each key. A key with no colon in those
-characters is listed by its prefix, so a listed value is a whole key when it is shorter than
-256 characters, and every bare key a producer stores is far shorter:
+characters is listed by its prefix, so a listed value is a whole key only when it is shorter
+than 256 characters. The three bare keys producers store are short, so each is listed whole:
 
 ```sql
 WITH RECURSIVE stored_keys(chain_id, record_key) AS (

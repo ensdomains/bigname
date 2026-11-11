@@ -3808,7 +3808,8 @@ BEGIN
         WHERE (to_regclass(expected.index_name) IS NULL) <> (expected.index_name IN ($walk_index_dropped))
     ) OR (
         SELECT count(*) FROM pg_index WHERE indrelid = 'normalized_events'::regclass
-    ) <> 17 THEN
+    ) <> 17 + 2 THEN
+        -- The 17 kept indexes and the two advisory record-key indexes, which drop.sql leaves.
         RAISE EXCEPTION 'walk index set drop did not leave exactly the kept indexes';
     END IF;
 END \$\$;
@@ -3841,7 +3842,7 @@ DO $$
 BEGIN
     IF to_regclass('normalized_events_project_v1_pointer_node_idx') IS NULL OR (
         SELECT count(*) FROM pg_index WHERE indrelid = 'normalized_events'::regclass
-    ) <> 18 THEN
+    ) <> 18 + 2 THEN
         RAISE EXCEPTION 'walk index set drop did not leave an unlisted index alone';
     END IF;
 END $$;

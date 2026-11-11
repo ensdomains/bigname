@@ -1014,9 +1014,10 @@ on `normalized_events` serve the `RecordChanged` arm. The normalized-events base
 | `normalized_events_record_emitter_key_history_idx` | the `RecordChanged` arm of a page scoped by an emitter: the same rows by chain, lowercased emitting address and key prefix, newest block first |
 
 Both indexes key on `left(after_state ->> 'record_key', 256)`, at most 1,024 bytes, because a
-whole key could pass the largest entry a btree index holds and the chain permits such keys. The
-arm matches the prefix in its index condition and the whole key on the row, so two keys that
-share their first 256 characters are told apart. The arm has every equality the read carries
+whole key could pass the largest entry a btree index holds and the chain permits such keys.
+Stored keys longer than the indexed prefix exist. The arm matches the prefix in its index
+condition and the whole key on the row, so two keys that share their first 256 characters are
+told apart. The arm has every equality the read carries
 in its index condition, so it reads at most one page of entries, and one probe for a key with
 no write on the chain. The lineage, namespace, window and duplicate conditions still drop some
 rows inside the arm, before its limit. A scoped read needs the emitter-led index. The key index
