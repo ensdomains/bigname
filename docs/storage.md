@@ -1014,7 +1014,9 @@ on `normalized_events` serve the `RecordChanged` arm. The normalized-events base
 | `normalized_events_record_emitter_key_history_idx` | the `RecordChanged` arm of a page scoped by an emitter: the same rows by chain, lowercased emitting address and key prefix, newest block first |
 
 Both indexes key on `left(after_state ->> 'record_key', 256)`, at most 1,024 bytes, because a
-whole key could pass the largest entry a btree index holds and the chain permits such keys.
+whole key could pass the largest entry a btree index holds and the chain permits such keys:
+`setText` takes the key as a `string` with no length check and emits it whole in `TextChanged`
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f).
 Stored keys longer than the indexed prefix exist. The arm matches the prefix in its index
 condition and the whole key on the row, so two keys that share their first 256 characters are
 told apart. The arm has every equality the read carries
