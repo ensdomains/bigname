@@ -547,7 +547,7 @@ transfer_node_index_migration="$ROOT/migrations/20261102130000_normalized_events
 registry_roles_index_migration="$ROOT/migrations/20261102140000_normalized_events_registry_roles_index.sql"
 resolver_link_order_index_migration="$ROOT/migrations/20261103130000_project_resolver_link_order_index.sql"
 parent_key_index_migration="$ROOT/migrations/20261104120000_name_surfaces_project_parent_key_index.sql"
-address_key_index_migration="$ROOT/migrations/20261112120000_normalized_events_address_key_indexes.sql"
+address_key_index_migration="$ROOT/migrations/20261112150000_normalized_events_address_key_indexes.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.

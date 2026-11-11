@@ -1,11 +1,11 @@
 # Sourced by check-schema with its scratch schema and assertion helpers.
-# 20261112120000_normalized_events_address_key_indexes.sql must build the baseline's three
+# 20261112150000_normalized_events_address_key_indexes.sql must build the baseline's three
 # definitions on an empty table, refuse a populated table without the prebuilds, adopt the
 # ops/address-key-indexes/install.sql prebuilds by OID with every row unchanged, rerun as a
 # no-op, leave the caller's search_path and quote_all_identifiers as it found them, and refuse
 # every shape CREATE INDEX IF NOT EXISTS would skip. install.sql must refuse an invalid index
 # under one of its names.
-address_key_migration="$ROOT/migrations/20261112120000_normalized_events_address_key_indexes.sql"
+address_key_migration="$ROOT/migrations/20261112150000_normalized_events_address_key_indexes.sql"
 address_key_install="$ROOT/ops/address-key-indexes/install.sql"
 address_key_readme=ops/address-key-indexes/README.md
 address_key_to_index=normalized_events_address_to_idx

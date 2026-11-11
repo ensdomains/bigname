@@ -35,7 +35,7 @@ They are part of the drop list of the [walk index set](../../docs/storage.md#wal
 
 Build the three indexes on every database the build is deployed to before its
 schema-migrations run. Schema-migration
-`20261112120000_normalized_events_address_key_indexes.sql` adopts them by name and refuses
+`20261112150000_normalized_events_address_key_indexes.sql` adopts them by name and refuses
 a populated table without them, so it never builds one in place: an ordinary `CREATE INDEX`
 on a populated table would block writes to `normalized_events` for the whole build.
 

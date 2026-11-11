@@ -6871,7 +6871,7 @@ partial indexes, one per key, serve those subqueries.
   full-range Project redo rewrites `project_address_history_anchor` and every other projected row
   to the same values. The release that carries the change redoes Project anyway, so it adds no
   redo of its own.
-- It adds schema-migration `20261112120000_normalized_events_address_key_indexes.sql` and no
+- It adds schema-migration `20261112150000_normalized_events_address_key_indexes.sql` and no
   table, manifest or setting. The manifest-authority fingerprint and the compiled watch plan are
   unchanged, so stamp no Ingest redo.
 

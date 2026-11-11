@@ -716,7 +716,7 @@ CREATE INDEX IF NOT EXISTS normalized_events_address_registry_owner_match_idx
 -- canonicality state, which the statement applies after the subqueries. The length bounds the
 -- key, so a long string under one of these keys is left out instead of failing the insert. Keep them identical to the subqueries,
 -- ops/address-key-indexes/install.sql and
--- migrations/20261112120000_normalized_events_address_key_indexes.sql.
+-- migrations/20261112150000_normalized_events_address_key_indexes.sql.
 CREATE INDEX IF NOT EXISTS normalized_events_address_to_idx
     ON normalized_events (lower(COALESCE(after_state ->> 'to', '')))
     WHERE length(after_state ->> 'to') = 42;

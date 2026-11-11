@@ -15,7 +15,7 @@ SET statement_timeout = '6h';
 -- every index to exist, so the script fails instead of reporting success. README.md describes
 -- the recovery.
 -- The definitions are the ones the schema-migration
--- 20261112120000_normalized_events_address_key_indexes.sql checks. The function's own SET
+-- 20261112150000_normalized_events_address_key_indexes.sql checks. The function's own SET
 -- search_path clause makes search_path pg_catalog while it runs, so PostgreSQL always prints
 -- the table's schema name, and the expected text keeps it. Its SET quote_all_identifiers
 -- clause turns that setting off for the same read: when the session has it on, PostgreSQL

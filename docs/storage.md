@@ -978,7 +978,7 @@ The historical address membership statement (`push_historical_address_matches_qu
 `crates/storage/src/history/address_evidence.rs`), which `/v1/events?address=`,
 `/v1/diagnostics/events?address=` and the address history walker send, reads three read-only
 indexes on `normalized_events`. The normalized-events baseline and
-`20261112120000_normalized_events_address_key_indexes.sql` install them, and populated upgrades
+`20261112150000_normalized_events_address_key_indexes.sql` install them, and populated upgrades
 require the [concurrent prebuild](../ops/address-key-indexes/README.md):
 
 | Index | Serves |
