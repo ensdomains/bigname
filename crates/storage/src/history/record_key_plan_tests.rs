@@ -1210,7 +1210,8 @@ async fn k4_keys_of_256_and_257_characters_read_only_their_own_rows() -> Result<
     assert_long_keys("history_record_key_k4", &cases).await
 }
 
-/// The count cells: the key absent, rare and common, on a small and a large emitter, under
+/// The count cells: the key absent (with every kind and with `kind=RecordChanged`), rare and
+/// common, on a small and a large emitter, under
 /// `contract_address` and `resolver`, with and without `include=total_count`. With it, an
 /// emitter-scoped read runs the capped count over the plain source. Each cell's count equals the
 /// old statement's, the plain statement's rows counted, and the cell records its driver and how
@@ -1221,13 +1222,25 @@ async fn record_key_count_cells_match_the_old_statement_and_record_their_driver(
     let database = key_database("history_record_key_count_cells", true).await?;
     let result = async {
         let pool = database.pool();
-        for key in [None, Some("text:links"), Some("text:avatar")] {
+        for (key, writes_only) in [
+            (None, false),
+            (None, true),
+            (Some("text:links"), false),
+            (Some("text:avatar"), false),
+        ] {
             for (size, emitter) in [("small", SMALL_FEW), ("large", LARGE)] {
                 for scope in [
                     KeyScope::Contract(emitter),
                     KeyScope::Resolver(KEY_CHAIN, emitter),
                 ] {
-                    let cell = format!("key {key:?}, {size} emitter, {scope:?}");
+                    let cell = format!(
+                        "key {key:?}{}, {size} emitter, {scope:?}",
+                        if writes_only {
+                            ", kind=RecordChanged"
+                        } else {
+                            ""
+                        }
+                    );
                     let mut filter = key_filter(
                         key.unwrap_or("text:avatar"),
                         HistoryOrder::Desc,
@@ -1236,7 +1249,11 @@ async fn record_key_count_cells_match_the_old_statement_and_record_their_driver(
                     );
                     if key.is_none() {
                         filter.record_key = None;
-                        filter.event_kinds = Vec::new();
+                        filter.event_kinds = if writes_only {
+                            vec!["RecordChanged".to_owned()]
+                        } else {
+                            Vec::new()
+                        };
                     }
                     let rows = key_plain_identities(pool, &filter).await?;
                     let old = i64::try_from(rows.len())?;
