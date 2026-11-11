@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, bail};
 use bigname_lookup::{ChainRpcUrls, RpcChainCheckError, verify_chain_rpc_url};
+use bigname_storage::walk_index_set::{IndexState, load_drop_list_state};
 use sqlx::PgPool;
+
+use crate::cli::WalkIndexSetCheck;
 
 pub(crate) async fn ensure_verified_lookup_ddl_available(pool: &PgPool) -> Result<()> {
     let phase_schema_exists = bigname_storage::phase_schema_exists(pool)
@@ -25,6 +28,100 @@ pub(crate) async fn ensure_verified_lookup_ddl_available(pool: &PgPool) -> Resul
     }
 
     Ok(())
+}
+
+/// Refuses to serve, unless `check` is `warn`, when an index `ops/walk-index-set/drop.sql` drops is
+/// not a valid, ready index on `normalized_events` in the database the API reads, which on a
+/// physical standby is the primary's catalog as replayed. It reads the catalog only. Returns how
+/// many are not, which the `walk_index_set_unusable` gauge and the boot line report. Without
+/// the table there is nothing to check.
+pub(crate) async fn ensure_walk_index_set(
+    pool: &PgPool,
+    check: WalkIndexSetCheck,
+) -> Result<usize> {
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("API walk index set check could not read the catalog")?;
+    let statuses = load_drop_list_state(&mut connection)
+        .await
+        .context("API walk index set check could not read the catalog")?;
+    drop(connection);
+    let Some(statuses) = statuses else {
+        crate::metrics::record_walk_index_set_unusable(0);
+        return Ok(0);
+    };
+    for status in &statuses {
+        if let Some(found) = status.other_definition() {
+            tracing::warn!(
+                service = "api",
+                index = status.index.name,
+                found,
+                expected = status.index.definition,
+                "a normalized_events index the walk index set scripts drop has another \
+                 definition than this build expects, and the API reads it as found because a \
+                 changed definition takes a new name (docs/storage.md, Walk index set)"
+            );
+        }
+    }
+    let unusable = statuses
+        .iter()
+        .filter_map(|status| {
+            let name = status.index.name;
+            match &status.state {
+                IndexState::Present { .. } => None,
+                IndexState::Missing => Some(format!("{name} (missing)")),
+                IndexState::Invalid => Some(format!("{name} (not valid and ready)")),
+                IndexState::Foreign { held_by } => Some(format!("{name} (held by {held_by})")),
+            }
+        })
+        .collect::<Vec<_>>();
+    crate::metrics::record_walk_index_set_unusable(unusable.len());
+    if unusable.is_empty() {
+        tracing::info!(
+            service = "api",
+            indexes = statuses.len(),
+            walk_index_set_check = check.as_str(),
+            "every normalized_events index the walk index set scripts drop is in place"
+        );
+        if check == WalkIndexSetCheck::Warn {
+            tracing::warn!(
+                service = "api",
+                "BIGNAME_API_WALK_INDEX_SET_CHECK=warn is set, so a start without the indexes \
+                 the walk index set scripts drop would serve instead of refusing"
+            );
+        }
+        return Ok(0);
+    }
+    let listed = unusable.join(", ");
+    match check {
+        WalkIndexSetCheck::Refuse => {
+            tracing::error!(
+                service = "api",
+                unusable = %listed,
+                "API walk index set check refused to start"
+            );
+            bail!(
+                "API walk index set check refused to start: {} of the {} normalized_events \
+                 indexes the walk index set scripts drop are not in place: {listed}. The phase \
+                 runner rebuilds them before Project, and ops/walk-index-set/install.sql \
+                 rebuilds them by hand. BIGNAME_API_WALK_INDEX_SET_CHECK=warn serves without \
+                 them.",
+                unusable.len(),
+                statuses.len()
+            )
+        }
+        WalkIndexSetCheck::Warn => {
+            tracing::warn!(
+                service = "api",
+                unusable = %listed,
+                "the API serves without normalized_events indexes the walk index set scripts \
+                 drop (BIGNAME_API_WALK_INDEX_SET_CHECK=warn), and reads that need them may \
+                 exceed BIGNAME_API_DB_STATEMENT_TIMEOUT_MS"
+            );
+            Ok(unusable.len())
+        }
+    }
 }
 
 /// Refuses to serve when a configured RPC endpoint answers for another chain. An endpoint that

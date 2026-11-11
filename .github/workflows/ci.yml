@@ -304,6 +304,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The storage library's longest test runs alone in core-arms so it no
+          # longer sets core's wall time. `test` needs every entry.
           - name: core
             packages: >-
               -p bigname-domain
@@ -311,6 +313,16 @@ jobs:
               -p bigname-manifests
               -p bigname-adapters
               -p bigname-test-support
+            test_args: "-- --skip history::paging::tests::resolver_arm_equivalence_tests::"
+            postgres_initdb_args: "--set=jit=off --set=log_lock_waits=on"
+          - name: core-arms
+            packages: >-
+              -p bigname-domain
+              -p bigname-storage
+              -p bigname-manifests
+              -p bigname-adapters
+              -p bigname-test-support
+            test_args: "-- history::paging::tests::resolver_arm_equivalence_tests::"
             postgres_initdb_args: "--set=jit=off --set=log_lock_waits=on"
     services:
       postgres:
@@ -342,14 +354,15 @@ jobs:
       # and merge queue runs restore main's entry, falling back to main's entry
       # for an older Cargo.lock, and save nothing: their copies were invisible
       # to every other run and pushed main's entries out of the 10 GB limit.
+      # Only core saves, because every entry shares one key.
       - name: Cache cargo artifacts
         id: cargo_cache
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.name == 'core' }}
 
       - name: Sync pinned upstream checkouts
-        if: matrix.name == 'core'
+        if: startsWith(matrix.name, 'core')
         uses: ./.github/actions/sync-refs
 
       - name: cargo test (build)
@@ -362,11 +375,15 @@ jobs:
 
       # `cargo test` has no per-test time limit. In the log of a run cut off here,
       # a test that never finished has a "has been running for over 60 seconds"
-      # line and no result line.
+      # line and no result line. A filter that matches nothing passes with no
+      # test run, so the step fails unless some binary passed a test.
       - name: cargo test
         if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/')
         timeout-minutes: 20
-        run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
+        shell: bash
+        run: |
+          cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support ${{ matrix.test_args }} | tee "$RUNNER_TEMP/cargo-test.log"
+          grep -Eq '^test result: .* [1-9][0-9]* passed;' "$RUNNER_TEMP/cargo-test.log" || { echo "::error::cargo test passed no test. Check the entry's test_args filter."; exit 1; }
 
       - name: Report stalled test databases
         if: always() && (github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/'))

@@ -187,6 +187,18 @@ pub(super) async fn assert_alias(
             records["data"], expected,
             "{alias} records under {canonical} with {query}"
         );
+        for field in [
+            "source",
+            "completeness",
+            "unsupported_fields",
+            "unsupported_reason",
+        ] {
+            assert_eq!(
+                records["meta"].get(field),
+                canonical_records["meta"].get(field),
+                "{alias} {field} under {canonical} with {query}"
+            );
+        }
     }
     Ok(served)
 }
@@ -251,6 +263,8 @@ async fn an_added_mount_serves_the_token_under_its_path() -> Result<()> {
     assert_eq!(served["data"]["status"], "active", "{served:#}");
     assert!(served["data"]["registration_id"].is_string(), "{served:#}");
     assert_eq!(served["data"]["owner"], HOLDER, "{served:#}");
+    let records = ok(&database, "/v1/names/child.z.eth/records?source=indexed").await?;
+    assert_eq!(records["meta"]["completeness"], "full", "{records:#}");
 
     assert_eq!(
         count(&subnames(&database, "m.eth").await?, "child.m.eth"),
@@ -825,6 +839,8 @@ async fn a_verified_alias_read_resolves_the_requested_path() -> Result<()> {
         body["data"]["records"]["addr:60"]["value"], GRANTEE,
         "{body:#}"
     );
+    assert_eq!(body["meta"]["source"], "verified", "{body:#}");
+    assert!(body["meta"].get("completeness").is_none(), "{body:#}");
     let requests = join_primary_name_mock_rpc_requests(handle).await?;
     assert_eq!(requests.len(), 1, "{requests:#?}");
     let calldata = requests[0]["params"][0]["data"]

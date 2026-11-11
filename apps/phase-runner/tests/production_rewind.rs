@@ -233,6 +233,18 @@ fn require_heads(snapshot: &Value, latest: i64) -> Result<()> {
     Ok(())
 }
 
+/// A phase row is also `failed` while a retryable error backs off, so only the supervisor's line
+/// marks a chain that stopped.
+fn require_no_stopped_chain(child: &OwnedChild) -> Result<()> {
+    let log = fs::read_to_string(&child.log)?;
+    ensure!(
+        !log.contains("chain supervisor stopped after a terminal error"),
+        "a {CHAIN} chain stopped on a terminal error; log {:?}",
+        child.log
+    );
+    Ok(())
+}
+
 async fn observe_cancellation(child: &mut OwnedChild, gate: &Gate) -> Result<()> {
     let log = fs::read_to_string(&child.log)?;
     let address: SocketAddr = log
@@ -301,6 +313,7 @@ async fn scenario(fixture: &mut Fixture) -> Result<()> {
         fixture.children[normal].wait().await?.success(),
         "normal setup did not exit cleanly"
     );
+    require_no_stopped_chain(&fixture.children[normal])?;
     fixture.rpc.disarm();
     no_writer_sessions(fixture.database.pool(), &fixture.reader_role).await?;
     let setup = snapshot(fixture.database.pool(), &fixture.directory, "setup.json").await?;
@@ -442,6 +455,8 @@ async fn scenario(fixture: &mut Fixture) -> Result<()> {
             fixture.children[downstream].running()?,
             "ordinary downstream run exited before processing suffix"
         );
+        // A chain that stops leaves the runner up, so the stop's log line is the signal.
+        require_no_stopped_chain(&fixture.children[downstream])?;
         ensure!(
             Instant::now() < until,
             "ordinary downstream processing did not finish"
@@ -453,6 +468,7 @@ async fn scenario(fixture: &mut Fixture) -> Result<()> {
         fixture.children[downstream].wait().await?.success(),
         "downstream run did not stop cleanly"
     );
+    require_no_stopped_chain(&fixture.children[downstream])?;
     no_writer_sessions(fixture.database.pool(), &fixture.reader_role).await?;
     let resolved = snapshot(
         fixture.database.pool(),

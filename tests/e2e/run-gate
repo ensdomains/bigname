@@ -3,12 +3,12 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=105
-expected_runnable=102
+expected_total=106
+expected_runnable=103
 expected_ignored=3
 shard_count=6
 # Per shard, in shard order.
-expected_shard_runnable=(17 17 17 17 17 17)
+expected_shard_runnable=(17 17 18 17 17 17)
 expected_shard_ignored=(1 1 1 0 0 0)
 
 expected_ignored_tests=(
@@ -62,6 +62,7 @@ shard_2_tests=(
 shard_3_tests=(
     "harness::db::tests::replace_database_rejects_missing_database_path"
     "harness::fault_proxy::tests::clean_eof_before_complete_request_is_a_client_disconnect"
+    "harness::pipeline::tests::chain_stopped_in_finds_the_line_in_either_log"
     "harness::responses::tests::pointer_rejects_missing_path"
     "scenarios::basenames_lifecycle::l2_zero_addr60_uses_stubbed_verified_transport"
     "scenarios::basenames_lifecycle::renew_release_and_premium_reregistration_rotate_lineage"

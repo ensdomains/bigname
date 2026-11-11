@@ -104,8 +104,8 @@ async fn resolve_stopped_phase(
         .map_err(|error| {
             RunnerError::lock_connection_lost(format!(
                 "advisory-lock connection was lost while settling a stopped required Ingest redo \
-                 for chain {chain_id}; stopping so the next runner can recheck durable phase \
-                 state: {error}"
+                 for chain {chain_id}; stopping this attempt so the next one rechecks durable \
+                 phase state: {error}"
             ))
         })?;
         return Ok(());
@@ -152,8 +152,13 @@ async fn resolve_stopped_phase(
     .map_err(|error| {
         RunnerError::lock_connection_lost(format!(
             "advisory-lock connection was lost while resolving stopped phase {phase} for chain \
-             {chain_id}; stopping so the next runner can recheck durable phase state: {error}"
+             {chain_id}; stopping this attempt so the next one rechecks durable phase state: \
+             {error}"
         ))
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "runner_recovery_tests.rs"]
+mod tests;
