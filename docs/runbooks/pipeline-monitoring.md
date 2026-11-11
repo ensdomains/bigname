@@ -490,7 +490,10 @@ pages through `BignamePhaseFailed`. The runner logs
 PostgreSQL's message:
 
 - `unsupported Unicode escape sequence` or
-  `invalid byte sequence for encoding "UTF8": 0x00` for a NUL byte
+  `invalid byte sequence for encoding "UTF8": 0x00` for a NUL byte. Text
+  record and reverse name reads no longer produce these: a NUL in a read
+  value is a failed hydration read, counted in `hydration_failures` or
+  `attempt_failures`, and the block publishes
 - `index row size … exceeds btree version 4 maximum …` or
   `index row requires … bytes, maximum size is …` for an oversized record key.
 

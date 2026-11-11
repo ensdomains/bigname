@@ -703,6 +703,26 @@ async fn postgresql_words_a_nul_in_text_as_the_runner_matches() -> Result<()> {
     scratch.cleanup().await
 }
 
+// The runner also matches PostgreSQL's refusal of a NUL in a jsonb value. Hydration reads that
+// return a NUL are failed reads and never reach a write, so this binds one directly to pin the
+// wording a real server uses.
+#[tokio::test]
+async fn postgresql_words_a_nul_in_jsonb_as_the_runner_matches() -> Result<()> {
+    const NUL_IN_JSONB: &str = "error returned from database: unsupported Unicode escape sequence";
+    let scratch = ScratchDatabase::create("families_nul_jsonb").await?;
+    let Err(error) = sqlx::query("SELECT $1::text::jsonb")
+        .bind("\"a\\u0000b\"")
+        .execute(scratch.pool())
+        .await
+    else {
+        anyhow::bail!("PostgreSQL accepted a NUL in jsonb");
+    };
+    let error = bigname_project::ProjectError::database("failed to write rows", error);
+    let message = error.to_string();
+    ensure!(message.ends_with(NUL_IN_JSONB), "{message}");
+    scratch.cleanup().await
+}
+
 fn context(head: &BlockMarker, resume: Option<&BlockMarker>) -> PhaseContext {
     PhaseContext {
         chain_id: CHAIN.to_owned(),

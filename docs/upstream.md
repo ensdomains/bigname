@@ -263,11 +263,14 @@ migration correlation or path changes.
 > **Our rule / why**: See [storage semantics](storage.md). The adapter keeps its signed timestamp representation without failing an otherwise valid numeric lifecycle observation. The ENSv1 .eth controller-event decoder saturates the same `uint256` expiry word the same way, so a controller event that repeats an out-of-range expiry no longer fails interpretation of its log. Basenames controller events are unchanged: an out-of-range expiry there still fails.
 > **Since**: `2026-09-10`
 
-> **Registry records the admitted Graveyard holds are served with no owner** — the ENSv2
-> Graveyard claims a lapsed `.eth` name and clears a subname of a name it holds by making
-> itself the node's registry owner, so `owner(node)` returns the Graveyard.
+> **Registry records the admitted Graveyard holds are served released, with no owner** — the
+> ENSv2 Graveyard claims a lapsed `.eth` name and clears a subname of a name it holds by making
+> itself the node's registry owner, so `owner(node)` returns the Graveyard. A claim registers the
+> name to the Graveyard in the BaseRegistrar with a far-future expiry, so on chain the name has a
+> live registration.
 > **Upstream**: (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L20-L25 @ ens_v2_sepolia_20260916@366de741)
 > (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+> (upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L157-L164 @ ens_v2_mainnet_20261002@4f47cbcc)
 > **Our rule / why**: maintainer decision (2026-09-29): the Graveyard is the burn address, so a
 > record it holds is burned. A current-registry owner write naming the Graveyard of the admitted
 > migration manifest, at or after its declared start, is served as no owner (null, not the zero
@@ -276,8 +279,31 @@ migration correlation or path changes.
 > NameWrapper token transfers of a subname wrapped without `PARENT_CANNOT_CONTROL`, whose token
 > outlives the clear. Superseded Sepolia Graveyards are not declared and are served as the chain
 > holds them. A live token sent to the Graveyard keeps its lease and is served as the chain holds
-> it. See [projections](projections.md).
-> **Since**: `2026-09-29`
+> it. Maintainer decision (2026-11-05): the Graveyard's registration is no holder's lease, so the
+> name's ENSv1 registration has ended. Such a name on the `ens_v1` arm is served `released` with
+> `expires_at: null` and `expires_at_reason: released`, `ens_v1.expires_at: null`, no owner,
+> manager or registrant, and a `lapsed_registration` naming its holder before the claim and the
+> claim's block time (see [Graveyard-held names](api-v1.md#graveyard-held-names)). A subname the
+> Graveyard cleared is served the same way. The hold carries while the Graveyard controls the
+> record, directly or as the wrapped token's holder. Any other controller, even inside one
+> transaction, ends it. Three limits follow from what the indexed events show:
+> - The adapter records no transfer of a wrapped token whose NameWrapper authority a registry
+>   write ended. When a later registry write naming the NameWrapper makes such a stale token
+>   live again on chain (`_isWrapped` reads the registry owner), its holder's control is not
+>   visible, and a name the Graveyard then clears has no lapsed holder.
+> - `unwrapETH2LD` with the NameWrapper as the controller burns the wrapped token and writes the
+>   record to the owner it already has, so no event shows the wrap ending. The token's last
+>   holder still reads as controlling the name, so a name the Graveyard then claims names a
+>   lapsed holder although no one controlled it.
+> - The NameWrapper's address is known from the name's own wraps. A name never wrapped whose
+>   record is written to the NameWrapper reads that address as an ordinary owner, and it is the
+>   lapsed holder of a subname the Graveyard then clears.
+>
+> See [projections](projections.md).
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L396 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1080 @ ens_v1@91c966f)
+> **Since**: `2026-09-29`; widened `2026-11-05`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
 > `ERC1155Fuse._transfer` runs `_beforeTransfer`, which deletes the per-token
@@ -780,6 +806,13 @@ to the applicable entries below.
 > **Our rule**: `docs/api-v1-routes.md` § `GET /v1/names/{name}/records` (ENSv1 registry clear).
 > **Why**: the registry holds no resolver for the node, and the ancestor walk is the only way the chain could answer. For a reserved `.eth` second-level name on Mainnet the walk reaches ENSV2Resolver, which comes back to ENSV1Resolver and stops, so the chain has no answer either. Calling it costs one provider round trip per read and turns a provider outage into failed answers. A cleared subname below a live ENSv2 entry keeps the answer it had, because the cut-over path walk withholds it (`ens_v2_path_no_resolver`, `ens_v2_path_target_not_projected` or `ens_v2_path_not_projected`) and a withheld row is not a clear. A request through an alias path also keeps the chain, which reads the path requested. Names outside `.eth` are left to the chain, because a DNS name's nearest ancestor is its TLD, whose ENSIP-10 resolver answers from DNS.
 > **Since**: `2026-11-02`
+
+<a id="name-observation-label-limit"></a>
+> **Name observation label limit** — a resolver `NameChanged`, a reverse registrar `NameForAddrChanged` or an ENSv2 resolver `NameUpdated` whose name has more than 128 dot-separated labels yields no preimage observation. Its `RecordChanged` row still carries the value.
+> **Upstream**: `setName` stores and emits the name it is given unchanged `(upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/architecture.md` § Normalization and preimage observation; the collector side in `docs/storage.md` § Interpret process memory.
+> **Why**: one log from any contract can carry a name of millions of labels. 128 is the smallest power of two above the deepest DNS-encodable name, so no name a DNS-encoded surface can carry is affected.
+> **Since**: `2026-11-10`
 
 Per-entry format:
 

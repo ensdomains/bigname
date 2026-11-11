@@ -1,9 +1,9 @@
 // The resolver overview's bound names, selected names first from the name summary
-// (crates/storage/src/families/name/bound.rs) and checked against the walk they replaced
-// (`bound_walk.rs`): pages across names with and without raw bytes, the count, the cost of a
-// page among many names the rules do not list, the stored order name following a surface's raw
-// name through an observed preimage and a released witness, and the capability gate following a
-// classification change that touches no name.
+// (crates/storage/src/families/name/bound.rs): pages across names with and without raw bytes
+// that chain to one read of the whole list, the count, the cost of a page among many names the
+// rules do not list, the stored order name following a surface's raw name through an observed
+// preimage and a released witness, and the capability gate following a classification change
+// that touches no name.
 
 const PAGING_LIVE: usize = 24;
 const PAGING_RELEASED: usize = 40;
@@ -20,7 +20,7 @@ struct Paging {
 /// Bound to FAMILY_RESOLVER: `0zero.eth` and alpha.eth (pointed at 209), `[first].alpha.eth`,
 /// a registry child of alpha.eth whose surface stores no raw bytes (pointed at 207), and
 /// `bound-NN.eth` (granted at 210, pointed at 211). `a-gone-NN.eth` were granted at 210,
-/// pointed at 211 too and released at 212: the walk reaches them and the rules list none. The preimages of `alpha` and `eth` are imported, so the
+/// pointed at 211 too and released at 212: their pointers reach them and the rules list none. The preimages of `alpha` and `eth` are imported, so the
 /// textless name is shown as `[first].alpha.eth` and sorts as three bracketed labels. Published
 /// at 240.
 async fn seed_bound_paging(database: &TestDatabase) -> Result<Paging> {
@@ -143,7 +143,7 @@ async fn seed_bound_paging(database: &TestDatabase) -> Result<Paging> {
 }
 
 async fn paging_parity(database: &TestDatabase, namespace: Option<&str>) -> Result<Vec<String>> {
-    bigname_storage::families::name::assert_bound_names_match_the_walk(
+    bigname_storage::families::name::assert_bound_name_pages_chain(
         &database.pool,
         FAMILY_CHAIN,
         FAMILY_RESOLVER,
@@ -163,11 +163,11 @@ async fn order_name(database: &TestDatabase, name: &str) -> Result<Option<String
     .await?)
 }
 
-/// The listing pages through names with and without raw bytes at every page size, as the walk
-/// does in the listing's order, under a namespace filter too. The route serves the exact count
+/// The listing pages through names with and without raw bytes at every page size, in the order
+/// of one read of the whole list, under a namespace filter too. The route serves the exact count
 /// only when asked, the same on every page, at the latest publication and pinned to it.
 #[tokio::test]
-async fn bound_names_match_the_walk_page_by_page_across_names_without_raw_bytes() -> Result<()> {
+async fn bound_names_chain_page_by_page_across_names_without_raw_bytes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let paging = seed_bound_paging(&database).await?;
     let listed = paging_parity(&database, None).await?;
@@ -243,7 +243,7 @@ async fn an_undone_block_restores_the_bound_names_and_its_rerun_repeats_them() -
 }
 
 /// Forty names the rules do not list sort before the listed raw names, and every page composes
-/// only the names it can serve, where the walk composed every name a pointer reached.
+/// only the names it can serve, not every name a pointer reaches.
 #[tokio::test]
 async fn a_bound_name_page_composes_only_its_names_among_many_unlisted_names() -> Result<()> {
     use bigname_storage::families::name::{load_family_bound_names, seams};
@@ -293,7 +293,7 @@ async fn a_bound_name_page_composes_only_its_names_among_many_unlisted_names() -
     .await?;
     assert!(
         reached >= (PAGING_LIVE + PAGING_RELEASED) as i64,
-        "the walk's candidates: {reached}"
+        "names a pointer reaches: {reached}"
     );
     database.cleanup().await
 }
@@ -538,7 +538,7 @@ async fn the_capability_gate_follows_a_classification_change_that_touches_no_nam
     };
     let before = stored().await?;
     assert_eq!(
-        bigname_storage::families::name::assert_bound_names_match_the_walk(
+        bigname_storage::families::name::assert_bound_name_pages_chain(
             &database.pool,
             "ethereum-mainnet",
             ROUND2_RESOLVER,
@@ -598,7 +598,7 @@ async fn the_capability_gate_follows_a_classification_change_that_touches_no_nam
             classification.declared_summary
         );
         assert_eq!(stored().await?, before, "{block}");
-        let listed = bigname_storage::families::name::assert_bound_names_match_the_walk(
+        let listed = bigname_storage::families::name::assert_bound_name_pages_chain(
             &database.pool,
             "ethereum-mainnet",
             ROUND2_RESOLVER,

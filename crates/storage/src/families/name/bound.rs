@@ -89,7 +89,7 @@ const STORED_SELECTOR_SQL: &str = "summary.resolver_chain_id = $1
         AND summary.resolver_address = lower($2)
         AND summary.resolver_listing_eligible";
 
-/// The surface fences of the walk the listing replaced, over the summary row `summary`: an
+/// The surface fences of a listed name, over the summary row `summary`: an
 /// active surface at or below the family marker, on readable lineage. The keys it reads make it
 /// one row at most.
 const SURFACE_FENCES_SQL: &str = "FROM bigname_phase.name_surfaces surface
