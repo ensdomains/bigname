@@ -98,7 +98,7 @@ pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
 /// TYR-525: a `LabelRegistered` that is already expired, or whose token is already registered,
 /// when it is emitted, or an `ExpiryUpdated` that cuts a label's live expiry to one that has
 /// passed. Live state and a restore disagree on the expiry retirement flags, or the split replay
-/// attributes or releases differently. The deployed registry reverts all three orders
+/// attributes, releases or transfers differently. The deployed registry reverts all three orders
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L460 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222-L224 @ ens_v2@a971bd64).
 pub const TYR_525: &str = "TYR-525";
@@ -117,6 +117,81 @@ fn tyr_525_symptom(signature: &str, text: &str) -> bool {
             && text.contains(":RegistrationReleased:expiry:"))
 }
 
+/// TYR-525's two further symptoms of a token registered again while its registration is live: the
+/// split replay re-attributes any number of events, or a later transfer's `token_lineage_id` and
+/// `upstream_resource` differ between the passes and nothing else does.
+fn tyr_525_reregistration_symptom(signature: &str, text: &str) -> bool {
+    let rebased = signature
+        .strip_prefix("batch-boundary artifact {\"rebased_attributions\": ")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(|count| !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit()));
+    rebased
+        || (signature
+            == "an event's after_state differs between the whole pass and the split replay"
+            && text.contains(":TokenControlTransferred:")
+            && only_the_transfer_lineage_differs(text))
+}
+
+fn only_the_transfer_lineage_differs(text: &str) -> bool {
+    let parse = |marker| {
+        after_state(text, marker)
+            .and_then(|state| serde_json::from_str::<serde_json::Value>(state).ok())
+            .and_then(|state| state.as_object().cloned())
+    };
+    let (Some(mut whole), Some(mut replayed)) = (parse("whole="), parse("replayed=")) else {
+        return false;
+    };
+    if whole == replayed {
+        return false;
+    }
+    for key in ["token_lineage_id", "upstream_resource"] {
+        whole.remove(key);
+        replayed.remove(key);
+    }
+    whole == replayed
+}
+
+/// A `LabelRegistered` over a token whose registration is still live at the new label's block.
+fn reregisters_a_live_token(actions: &[Action], layout: Layout) -> bool {
+    let mut registered = BTreeMap::new();
+    for (atom, at) in timed_atoms(actions, layout) {
+        match atom {
+            Atom::Register {
+                registry,
+                token,
+                expiry,
+                ..
+            } => {
+                if registered
+                    .insert((registry, token), expiry)
+                    .is_some_and(|before| !passed(before, at))
+                {
+                    return true;
+                }
+            }
+            Atom::Renew {
+                registry,
+                token,
+                expiry,
+            } => {
+                if let Some(current) = registered.get_mut(&(registry, token)) {
+                    *current = expiry;
+                }
+            }
+            Atom::Unregister { registry, token } => {
+                registered.remove(&(registry, token));
+            }
+            Atom::Regenerate { registry, from, to } => {
+                if let Some(expiry) = registered.remove(&(registry, from)) {
+                    registered.insert((registry, to), expiry);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The open ticket a failure belongs to, judged on its kind, the failure text and the order's
 /// shape in the layout it failed in. A kind alone never tags: each ticket names an order.
 pub fn known_failure(
@@ -132,6 +207,10 @@ pub fn known_failure(
         return Some(TYR_522_S_A3);
     }
     if tyr_525_symptom(signature, text) && emits_a_passed_or_live_label(actions, layout) {
+        return Some(TYR_525);
+    }
+    if tyr_525_reregistration_symptom(signature, text) && reregisters_a_live_token(actions, layout)
+    {
         return Some(TYR_525);
     }
     if signature.starts_with("an event's after_state differs")
@@ -1464,83 +1543,91 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
     let started = Instant::now();
     let mut sweep = Sweep::default();
     for case in 0..cases {
-        let generated = generate(case_seed(base, case));
-        sweep.sequences += 1;
-        sweep.observe(&generated.actions);
-        let shapes = tyr_510_shapes(&generated.actions);
-        for (layout, split_kind) in RUNS {
-            sweep.runs += 1;
-            let result = check(
-                wiring,
-                &generated.actions,
-                layout,
-                split_kind,
-                generated.seed,
-            );
-            for &shape in &shapes {
-                sweep.tyr_510_shapes.entry(shape).or_default()[usize::from(result.is_ok())] += 1;
-            }
-            match result {
-                Ok(converged) => sweep.count_named(&converged),
-                Err(error) => {
-                    let kept = signature(&error);
-                    if kept == DECLARED_STOP {
-                        sweep.declared_stops += 1;
-                        break;
-                    }
-                    let drawn_known =
-                        known_failure(&kept, &format!("{error:#}"), &generated.actions, layout);
-                    let limit = if drawn_known.is_some() {
-                        1
-                    } else {
-                        SHRUNK_PER_KIND
-                    };
-                    let shrunk = sweep
-                        .findings
-                        .iter()
-                        .filter(|finding| finding.shrunk && finding.signature == kept)
-                        .count()
-                        < limit;
-                    let minimal = if shrunk {
-                        shrink(
-                            wiring,
-                            &generated.actions,
-                            layout,
-                            split_kind,
-                            generated.seed,
-                            &kept,
-                        )
-                    } else {
-                        generated.actions.clone()
-                    };
-                    let error = if shrunk {
-                        check(wiring, &minimal, layout, split_kind, generated.seed)
-                            .err()
-                            .unwrap_or(error)
-                    } else {
-                        error
-                    };
-                    let text = format!("{error:#}");
-                    // Tagged only when both the drawn and the shrunk sequence carry the shape.
-                    let known = drawn_known.and(known_failure(&kept, &text, &minimal, layout));
-                    sweep.findings.push(Finding {
-                        seed: generated.seed,
+        sweep_case(wiring, &generate(case_seed(base, case)), &mut sweep);
+    }
+    sweep.elapsed = started.elapsed();
+    sweep
+}
+
+/// Runs one sequence in every layout and split. A known failure does not stop the remaining
+/// runs, so a different failure in a later layout still surfaces. An unknown failure, or a
+/// declared registry's stop, ends the sequence.
+pub fn sweep_case(wiring: &Wiring, generated: &Case, sweep: &mut Sweep) {
+    sweep.sequences += 1;
+    sweep.observe(&generated.actions);
+    let shapes = tyr_510_shapes(&generated.actions);
+    for (layout, split_kind) in RUNS {
+        sweep.runs += 1;
+        let result = check(
+            wiring,
+            &generated.actions,
+            layout,
+            split_kind,
+            generated.seed,
+        );
+        for &shape in &shapes {
+            sweep.tyr_510_shapes.entry(shape).or_default()[usize::from(result.is_ok())] += 1;
+        }
+        match result {
+            Ok(converged) => sweep.count_named(&converged),
+            Err(error) => {
+                let kept = signature(&error);
+                if kept == DECLARED_STOP {
+                    sweep.declared_stops += 1;
+                    break;
+                }
+                let drawn_known =
+                    known_failure(&kept, &format!("{error:#}"), &generated.actions, layout);
+                let limit = if drawn_known.is_some() {
+                    1
+                } else {
+                    SHRUNK_PER_KIND
+                };
+                let shrunk = sweep
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.shrunk && finding.signature == kept)
+                    .count()
+                    < limit;
+                let minimal = if shrunk {
+                    shrink(
+                        wiring,
+                        &generated.actions,
                         layout,
-                        split: split_kind,
-                        signature: kept,
-                        drawn: generated.actions.len(),
-                        shrunk,
-                        known,
-                        minimal,
-                        error: text,
-                    });
+                        split_kind,
+                        generated.seed,
+                        &kept,
+                    )
+                } else {
+                    generated.actions.clone()
+                };
+                let error = if shrunk {
+                    check(wiring, &minimal, layout, split_kind, generated.seed)
+                        .err()
+                        .unwrap_or(error)
+                } else {
+                    error
+                };
+                let text = format!("{error:#}");
+                // Tagged only when both the drawn and the shrunk sequence carry the shape.
+                let known = drawn_known.and(known_failure(&kept, &text, &minimal, layout));
+                sweep.findings.push(Finding {
+                    seed: generated.seed,
+                    layout,
+                    split: split_kind,
+                    signature: kept,
+                    drawn: generated.actions.len(),
+                    shrunk,
+                    known,
+                    minimal,
+                    error: text,
+                });
+                if known.is_none() {
                     break;
                 }
             }
         }
     }
-    sweep.elapsed = started.elapsed();
-    sweep
 }
 
 impl Sweep {
