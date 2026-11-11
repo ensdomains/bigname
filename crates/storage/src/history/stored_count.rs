@@ -10,7 +10,6 @@ use super::{
     EventHistoryReadFilter,
     count_contract::{EMITTER, POINTER_CLEARED, POINTER_SET},
 };
-use crate::families::name::{FamilyPublicationUnavailable, servable_publication};
 
 /// The table the counts are read from, schema-qualified.
 pub(super) const TABLE: &str = "bigname_phase.project_event_count";
@@ -41,9 +40,6 @@ pub(super) fn key(
         || filter.diagnostics
         || !filter.selectors.is_empty()
         || filter.registration_id.is_some()
-        || filter.record_key.is_some()
-        || filter.from_block.is_some()
-        || filter.to_block.is_some()
         || (filter.event_kinds.is_empty() && !filter.match_no_events)
     {
         return None;
@@ -52,9 +48,7 @@ pub(super) fn key(
     let mut chains = Vec::new();
     for range in &filter.block_window.as_ref()?.ranges {
         let bound = *bounds.get(&range.chain_id)?;
-        if range.from_block.is_some() || range.to_block != Some(bound) {
-            return None;
-        }
+        // Red probe: any window is taken as the publication's.
         chains.push((range.chain_id.as_str(), bound));
     }
     // The read binds both addresses as given, so a key is equal exactly when the read reduces to
@@ -117,19 +111,7 @@ pub(super) async fn load(
     let Some(key) = key(filter, canonical_only) else {
         return Ok(receipt("rows_filter", None));
     };
-    if !readable(connection).await? {
-        return Ok(receipt("rows_privilege", None));
-    }
-    for (chain, bound) in &key.chains {
-        match servable_publication(connection, chain).await {
-            Ok(publication) if publication.block_number == *bound => {}
-            Ok(_) => return Ok(receipt("rows_publication", None)),
-            Err(error) if error.is::<FamilyPublicationUnavailable>() => {
-                return Ok(receipt("rows_publication", None));
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    // Red probe: no privilege check and no publication fence.
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_stored_count_query(&mut builder, &key);
     let count = builder

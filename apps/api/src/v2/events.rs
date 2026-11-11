@@ -390,11 +390,8 @@ pub(crate) fn events_summary_mode(params: &QueryParams, anchored: bool) -> Histo
         && (params.resolver.is_some() || params.contract_address.is_some());
     // The stored counts hold no record key and no block or time window. A resolver with another
     // contract_address is left to storage, which reads the parsed addresses.
-    let key_filters_only = params.history_filters.record_key.is_none()
-        && params.from_block.is_none()
-        && params.to_block.is_none()
-        && params.from_timestamp.is_none()
-        && params.to_timestamp.is_none();
+    // Red probe: every filter is taken as a key column.
+    let key_filters_only = true;
     if exact_count && emitter_only && key_filters_only && stored_event_counts_served() {
         HistorySummaryMode::StoredOrCapped(emitter_exact_count_cap())
     } else if exact_count && emitter_only {
