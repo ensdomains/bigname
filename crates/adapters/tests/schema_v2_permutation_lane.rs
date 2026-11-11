@@ -5056,3 +5056,67 @@ fn registry_order_finding_a_transfer_of_an_unregistered_pointer_token() -> Resul
         ],
     )
 }
+
+/// A `LabelReserved` over a token that is already registered and minted, for the declared and an
+/// announced registry, in every layout and split the sweep runs, so a batch boundary falls at each
+/// step. The register and the mint come in separate transactions and in one.
+#[test]
+fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, RUNS, Registry, Token};
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let mut failures = Vec::new();
+    for registry in [Registry::Declared, Registry::Announced] {
+        let register = Atom::Register {
+            registry,
+            token,
+            label: 0,
+            owner: 1,
+            expiry: Expiry::Far,
+        };
+        let mint = Atom::Mint {
+            registry,
+            token,
+            to: 1,
+        };
+        let reserve = Atom::Reserve {
+            registry,
+            token,
+            label: 0,
+            expiry: Expiry::Far,
+        };
+        let announce = (registry == Registry::Announced).then_some(Atom::Announce);
+        for steps in [
+            vec![vec![register], vec![mint], vec![reserve]],
+            vec![vec![register, mint], vec![reserve]],
+        ] {
+            let actions = announce
+                .map(|atom| vec![atom])
+                .into_iter()
+                .chain(steps)
+                .map(in_new_block)
+                .collect::<Vec<_>>();
+            for (layout, split_kind) in RUNS {
+                if let Err(error) = registry_orders::check(&wiring, &actions, layout, split_kind, 0)
+                {
+                    failures.push(format!(
+                        "{registry:?} {layout:?} {split_kind:?}:\n{}\n  {error:#}",
+                        registry_orders::describe(&actions, layout)
+                    ));
+                }
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "{} runs of a reservation over a registered token failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+    Ok(())
+}
