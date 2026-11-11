@@ -1039,6 +1039,12 @@ where the key index matches two. Extended statistics on either expression, or a 
 indexes' predicates, would change that estimate. Either one means reading the scoped plans
 again. On a table with no statistics at all the two can tie, which the tests record.
 
+The `include=total_count` count of a page scoped by an emitter does not use the arms. It keeps
+the plain statement, which the planner may now read through the emitter-led index: for a
+`record_key` count, a bitmap over the emitter's `RecordChanged` entries and the chain's resets,
+which reads every one of those entries before the count's cap applies. Without a key it can
+read the emitter's `RecordChanged` rows in order and stop at the cap.
+
 Without the indexes the arms return the same rows and walk the chain's events in page order.
 `history/record_key_plan_tests.rs` checks each arm's driver and bound in unprepared and custom
 plans, and the rows against the plain statement with and without the indexes. It records the
