@@ -281,6 +281,8 @@ fn supported_family(family: &str) -> bool {
 /// Decode dependencies before state-dependent protocol branches. No interpretation is run.
 /// Unselected resolver logs are conservatively considered against active resolver ABIs so
 /// same-batch discovery cannot hide their node. This does not admit or interpret those logs.
+/// The cost is linear in the bytes of the batch's logs, and a name a log carries over
+/// `MAX_NAME_SEGMENTS` (common.rs) adds at most one request.
 pub fn collect_v1_batch_dependencies(
     input: &BatchInput,
     provenance_manifests: &[ManifestInput],

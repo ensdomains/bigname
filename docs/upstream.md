@@ -587,6 +587,13 @@ to the applicable entries below.
 > **Why**: bigname's API and lookup path use textual selector keys across route parsing and sort/dedupe. The `u64` boundary keeps that selector identity canonical and fail-closed until a wider coin-type representation is deliberately designed.
 > **Since**: `2026-06-12`
 
+<a id="record-key-length-limit"></a>
+> **Record key length limit** — a text, data or DNS record write whose stored record key would be longer than 2,400 bytes is not indexed. Interpret skips the log, so the write leaves no indexed value, no record inventory entry and no history row. Every shorter key is indexed as before.
+> **Upstream**: the setters store and emit the key they are given, at any length `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/DataResolver.sol:L19-L27 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L51 @ ens_v1@91c966f)` `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L188-L195 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L221-L228 @ ens_v2@a971bd64)`.
+> **Our rule**: `docs/architecture.md` § `record_inventory`.
+> **Why**: the stored key is part of btree indexes, and PostgreSQL holds at most 2,704 bytes in one btree index row. A longer key that does not compress could not be stored. The longest record key set on mainnet is about 2.1 KB.
+> **Since**: `2026-11-10`
+
 <a id="ens-verified-resolution-ccip-read-non-following"></a>
 > **Retired: ENS verified-resolution CCIP-Read non-following** — From `2026-04-18` to `2026-10-29`, bigname did not follow EIP-3668 `OffchainLookup` continuations on ENS record resolution through the records route and resolver-record lookup. It returned the affected selector as `unsupported` with reason `offchain_lookup_required` and made no gateway request. ENS record reads now follow the continuation through the same gateway transport as Basenames and the ENS/60 forward leg, so this is no longer a divergence and `offchain_lookup_required` is no longer issued. The Universal Resolver re-raises the resolver's `OffchainLookup` with itself as sender and its own callback `(upstream: .refs/ens_v1/contracts/ccipRead/CCIPReader.sol:L72-L94 @ ens_v1@91c966f)`, and that callback returns the answer with the resolver that produced it `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L147-L152 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/execution.md` § Resolver-record lookup and § CCIP-Read gateway transport, and `docs/api-v1-routes.md` § `GET /v1/names/{name}/records`.
@@ -799,6 +806,13 @@ to the applicable entries below.
 > **Our rule**: `docs/api-v1-routes.md` § `GET /v1/names/{name}/records` (ENSv1 registry clear).
 > **Why**: the registry holds no resolver for the node, and the ancestor walk is the only way the chain could answer. For a reserved `.eth` second-level name on Mainnet the walk reaches ENSV2Resolver, which comes back to ENSV1Resolver and stops, so the chain has no answer either. Calling it costs one provider round trip per read and turns a provider outage into failed answers. A cleared subname below a live ENSv2 entry keeps the answer it had, because the cut-over path walk withholds it (`ens_v2_path_no_resolver`, `ens_v2_path_target_not_projected` or `ens_v2_path_not_projected`) and a withheld row is not a clear. A request through an alias path also keeps the chain, which reads the path requested. Names outside `.eth` are left to the chain, because a DNS name's nearest ancestor is its TLD, whose ENSIP-10 resolver answers from DNS.
 > **Since**: `2026-11-02`
+
+<a id="name-observation-label-limit"></a>
+> **Name observation label limit** — a resolver `NameChanged`, a reverse registrar `NameForAddrChanged` or an ENSv2 resolver `NameUpdated` whose name has more than 128 dot-separated labels yields no preimage observation. Its `RecordChanged` row still carries the value.
+> **Upstream**: `setName` stores and emits the name it is given unchanged `(upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/architecture.md` § Normalization and preimage observation; the collector side in `docs/storage.md` § Interpret process memory.
+> **Why**: one log from any contract can carry a name of millions of labels. 128 is the smallest power of two above the deepest DNS-encodable name, so no name a DNS-encoded surface can carry is affected.
+> **Since**: `2026-11-10`
 
 Per-entry format:
 

@@ -416,27 +416,30 @@ async fn v2_address_ownership_filters_skip_role_candidate_and_grant_reads() -> R
             }
         }
     }
-    // Names still load role candidates and grants. History uses the bounded catalogue,
+    // Names read the stored listing, with no role candidate or grant read. The ownership walk
+    // the listing is compared with still loads them. History uses the bounded catalogue,
     // which includes those roles without the whole-address role loaders.
-    for route in ["names", "history"] {
+    for (route, composed, expected) in [
+        ("names", false, vec![]),
+        ("names", true, vec!["candidates", "grants"]),
+        ("history", false, vec![]),
+    ] {
         for query in ["", "?relation=any", "?relation=owner,role_holder"] {
             let reads = Arc::new(Mutex::new(Vec::new()));
-            let payload = with_role_read_counter(
+            let uri = format!("/v1/addresses/{ROLE_HOLDER}/{route}{query}");
+            let read = with_role_read_counter(
                 reads.clone(),
-                v2_address_names_payload_for_database(
-                    &database,
-                    &format!("/v1/addresses/{ROLE_HOLDER}/{route}{query}"),
-                ),
-            )
-            .await?;
+                v2_address_names_payload_for_database(&database, &uri),
+            );
+            let payload = if composed {
+                bigname_storage::families::records::seams::with_composed_address_names(read).await?
+            } else {
+                read.await?
+            };
             assert_eq!(
                 *reads.lock().unwrap(),
-                if route == "names" {
-                    vec!["candidates", "grants"]
-                } else {
-                    vec![]
-                },
-                "{route}{query}"
+                expected,
+                "{route}{query}, composed {composed}"
             );
             assert!(!payload["data"].as_array().unwrap().is_empty(), "{payload}");
         }

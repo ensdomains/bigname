@@ -192,6 +192,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.project_account_approval",
         "relation: bigname_phase.project_address_controller_candidate",
         "relation: bigname_phase.project_address_history_anchor",
+        "relation: bigname_phase.project_address_listing",
         "relation: bigname_phase.project_address_name_fold",
         "relation: bigname_phase.project_address_name_index",
         "relation: bigname_phase.project_address_record_id_index",
@@ -246,7 +247,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 76);
+    assert_eq!(actual.len(), 77);
     database.cleanup().await
 }
 

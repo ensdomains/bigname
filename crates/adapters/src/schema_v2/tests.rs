@@ -22,6 +22,9 @@ mod migration;
 #[path = "tests/record_id_resolver.rs"]
 mod record_id_resolver;
 
+#[path = "tests/record_key_cap.rs"]
+mod record_key_cap;
+
 #[path = "tests/registry_origin.rs"]
 mod registry_origin;
 
@@ -30,6 +33,9 @@ mod resolver_announcements;
 
 #[path = "tests/v2_registry_operators.rs"]
 mod v2_registry_operators;
+
+#[path = "tests/v2_permission_lineage.rs"]
+mod v2_permission_lineage;
 
 #[path = "tests/v2_reservation_lineage.rs"]
 mod v2_reservation_lineage;

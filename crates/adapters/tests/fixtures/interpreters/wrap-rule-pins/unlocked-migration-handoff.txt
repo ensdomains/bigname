@@ -43,7 +43,7 @@ normalized_events 236:8 RegistrationGranted ens_v2_registry_l1 6f859f98-8762-546
 normalized_events 236:8 AuthorityTransferred ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 d4deae1e61a0498c
 normalized_events 236:8 ExpiryChanged ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 5e48f9d7fa2be275
 normalized_events 236:8 PreimageObserved ens_v2_registry_l1 - 8b3827259dd15521
-normalized_events 236:9 PermissionChanged ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 5bd815581edaf980
+normalized_events 236:9 PermissionChanged ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 421528b6d5cd7e37
 normalized_events 236:10 ResolverChanged ens_v2_registry_l1 6f859f98-8762-5467-86a5-591b802bb0a0 7a1060b318d09310
 label_preimages #0 915c21ed2c74d77e
 label_preimages #1 d52291d38e567805

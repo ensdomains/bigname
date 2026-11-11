@@ -19,6 +19,9 @@ const AUTHORITY_FILTER_KEY: &str = "authority";
 const MATCH_FILTER_KEY: &str = "match";
 const PARENT_FILTER_KEY: &str = "parent";
 pub(crate) const ORDER_FILTER_KEY: &str = "order";
+/// Present on a descending cursor only: the page walks ties in the exact reverse of ascending.
+const TIE_ORDER_FILTER_KEY: &str = "tie_order";
+const TIE_ORDER_REVERSED: &str = "reversed";
 pub(crate) const SORT_KIND_CURSOR_KEY: &str = "sort_kind";
 pub(crate) const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
 const LOGICAL_NAME_ID_CURSOR_KEY: &str = "logical_name_id";
@@ -80,6 +83,15 @@ fn cursor_filters(binding: &AddressNamesCursorBinding<'_>) -> BTreeMap<String, S
     ]);
     insert_match_filter(&mut filters, binding.q, binding.name_match);
     insert_parent_filter(&mut filters, binding.parent);
+    // A descending cursor binds the tie order it was issued under, so one issued while ties
+    // still walked ascending inside a descending page is refused. Ascending cursors keep their
+    // shape.
+    if binding.order == SortOrder::Desc {
+        filters.insert(
+            TIE_ORDER_FILTER_KEY.to_owned(),
+            TIE_ORDER_REVERSED.to_owned(),
+        );
+    }
     filters
 }
 
