@@ -45,3 +45,8 @@ bigname-domain.workspace = true
 # Turns on the fixture-log check in Interpret batches that tests run (crates/test-support/src/fixture_logs.rs).
 bigname-interpret = { workspace = true, features = ["test-support"] }
 bigname-test-support.workspace = true
+
+[[test]]
+name = "log_write_failure"
+path = "tests/log_write_failure.rs"
+harness = false

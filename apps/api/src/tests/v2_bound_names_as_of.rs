@@ -3,8 +3,9 @@
 // bytes and its shadow state in place from a later preimage observation, and the summary writer
 // counts them only from the block of that witness. Each refresh path that composes a name
 // stores the same rows whether Interpret has observed the name's bytes past the block or not,
-// and a witness repair never loses a name's summary. Every step checks the page and its count
-// against the walk, and the stored summaries against a fresh composition of every surface.
+// and a witness repair never loses a name's summary. Every step checks that the pages and their
+// count chain to one read of the whole list, and the stored summaries against a fresh composition
+// of every surface.
 
 /// The witness of `[first].alpha.eth` in these tests.
 const AS_OF_WITNESS: &str = "as-of-first-preimage";
@@ -235,8 +236,8 @@ async fn first_composed(database: &TestDatabase, paging: &Paging) -> Result<bool
     .await?)
 }
 
-/// The listing checked against the walk, and whether `[first].alpha.eth` is in it, by either
-/// name it can be shown under.
+/// The listing checked page by page against one read of it, and whether `[first].alpha.eth` is
+/// in it, by either name it can be shown under.
 async fn first_listed(database: &TestDatabase) -> Result<bool> {
     let listed = paging_parity(database, None).await?;
     Ok(listed
@@ -245,7 +246,8 @@ async fn first_listed(database: &TestDatabase) -> Result<bool> {
 }
 
 /// What a run leaves after a publication: every stored summary row, the page's names with their
-/// order names, and the count. The page and the count are checked against the walk first.
+/// order names, and the count. The pages and the count are checked against one read of the whole
+/// list first.
 async fn as_of_state(database: &TestDatabase) -> Result<Value> {
     paging_parity(database, None).await?;
     let summaries: Vec<Value> = sqlx::query_scalar(
@@ -263,6 +265,7 @@ async fn as_of_state(database: &TestDatabase) -> Result<Value> {
         None,
         1_000,
         true,
+        None,
     )
     .await?;
     let keys: Vec<(String, String)> = page
@@ -394,7 +397,7 @@ async fn a_shadow_witness_past_the_publication_that_a_reorg_removes_keeps_the_na
     observe_first(&database, &paging, 243, Observed::Shadow).await?;
     refresh_first(&database, &paging, Refresh::Resolver, 241).await?;
     publish_test_families(&database, 241).await?;
-    // The live surface is a shadow: neither the walk nor the page lists the name.
+    // The live surface is a shadow: the page does not list the name.
     assert!(!first_listed(&database).await?);
     assert!(first_composed(&database, &paging).await?);
     orphan_witness(&database, Some(243)).await?;
@@ -663,6 +666,7 @@ async fn a_shadow_keeps_a_summary_row_that_no_bound_name_reader_lists() -> Resul
         None,
         1_000,
         true,
+        None,
     )
     .await?;
     assert!(page.rows.iter().all(|name| name.row.logical_name_id != paging.first));

@@ -191,6 +191,12 @@ family.[^v1-namechanged-l10][^v1-namechanged-l18][^v1-revreg-l129][^v1-revreg-l1
 A nonempty `name` also produces preimage observations that can attach
 already-observed forward-node facts to a human-readable name; an empty clear
 produces no preimage observation.
+Nor does a `name` of more than 128 dot-separated labels, more than any
+DNS-encodable name has (`MAX_NAME_SEGMENTS` in
+`crates/adapters/src/schema_v2/common.rs`), in a `NameChanged` from an ENSv1,
+ENSv2 or Basenames resolver alike. Its `RecordChanged` row still carries the
+value. The same limit applies to the name a reverse registrar's
+`NameForAddrChanged` and an ENSv2 resolver's `NameUpdated` carry.
 Regardless of resolver or node type, these rows carry no `primary_claim_source`;
 interpretation does not synthesize ownership, resolver selection, or primary-name facts from them.
 The primary-name projection may later join such a row to a `ReverseClaimed` reverse node on
@@ -1375,6 +1381,13 @@ What record space is known to exist. Carries `record_version_boundary`, `enumera
 
 Selectors carry `record_key`, `record_family`, `selector_key`, `cacheable`. `record_key` is the round-trip string `record_family + ":" + selector_key`; `selector_key` is `null` for scalar families and a string otherwise. Numeric selector domains use string `selector_key` so `record_key` stays text.
 
+A stored `record_key` is at most 2,400 bytes (`MAX_RECORD_KEY_BYTES` in `crates/adapters/src/schema_v2/common.rs`). Only text, data and DNS record keys are chosen by whoever writes the record, and at any length (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/DataResolver.sol:L19-L27 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L51 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L188-L195 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L221-L228 @ ens_v2@a971bd64). Every other family's key has a fixed shape well under the limit. The limit counts the UTF-8 bytes of the key as stored, after formatting:
+
+- A text or data key that is not valid UTF-8, holds a NUL byte or is only whitespace is stored as `text_opaque:0x…` or `data_opaque:0x…` with its bytes in hex, which doubles its length.
+- A DNS record key is `dns:<resource>:0x…`, with the record's DNS-encoded owner name in hex.
+
+The [projection](glossary.md#projection) tables keep `record_key` in btree indexes, and PostgreSQL holds at most 2,704 bytes in one btree index row. So Interpret skips a resolver record log whose key would be longer, as it skips a log whose indexed key is not the hash of its key. The log yields no [normalized event](glossary.md#normalized-event), no substitute key and no record, and Interpret logs one warning naming the log and the key's length. The rest of the batch is interpreted as usual. The longest record key set on mainnet is about 2.1 KB, so every key in use keeps updating under its own key. This narrows upstream: see the [record key length limit](upstream.md#record-key-length-limit).
+
 Inventory is not global enumeration. It defines the stable selector space admitted by the route, including explicit gaps and unsupported families. Version changes invalidate inventory and cache for the prior boundary.
 
 ### `record_cache`
@@ -1409,8 +1422,10 @@ ENS class is followed through the CCIP-Read gateway transport
 Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified [path classes](glossary.md) return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
 V2 verified name and record routes execute through the schema-v2 lookup engine
-without a durable trace or reusable outcome. Every API request is read-only,
-including verified and diagnostics routes. It revalidates captured state after
+without a durable trace or reusable outcome. Every API request reads only,
+including verified and diagnostics routes, except that a name request stages
+the labels it proves for the preimage import
+([name inputs](api-v1.md#name-inputs)). It revalidates captured state after
 provider calls without creating, refreshing, or clearing diagnostic observations.
 
 ## Permissions

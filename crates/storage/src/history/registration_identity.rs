@@ -10,6 +10,10 @@ mod registry_registration;
 #[path = "registration_identity_plan_tests.rs"]
 mod plan_tests;
 
+#[cfg(test)]
+#[path = "registration_identity_inflated_plan_tests.rs"]
+mod inflated_plan_tests;
+
 use super::{
     EventHistoryReadFilter,
     filters::{

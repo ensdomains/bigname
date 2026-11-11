@@ -2078,6 +2078,16 @@ or changes neither input. The phase runner owns validation of the durable phase
 marker and its range. Interpret validates only the normalized replay evidence
 and rejects malformed, wrong-arm, wrong-name, or wrong-binding evidence.
 
+## Required redo
+
+an explicit redo that the phase runner, manifest synchronization or Interpret
+records on a phase's `chain_phase_state` row because work the phase already did
+became invalid, for example after a reorg orphans readable blocks. Its
+`last_error` marks it as the runner's own work with a `required downstream redo`
+prefix. An operator redo is one begun with `phase-runner redo`. [Phase
+state](phase-state.md) lists the row states of both and the statements that
+write them.
+
 ## Preimage observation / label preimage
 
 learning the human-readable string
@@ -2207,6 +2217,9 @@ normalization, or whose bytes do not decode as text, leaves the placeholder; a
 rendered name never takes the escape [non-name form](#non-name-form). `name`
 and `display_name` carry the same rendered name. No stored projection holds it,
 so an imported preimage changes it on the next read without a new publication.
+On name detail, subnames, and lookup, a label that the request itself spells as
+text also reads as that text, since the request proves it
+([name inputs](api-v1.md#name-inputs)).
 A surface that stores its raw bytes is served under its stored name instead.
 See [storage](storage.md#name-identity-and-raw-evidence) and
 [name inputs](api-v1.md#name-inputs).
@@ -2784,7 +2797,7 @@ Project's publication of current state directly from the
 changed keys, undo journal and marker together. Rebuilds can group older work
 blocks into bounded ranges; reads remain unavailable until the marker is live.
 
-The families carry labels F1 to F16 and F20, used in the difference lists, the
+The families carry labels F1 to F18 and F20, used in the difference lists, the
 table comments and the reducers' module headers; F10, the retired resolver alias
 tables, is unused. Each label names these tables and
 the reducer under `crates/project/src/families/` that writes them:
@@ -2808,6 +2821,8 @@ the reducer under `crates/project/src/families/` that writes them:
 | F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
 | F15, name summary | `project_name_summary` | `derived/summary.rs` |
 | F16, ENSv2 registry entries | `project_ens_v2_entry_owner`, `project_ens_v2_registry_parent` | `ens_v2_registry.rs` |
+| F17, child listing | `project_child_listing`, `project_child_listing_count`, `project_child_preimage_watermark` (shared with F18) | `derived/children.rs` |
+| F18, address listing | `project_address_listing` | `derived/address_listing.rs` |
 | F20, event counts | `project_event_count` | `event_counts.rs` |
 
 ## Family marker

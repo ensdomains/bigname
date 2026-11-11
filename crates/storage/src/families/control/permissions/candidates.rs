@@ -150,7 +150,8 @@ fn page_registry_sources() -> [String; 3] {
 
 /// The candidate-key statement of [`page`]: nine sources, each cut to the page before the
 /// union. `token` is what a read bound to one resource knows about it. With it, the three
-/// registry sources look the resource up on its chain, and without it they are unchanged.
+/// registry sources look the resource up on its chain, and the two WrapperRegistry sources
+/// start from its root grants. Without it they are unchanged.
 pub(super) fn statement(
     subject: Option<&str>,
     resource_id: Option<Uuid>,
@@ -171,12 +172,12 @@ pub(super) fn statement(
            ON candidate.logical_name_id = observation.logical_name_id
          WHERE {APPROVED} AND observation.attributed_via = 'name'"
     );
-    let [registry_target, registry_resource, registry_name] =
-        if resource_id.is_some() && token.is_some() {
-            resource_registry_sources()
-        } else {
-            [registry_target, registry_resource, registry_name]
-        };
+    let bound = resource_id.is_some() && token.is_some();
+    let [registry_target, registry_resource, registry_name] = if bound {
+        resource_registry_sources()
+    } else {
+        [registry_target, registry_resource, registry_name]
+    };
     // Expose the leading seek key to the source indexes, even when the tuple contains a
     // computed account scope. The full tuple comparison below retains within-resource paging.
     let seek = if subject
@@ -189,8 +190,17 @@ pub(super) fn statement(
     } else {
         ""
     };
-    let wrapper_owners = super::wrapper_registry::owner_candidates();
-    let wrapper_operators = super::wrapper_registry::operator_candidates();
+    let (wrapper_owners, wrapper_operators) = if bound {
+        (
+            super::wrapper_registry::resource_owner_candidates(),
+            super::wrapper_registry::resource_operator_candidates(subject.is_some()),
+        )
+    } else {
+        (
+            super::wrapper_registry::owner_candidates(),
+            super::wrapper_registry::operator_candidates(),
+        )
+    };
     let arms = [
         DIRECT, WRAPPER, &registry_target, &registry_resource, &registry_name,
         super::ens_v2::OPERATOR_CANDIDATES, super::ens_v2::ROOT_HOLDER_CANDIDATES,
@@ -357,3 +367,7 @@ async fn resource_page(
 #[cfg(test)]
 #[path = "candidates_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "wrapper_candidates_tests.rs"]
+mod wrapper_tests;

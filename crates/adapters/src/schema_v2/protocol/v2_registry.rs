@@ -427,13 +427,13 @@ fn label_event(
     if let (Some(upstream_resource), Some(resource_id)) =
         (linked.upstream_resource.as_ref(), linked.resource_id)
     {
+        // A restore reads resource, lineage and registration from this row. The live token matches.
+        let token_lineage_id = linked.token_lineage_id.map(|id| id.to_string());
         event_state = merge(
             event_state,
-            json!({
-                "upstream_resource":upstream_resource,
-                "resource_id":resource_id.to_string(),
-            }),
+            json!({"upstream_resource":upstream_resource,"resource_id":resource_id.to_string(),"token_lineage_id":token_lineage_id}),
         );
+        state.set_v2_registration(&raw.emitting_address, &token_id, event_state.clone());
     }
     let mut output = single_event(kind, name_id.clone(), linked.resource_id, event_state);
     if let Some(resource_id) = linked.resource_id {

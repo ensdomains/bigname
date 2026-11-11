@@ -8,7 +8,7 @@ use bigname_e2e::harness::{
     ens_v1,
     ens_v2::{self, RegisterEthName},
     manifests::generate_local_sepolia_profile,
-    pipeline::SequentialFixtureReplay,
+    pipeline::{SequentialFixtureReplay, chain_stopped_in},
     rpc::RpcClient,
 };
 use serde::Deserialize;
@@ -635,9 +635,12 @@ async fn observe(
     cfg: &Config,
     client: &RpcClient,
     writer: &mut Child,
+    writer_tag: &str,
     db: &str,
     e: &Value,
 ) -> Result<()> {
+    let writer_logs =
+        ["stdout", "stderr"].map(|suffix| cfg.evidence_dir.join(format!("{writer_tag}.{suffix}")));
     let deadline = Instant::now() + Duration::from_secs(cfg.progress_timeout_secs);
     let mut previous = false;
     let mut iteration = 0;
@@ -647,6 +650,11 @@ async fn observe(
         ensure!(
             writer.try_wait()?.is_none(),
             "writer exited during observation"
+        );
+        // A chain that stops leaves the writer up, so its log is the signal.
+        ensure!(
+            !chain_stopped_in(&writer_logs),
+            "writer stopped a chain on a terminal error during observation; logs {writer_logs:?}"
         );
         let head = rpc(
             cfg,
@@ -674,6 +682,11 @@ async fn observe(
         )?;
         ensure!(Instant::now() < deadline, "healthy resting checkpoint deadline");
         if checked.is_ok() && previous {
+            // A stop logged during this iteration's reads would otherwise pass.
+            ensure!(
+                !chain_stopped_in(&writer_logs),
+                "writer stopped a chain on a terminal error during observation; logs {writer_logs:?}"
+            );
             return Ok(());
         }
         previous = checked.is_ok();
@@ -944,6 +957,7 @@ async fn exercise(
         cfg,
         &client,
         writer.as_mut().context("writer")?,
+        writer_tag,
         &cfg.original_database,
         &e,
     )
@@ -1112,6 +1126,7 @@ async fn exercise(
         cfg,
         &client,
         writer.as_mut().context("restored writer")?,
+        writer_tag,
         &cfg.restored_database,
         &e,
     )
