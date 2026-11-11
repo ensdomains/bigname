@@ -56,8 +56,8 @@ const ACCOUNT_SCOPE_BEFORE: &str = "concat('account:', approval.chain_id, ':regi
     approval.authority_contract, ':', approval.owner) AS scope";
 
 /// The statement before the registry sources of a read bound to one resource started from
-/// that resource: the text every read sent, with the ENSv2 and wrapper-registry sources it
-/// still shares.
+/// that resource: the text every read sent, with the ENSv2 sources it still shares and the
+/// WrapperRegistry sources that reads not bound to a published resource still send.
 fn statement_before(
     subject: Option<&str>,
     resource_id: Option<Uuid>,

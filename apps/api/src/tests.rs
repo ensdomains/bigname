@@ -10,6 +10,8 @@ mod openapi_responses;
 mod openapi_surface;
 #[path = "tests/seeder_equality.rs"]
 mod seeder_equality;
+#[path = "tests/walk_index_set_check.rs"]
+mod walk_index_set_check;
 
 #[tokio::test]
 async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<()> {
@@ -477,9 +479,11 @@ async fn v2_namespace_profile_and_history_are_full_where_names_serve() -> Result
 }
 
 include!("tests/removed_graphql_route.rs");
+include!("tests/cors_preflight.rs");
 include!("tests/v2_name_record.rs");
 include!("tests/v2_name_records_default_set.rs");
 include!("tests/v2_name_records_inventory_only.rs");
+include!("tests/v2_records_completeness.rs");
 include!("tests/v2_lookup_detail_parity.rs");
 include!("tests/v2_verified_name_detail.rs");
 include!("tests/record_id_resolver.rs");
@@ -502,6 +506,7 @@ include!("tests/v2_history_keyset_walk.rs");
 include!("tests/v2_history_query_filters.rs");
 include!("tests/v2_contract_event_counts.rs");
 include!("tests/v2_events_emitter_count.rs");
+include!("tests/v2_events_default_count.rs");
 include!("tests/v2_tokenless_expiry_events.rs");
 include!("tests/v2_history_block_order.rs");
 include!("tests/v2_history_block_order_children.rs");
@@ -512,6 +517,7 @@ include!("tests/v2_address_names_budget.rs");
 include!("tests/v2_address_names_budget_fence.rs");
 include!("tests/v2_address_names_roles.rs");
 include!("tests/v2_address_names_bounded.rs");
+include!("tests/v2_address_names_opt_in_count_cap.rs");
 include!("tests/v2_address_names_role_summary_batch.rs");
 include!("tests/v2_address_names_walk_steps.rs");
 include!("tests/v2_address_names_listing.rs");
@@ -551,6 +557,7 @@ include!("tests/v2_resolver_collections.rs");
 include!("tests/v2_resolver_generation_races.rs");
 include!("tests/v2_registries.rs");
 include!("tests/v2_registry_event_count_cap.rs");
+include!("tests/v2_resolver_bound_count_cap.rs");
 include!("tests/v2_registries_manifest_history.rs");
 include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
@@ -610,6 +617,7 @@ include!("tests/v2_address_names_parent.rs");
 include!("tests/v2_bracketed_labelhash_names.rs");
 include!("tests/v2_textless_surface.rs");
 include!("tests/v2_textless_surface_lookup.rs");
+include!("tests/v2_label_heal.rs");
 include!("tests/v2_bound_names_paging.rs");
 include!("tests/v2_bound_names_as_of.rs");
 include!("tests/v2_textless_surface_expiry.rs");

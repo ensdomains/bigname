@@ -6,7 +6,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
 use sqlx::{PgConnection, raw_sql};
 
-use super::performance_tests::{CHAIN, CHILDREN, PARENT, install};
+use super::performance_tests::{CHAIN, CHILDREN, PARENT, install_with};
 use crate::families::topology::{ListingBlock, listing_rows};
 
 /// The children of one statement: the writer's chunk (`CHUNK`, derived/children.rs).
@@ -15,6 +15,12 @@ const CHUNK: i64 = 1_000;
 const SKEWED_OTHERS: i64 = 99;
 /// The parents of the many-parents case: one per child, and a former parent for 200 of them.
 const MANY: i64 = 1_200;
+/// On the fixture without statistics the children `1..=SURFACED` have a surface of their own,
+/// read by `wanted_child`. The fixture with statistics keeps none, the shape on which the
+/// namespace and node probe once took `name_surfaces_project_parent_key_idx`.
+const SURFACED: i64 = 500;
+/// Every plan cache mode: the custom plan, the generic plan, and PostgreSQL's own choice.
+const PLAN_MODES: [&str; 3] = ["force_custom_plan", "force_generic_plan", "auto"];
 
 /// The child node `n` (`0x`, 64 hex digits), as `install` and `seed` write it.
 fn node(n: i64) -> String {
@@ -44,8 +50,9 @@ fn condition(scan: &Value) -> Option<&str> {
 /// statistics, so the planner counts their parents as about one row. Skewed: 99 parents `s<k>`
 /// with child `10_000 + k` each, beside `install`'s parent and its 2,000 children. Many: parents
 /// `m<k>` with child `20_000 + k` for k up to 1,000, and parents `m<1_000 + k>` that listed
-/// child `20_000 + k` for k up to 200 before it moved (an earlier position).
-async fn seed(conn: &mut PgConnection) -> Result<()> {
+/// child `20_000 + k` for k up to 200 before it moved (an earlier position). The children
+/// `1..=surfaced` also get a surface, with the id every surface has (`<namespace>:<namehash>`).
+async fn seed(conn: &mut PgConnection, surfaced: i64) -> Result<()> {
     raw_sql(&format!(
         "INSERT INTO name_surfaces(logical_name_id, namespace, raw_name, raw_labels,
              dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
@@ -64,7 +71,14 @@ async fn seed(conn: &mut PgConnection) -> Result<()> {
                FROM generate_series(1, {SKEWED_OTHERS}) n
                UNION ALL SELECT 'm' || n, 20000 + n, 2 FROM generate_series(1, {CHUNK}) n
                UNION ALL SELECT 'm' || ({CHUNK} + n), 20000 + n, 1
-               FROM generate_series(1, {MANY} - {CHUNK}) n) edges;"
+               FROM generate_series(1, {MANY} - {CHUNK}) n) edges;
+         INSERT INTO name_surfaces(logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state)
+         SELECT 'ens:' || node, 'ens', 'c' || n || '.eth', ARRAY['c' || n, 'eth'], '\\x00', node,
+             ARRAY[node, 'eth'], 'fixture', 'active', '{CHAIN}', 'block', 100, 'canonical'
+         FROM (SELECT n, '0x' || lpad(to_hex(n), 64, '0') AS node
+               FROM generate_series(1, {surfaced}) n) children;"
     ))
     .execute(&mut *conn)
     .await?;
@@ -81,14 +95,24 @@ async fn seed(conn: &mut PgConnection) -> Result<()> {
 // chain, a block range or the namespace alone, and each parent's name state once at most.
 #[tokio::test]
 async fn touched_children_read_each_child_by_its_node_across_parent_counts() -> Result<()> {
-    let database = TestDatabase::create(
-        TestDatabaseConfig::new("children_narrowed_plan").pool_max_connections(1),
-    )
-    .await?;
+    narrowed_plans("children_narrowed_plan", true).await
+}
+
+/// The same cells on tables with no planner statistics, as a redo's family step finds them: the
+/// child surfaces must still be read by their id, never by a scan of the namespace.
+#[tokio::test]
+async fn touched_children_read_each_child_by_its_key_without_statistics() -> Result<()> {
+    narrowed_plans("children_narrowed_plan_nostats", false).await
+}
+
+async fn narrowed_plans(prefix: &str, statistics: bool) -> Result<()> {
+    let database =
+        TestDatabase::create(TestDatabaseConfig::new(prefix).pool_max_connections(1)).await?;
     let result = async {
         let mut conn = database.pool().acquire().await?;
-        install(&mut conn).await?;
-        seed(&mut conn).await?;
+        install_with(&mut conn, statistics).await?;
+        let surfaced = if statistics { 0 } else { SURFACED };
+        seed(&mut conn, surfaced).await?;
         let skewed_kept = CHUNK - SKEWED_OTHERS;
         ensure!(
             CHILDREN > skewed_kept,
@@ -125,7 +149,8 @@ async fn touched_children_read_each_child_by_its_node_across_parent_counts() -> 
             ))
             .execute(&mut *conn)
             .await?;
-            for mode in ["force_custom_plan", "force_generic_plan"] {
+            let found = children.iter().filter(|&&n| n <= surfaced).count();
+            for mode in PLAN_MODES {
                 raw_sql(&format!("SET plan_cache_mode = {mode}"))
                     .execute(&mut *conn)
                     .await?;
@@ -137,7 +162,9 @@ async fn touched_children_read_each_child_by_its_node_across_parent_counts() -> 
                 ))
                 .fetch_one(&mut *conn)
                 .await?;
-                check(&plan, parents.len(), &format!("{case}, {mode}"))?;
+                let cell = format!("{case}, {mode}, statistics {statistics}");
+                check(&plan, parents.len(), &cell)?;
+                check_child_probe(&plan, nodes.len(), found, &cell)?;
             }
         }
         Ok(())
@@ -186,4 +213,73 @@ fn check(plan: &Value, parents: usize, cell: &str) -> Result<()> {
         "{cell}: the parents' name states are not probed by key once each: {plan}"
     );
     Ok(())
+}
+
+/// The rows a scan read: those it returned and those its filter removed, over every loop.
+fn rows_read(scan: &Value) -> f64 {
+    let loops = scan["Actual Loops"].as_f64().unwrap_or(0.0);
+    (scan["Actual Rows"].as_f64().unwrap_or(0.0)
+        + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+        * loops
+}
+
+/// The checks of `wanted_child`'s probe: every executed surface read keyed on a wanted child's
+/// node (not the parents' probe, which is keyed on the wanted parent ids) goes
+/// through `name_surfaces_pkey`, returns at most one row per loop, and reads no more rows than
+/// there are wanted children, and together they find each surfaced child once.
+fn check_child_probe(plan: &Value, wanted: usize, surfaced: usize, cell: &str) -> Result<()> {
+    let root = &plan[0]["Plan"];
+    let mut surfaces = Vec::new();
+    executed(root, "name_surfaces", &mut surfaces);
+    let probes: Vec<&Value> = surfaces
+        .into_iter()
+        .filter(|scan| {
+            [condition(scan), scan["Filter"].as_str()]
+                .into_iter()
+                .flatten()
+                .any(|text| text.contains("wanted") && text.contains(".node"))
+        })
+        .collect();
+    ensure!(
+        !probes.is_empty(),
+        "{cell}: no surface read is keyed on a wanted child: {plan}"
+    );
+    for scan in &probes {
+        ensure!(
+            scan["Index Name"] == "name_surfaces_pkey",
+            "{cell}: a wanted child's surface is read by {} {}: {plan}",
+            scan["Node Type"],
+            scan["Index Name"]
+        );
+        ensure!(
+            scan["Actual Rows"].as_f64().unwrap_or(0.0) <= 1.0,
+            "{cell}: a wanted child's probe returns {} rows a loop: {plan}",
+            scan["Actual Rows"]
+        );
+        let read = rows_read(scan);
+        ensure!(
+            read <= wanted as f64,
+            "{cell}: the wanted children's probe read {read} rows for {wanted} children: {plan}"
+        );
+    }
+    // EXPLAIN reports a scan's rows as a rounded mean per loop, so the surfaces found are read
+    // from the `wanted_child` CTE, which runs once.
+    let found = cte_rows(root, "CTE wanted_child");
+    ensure!(
+        found == Some(surfaced as f64),
+        "{cell}: wanted_child holds {found:?} surfaces for {surfaced} surfaced children: {plan}"
+    );
+    Ok(())
+}
+
+/// The rows of the CTE `name`, which runs once.
+fn cte_rows(plan: &Value, name: &str) -> Option<f64> {
+    if plan["Subplan Name"] == name {
+        return plan["Actual Rows"].as_f64();
+    }
+    plan["Plans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|child| cte_rows(child, name))
 }
