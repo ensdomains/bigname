@@ -5414,6 +5414,50 @@ fn registry_order_a_label_back_on_its_linked_token_diverges_until_tyr_525() -> R
     )
 }
 
+/// Shrunk from seed 2119274496: the declared registry registers a label without minting it,
+/// reserves the same label on the same token in the next transaction, then links the token's
+/// resource in the next block. The split replay emits events the whole pass does not. Pinned until
+/// TYR-530 lands.
+#[test]
+fn registry_order_a_reservation_over_an_unminted_registration_diverges_until_tyr_530() -> Result<()>
+{
+    use crate::permutation::registry_orders::{Action, Atom, Expiry, Registry, Token};
+    let registry = Registry::Declared;
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    pinned_registry_order_failure(
+        "a reservation over an unminted registration",
+        registry_orders::TYR_530,
+        "the split replay derives a different event stream",
+        &[
+            in_new_block(vec![Atom::Register {
+                registry,
+                token,
+                label: 0,
+                owner: 1,
+                expiry: Expiry::Far,
+            }]),
+            Action {
+                atoms: vec![Atom::Reserve {
+                    registry,
+                    token,
+                    label: 0,
+                    expiry: Expiry::Far,
+                }],
+                new_block: false,
+                same_transaction: false,
+            },
+            in_new_block(vec![Atom::Link {
+                registry,
+                token,
+                resource: token,
+            }]),
+        ],
+    )
+}
+
 /// Shrunk from seed 1494661391878574169: the declared registry registers a label whose expiry has
 /// passed and links it, registers the same token again in the same block with an expiry that
 /// lapses before the next block, and a later block sets its resolver. The split replay derives a
@@ -5607,8 +5651,8 @@ fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result
 #[test]
 fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     use crate::permutation::registry_orders::{
-        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522_S_A3, TYR_525, TYR_526, Token,
-        known_failure,
+        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522_S_A3, TYR_525, TYR_526, TYR_530,
+        Token, known_failure,
     };
     let registry = Registry::Announced;
     let token = Token {
@@ -5705,6 +5749,32 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             owner: 1,
             expiry: Expiry::Far,
         }]),
+        block(vec![register(Expiry::Far)]),
+    ];
+    let extra_events = "only in the whole pass (0): \n  only in the split replay (5): x:AuthorityTransferred:t:3\n    x:ExpiryChanged:t:4";
+    let extra_other_events =
+        "only in the whole pass (0): \n  only in the split replay (1): x:SurfaceBound:t:3";
+    let granted_resource = "event x:RegistrationGranted:0 diverges between the whole-sequence pass and the split replay:\n  after_state\n      whole={\"a\":1,\"resource_id\":\"r\"}\n   replayed={\"a\":1}";
+    let granted_resource_and_more = "event x:RegistrationGranted:0 diverges between the whole-sequence pass and the split replay:\n  after_state\n      whole={\"a\":1,\"resource_id\":\"r\"}\n   replayed={\"a\":2}";
+    let mint = Atom::Mint {
+        registry,
+        token,
+        to: 1,
+    };
+    let reserved_unminted_then_linked = vec![
+        block(vec![register(Expiry::Far), reserve(Expiry::Far)]),
+        block(vec![link]),
+    ];
+    let reserved_minted_then_linked = vec![
+        block(vec![register(Expiry::Far), mint, reserve(Expiry::Far)]),
+        block(vec![link]),
+    ];
+    let reserved_unminted_then_registered = vec![
+        block(vec![register(Expiry::Far), reserve(Expiry::Far)]),
+        block(vec![register(Expiry::Far)]),
+    ];
+    let reserved_minted_then_registered = vec![
+        block(vec![register(Expiry::Far), mint, reserve(Expiry::Far)]),
         block(vec![register(Expiry::Far)]),
     ];
     let reserved_between = vec![
@@ -5904,6 +5974,49 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             dropped,
             dropped_text,
             live_again,
+            None,
+        ),
+        // TYR-530.
+        (
+            "a reservation over an unminted registration, extra events",
+            stream,
+            extra_events,
+            reserved_unminted_then_linked.clone(),
+            Some(TYR_530),
+        ),
+        (
+            "a reservation over an unminted registration, other extra events",
+            stream,
+            extra_other_events,
+            reserved_unminted_then_linked,
+            None,
+        ),
+        (
+            "a reservation over a minted registration, extra events",
+            stream,
+            extra_events,
+            reserved_minted_then_linked,
+            None,
+        ),
+        (
+            "a reservation over an unminted registration, the resource only in the whole pass",
+            after,
+            granted_resource,
+            reserved_unminted_then_registered.clone(),
+            Some(TYR_530),
+        ),
+        (
+            "a reservation over an unminted registration, the resource and another field",
+            after,
+            granted_resource_and_more,
+            reserved_unminted_then_registered,
+            None,
+        ),
+        (
+            "a reservation over a minted registration, the resource only in the whole pass",
+            after,
+            granted_resource,
+            reserved_minted_then_registered,
             None,
         ),
         // TYR-526.

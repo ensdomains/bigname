@@ -74,7 +74,11 @@ const BASE_BLOCK: i64 = 20_519_000;
 const BASE_TIMESTAMP: i64 = 1_700_000_000;
 const BLOCK_SECONDS: i64 = 12;
 const FAR_EXPIRY: u64 = 1_900_000_000;
-const LABELS: [&str; 2] = ["order", "other"];
+const LABELS: [&str; 3] = ["order", "other", "spare"];
+/// The labels drawn actions use. The last label is only the reservation close's, so nothing else
+/// ever holds it.
+const DRAWN_LABELS: usize = 2;
+const SPARE_LABEL: usize = 2;
 const ANNOUNCED: &str = "0x00000000000000000000000000000000f0051900";
 const RESOLVERS: [&str; 2] = [
     "0x00000000000000000000000000000000f0051901",
@@ -107,6 +111,14 @@ pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L460 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222-L224 @ ens_v2@a971bd64).
 pub const TYR_525: &str = "TYR-525";
+/// TYR-530: a `LabelReserved` over a token whose `LabelRegistered` was never minted. Either the
+/// split replay emits events the whole pass does not, among them the token's
+/// `AuthorityTransferred` and `ExpiryChanged`, or a later `RegistrationGranted` names the token's
+/// resource only in the whole pass. The deployed registry mints in the same call as every
+/// `LabelRegistered` and refuses a reservation over a live owned label
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L442 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L466-L468 @ ens_v2@a971bd64).
+pub const TYR_530: &str = "TYR-530";
 /// TYR-526: a pointer update and an unregister of a token, with or without a label, then a
 /// transfer of it. Only the whole pass marks the transfer's registry state as pending hydration.
 pub const TYR_526: &str = "TYR-526";
@@ -296,6 +308,8 @@ fn expiry_shapes(actions: &[Action], layout: Layout) -> BTreeSet<&'static str> {
 
 pub const LABEL_RETURNS: &str =
     "TYR-525: a label registered back on a token id it left, which holds a resource";
+pub const RESERVED_OVER_UNMINTED: &str =
+    "TYR-530: a reservation over a registration that was never minted";
 pub const RELEASED_POINTER_TRANSFER: &str =
     "TYR-526: a transfer after a pointer update and an unregister";
 pub const RELINK_AFTER_CLOSE: &str = "TYR-522 S-A3: a binding closed and linked again";
@@ -303,13 +317,14 @@ pub const RELINK_AFTER_CLOSE: &str = "TYR-522 S-A3: a binding closed and linked 
 /// Every shape the sweep counts sequences for: each known tag's order, the two TYR-510 orders, a
 /// registration again after the first lapsed, and the deployed re-registration. The default corpus
 /// must reach each.
-pub const NAMED_SHAPES: [&str; 10] = [
+pub const NAMED_SHAPES: [&str; 11] = [
     PASSED_WHEN_EMITTED,
     CUT_TO_PASSED,
     AGAIN_WHILE_LIVE,
     LABEL_RETURNS,
     AGAIN_AFTER_LAPSE,
     DEPLOYED_REREGISTRATION,
+    RESERVED_OVER_UNMINTED,
     RELEASED_POINTER_TRANSFER,
     RELINK_AFTER_CLOSE,
     TOKEN_RESOURCE_BEFORE_LABEL,
@@ -327,6 +342,9 @@ fn named_shapes(actions: &[Action]) -> BTreeSet<&'static str> {
     }
     if returns_a_label_to_a_linked_token(actions) {
         shapes.insert(LABEL_RETURNS);
+    }
+    if reserves_over_an_unminted_registration(actions) {
+        shapes.insert(RESERVED_OVER_UNMINTED);
     }
     if links_a_linked_token(actions) && relinks_a_closed_binding(actions) {
         shapes.insert(RELINK_AFTER_CLOSE);
@@ -373,6 +391,63 @@ fn returns_a_label_to_a_linked_token(actions: &[Action]) -> bool {
     false
 }
 
+/// A `LabelReserved` over a token whose `LabelRegistered` no mint has followed.
+fn reserves_over_an_unminted_registration(actions: &[Action]) -> bool {
+    let mut unminted = BTreeSet::new();
+    for atom in atoms(actions) {
+        match atom {
+            Atom::Register {
+                registry, token, ..
+            } => {
+                unminted.insert((registry, token));
+            }
+            Atom::Mint {
+                registry, token, ..
+            }
+            | Atom::Unregister { registry, token } => {
+                unminted.remove(&(registry, token));
+            }
+            Atom::Reserve {
+                registry, token, ..
+            } if unminted.contains(&(registry, token)) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// TYR-530's two symptoms. The split replay emits only extra events, among them
+/// `AuthorityTransferred` and `ExpiryChanged`. Or a `RegistrationGranted`'s after states differ
+/// only in the whole pass naming `resource_id`.
+fn tyr_530_symptom(signature: &str, text: &str) -> bool {
+    let extra_events = signature == "the split replay derives a different event stream"
+        && text.contains("only in the whole pass (0):")
+        && text
+            .split_once("only in the split replay")
+            .is_some_and(|(_, split)| {
+                split.contains(":AuthorityTransferred:") && split.contains(":ExpiryChanged:")
+            });
+    extra_events
+        || (signature
+            == "an event's after_state differs between the whole pass and the split replay"
+            && text.contains(":RegistrationGranted:")
+            && only_the_whole_pass_names_the_resource(text))
+}
+
+fn only_the_whole_pass_names_the_resource(text: &str) -> bool {
+    let parse = |marker| {
+        after_state(text, marker)
+            .and_then(|state| serde_json::from_str::<serde_json::Value>(state).ok())
+            .and_then(|state| state.as_object().cloned())
+    };
+    let (Some(mut whole), Some(replayed)) = (parse("whole="), parse("replayed=")) else {
+        return false;
+    };
+    !replayed.contains_key("resource_id")
+        && whole.remove("resource_id").is_some()
+        && whole == replayed
+}
+
 /// The version-flip symptom: live state drops the token's resource and a restore keeps it.
 fn resource_dropped_live_kept_on_restore(signature: &str, text: &str) -> bool {
     signature == "live state differs from a restore at upstream_resource"
@@ -417,6 +492,9 @@ pub fn known_failure(
         && returns_a_label_to_a_linked_token(actions)
     {
         return Some(TYR_525);
+    }
+    if tyr_530_symptom(signature, text) && reserves_over_an_unminted_registration(actions) {
+        return Some(TYR_530);
     }
     if signature.starts_with("an event's after_state differs")
         && only_the_whole_pass_is_pending_hydration(text)
@@ -1045,7 +1123,7 @@ fn deployed_reregistration_opening(rng: &mut Rng) -> Vec<Action> {
         Registry::Announced
     };
     let token = Token {
-        label: rng.below(LABELS.len()),
+        label: rng.below(DRAWN_LABELS),
         version: 0,
     };
     let (first, second) = (draw_actor(rng), draw_actor(rng));
@@ -1181,7 +1259,7 @@ fn draw(rng: &mut Rng) -> Vec<Atom> {
 
 fn draw_token(rng: &mut Rng) -> Token {
     Token {
-        label: rng.below(LABELS.len()),
+        label: rng.below(DRAWN_LABELS),
         version: u32::from(rng.chance(1, 4)),
     }
 }
@@ -1245,8 +1323,8 @@ fn deployed_register(
 }
 
 /// The deployed registry registering a label over its own live reservation, closing a sequence:
-/// the reservation, then in a later block `register` keeps the token id and emits the one-call
-/// registration
+/// the reservation of a label nothing else holds, then in a later block `register` keeps the token
+/// id and emits the one-call registration
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L436-L472 @ ens_v2@a971bd64).
 /// Far expiries, so the order holds in every layout.
 fn deployed_reservation_close(rng: &mut Rng) -> Vec<Action> {
@@ -1256,7 +1334,7 @@ fn deployed_reservation_close(rng: &mut Rng) -> Vec<Action> {
         Registry::Announced
     };
     let token = Token {
-        label: rng.below(LABELS.len()),
+        label: SPARE_LABEL,
         version: 0,
     };
     let owner = draw_actor(rng);
