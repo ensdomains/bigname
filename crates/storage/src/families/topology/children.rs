@@ -20,6 +20,7 @@ use super::{
     shims::{effective_child_fuse_expiry, effective_child_fuses, row_position},
 };
 pub(super) use spelling::CHILD_DISPLAY_NAME;
+pub(crate) use spelling::stored_spelling;
 use spelling::{CHILD_UNHEALED_LABELHASHES, label_decoded_name, label_raw_name};
 
 pub(super) const READABLE: &str = "('canonical', 'safe', 'finalized')";

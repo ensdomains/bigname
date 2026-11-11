@@ -146,15 +146,16 @@ pub(crate) async fn undo_block(
     Ok(Some(restored))
 }
 
-/// Heal, at the restored block, the child listing rows the undone block's journal restored that
-/// still spell a label as `[labelhash]`. Interpret's redo never removes a label from
-/// `label_preimages` (`crates/interpret/src/write.rs`, `prepare_redo_range`), so a row the undone
-/// block healed would otherwise show it as `[labelhash]` again, while the relation at the restored
-/// block, and a rebuild there, spell it. The listing's own statement derives the rows
-/// (`derived/children.rs`, `derive_heals`) and writes only those it spells further, journalling
-/// nothing. Any other difference comes from Interpret rows the repair already replaced, which the
-/// replay derives, or from an input that changes in place with no block, which a rebuild covers.
-/// No count moves. With no restored block the families are empty.
+/// Heal, at the restored block, the address listing and child listing rows the undone block's
+/// journal restored that still spell a label as `[labelhash]`. Interpret's redo never removes a
+/// label from `label_preimages` (`crates/interpret/src/write.rs`, `prepare_redo_range`), so a row
+/// the undone block healed would otherwise show it as `[labelhash]` again, while the relation at
+/// the restored block, and a rebuild there, spell it. Each listing's own statements derive the
+/// rows (`derived/address_listing.rs` and `derived/children.rs`, `derive_heals`) and write only
+/// those they spell further, journalling nothing. Any other difference comes from Interpret rows
+/// the repair already replaced, which the replay derives, or from an input that changes in place
+/// with no block, which a rebuild covers. No count moves. With no restored block the families are
+/// empty.
 async fn heal_listing(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chain_id: &str,
@@ -165,12 +166,37 @@ async fn heal_listing(
         return Ok(());
     };
     let mut children = Vec::new();
+    let mut addressed = Vec::new();
     for (family, key, image) in journal {
         let unhealed = image
             .as_ref()
             .and_then(|image| image.get("unhealed_labelhashes"))
             .and_then(Value::as_array);
-        if family != tables::CHILD_LISTING.name || unhealed.is_none_or(Vec::is_empty) {
+        if unhealed.is_none_or(Vec::is_empty) {
+            continue;
+        }
+        if family == tables::ADDRESS_LISTING.name {
+            let key = store::key_object(&tables::ADDRESS_LISTING, key)?;
+            let field = |name: &str| {
+                key.get(name).and_then(Value::as_str).ok_or_else(|| {
+                    ProjectError::data_integrity(format!(
+                        "address listing undo key of chain {chain_id} names no {name}"
+                    ))
+                })
+            };
+            let registry_child = image
+                .as_ref()
+                .and_then(|image| image.get("registry_child"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            addressed.push((
+                field("address")?.to_owned(),
+                field("logical_name_id")?.to_owned(),
+                registry_child,
+            ));
+            continue;
+        }
+        if family != tables::CHILD_LISTING.name {
             continue;
         }
         let key = store::key_object(&tables::CHILD_LISTING, key)?;
@@ -184,7 +210,7 @@ async fn heal_listing(
             })?;
         children.push(child.to_owned());
     }
-    if children.is_empty() {
+    if children.is_empty() && addressed.is_empty() {
         return Ok(());
     }
     let timestamp_seconds = match restored.timestamp_seconds {
@@ -217,7 +243,14 @@ async fn heal_listing(
         timestamp: Value::Null,
         journal: false,
     };
-    // Boxed, so the undo's future does not carry the derivation's state on the caller's stack.
+    // Boxed, so the undo's future does not carry the derivations' state on the caller's stack.
+    Box::pin(derived::heal_address_listing(
+        transaction,
+        chain_id,
+        &block,
+        &addressed,
+    ))
+    .await?;
     Box::pin(derived::heal_child_listing(
         transaction,
         chain_id,
