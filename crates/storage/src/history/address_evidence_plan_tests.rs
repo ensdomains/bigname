@@ -598,6 +598,25 @@ async fn address_matches_rows_and_oracle_parity() -> Result<()> {
             indexed == expected_indexed,
             "key index membership {indexed:?}"
         );
+        // The earlier kind-partial match indexes are unbounded: the same long value as a token
+        // transfer's recipient fails its insert there. No writer produces one.
+        let refused = raw_sql(
+            "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+                 manifest_version, chain_id, derivation_kind, canonicality_state, after_state)
+             SELECT 'long:old-index', 'ens', 'TokenControlTransferred', 'ens_v2_registry_l1', 1,
+                 'ethereum-mainnet', 'ens_v2_registry_resource_surface', 'canonical',
+                 jsonb_build_object('to', after_state ->> 'to')
+             FROM normalized_events WHERE event_identity = 'long:to'",
+        )
+        .execute(&mut *connection)
+        .await;
+        ensure!(
+            refused.as_ref().is_err_and(|error| error
+                .to_string()
+                .contains("normalized_events_address_token_holder_match_idx")),
+            "a long recipient on a token transfer was not refused by the kind-partial index: \
+             {refused:?}"
+        );
         let mut failures = Vec::new();
         for statistics in [Statistics::Plain, Statistics::Expressions] {
             statistics.apply(connection).await?;
