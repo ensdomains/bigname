@@ -967,7 +967,15 @@ async fn a_range_ends_before_the_block_past_its_event_cap() -> Result<()> {
     fixture.resolver_changed(17, 2, 5, R1).await?;
     filler(&fixture, 17).await?;
     follow(&fixture, 10, 30).await?;
-    let rebuilt = rebuild_equal(&fixture, 30, &in_ranges(30).with_range_caps(1024, 2)).await?;
+    // One run, whatever the composition pass's partition count.
+    let rebuilt = rebuild_equal(
+        &fixture,
+        30,
+        &in_ranges(30)
+            .with_range_caps(1024, 2)
+            .with_max_blocks_per_run(u64::MAX),
+    )
+    .await?;
     assert_eq!(rebuilt.ranges, 11);
     assert_eq!(
         fixture.journalled_blocks().await?,
@@ -1019,7 +1027,9 @@ async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> 
     );
     // Six blocks change a path: 5, 7, 8, 9, 10 and 12. A rebuild in fewer than five ranges puts
     // two of them in one range.
-    let whole = rebuild_equal(&fixture, 12, &in_ranges(12)).await?;
+    // Each rebuild in one run, whatever the composition pass's partition count.
+    let one_run = |options: FamilyOptions| options.with_max_blocks_per_run(u64::MAX);
+    let whole = rebuild_equal(&fixture, 12, &one_run(in_ranges(12))).await?;
     ensure!(
         (1..5).contains(&whole.ranges),
         "the rebuild applied {} ranges, so no range is known to hold two path changes",
@@ -1029,7 +1039,7 @@ async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> 
         in_ranges(12).with_range_caps(4, u64::MAX),
         in_ranges(12).with_range_caps(2, u64::MAX),
     ] {
-        let outcome = rebuild_equal(&fixture, 12, &options).await?;
+        let outcome = rebuild_equal(&fixture, 12, &one_run(options)).await?;
         ensure!(outcome.ranges > 0, "the rebuild applied no range");
     }
     // Every event cap under every budget, each rebuild run after run as the runner continues one.
