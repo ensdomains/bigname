@@ -37,9 +37,9 @@ fn named_states() -> Vec<(Case, State)> {
         cases.push((case("running", phase, running), State::Running));
         cases.push((case("completed", phase, completed), State::Completed));
         cases.push((case("failed", phase, failed), State::Failed));
+        cases.push((case("paused", phase, paused), State::Paused));
     }
     for phase in FINITE {
-        cases.push((case("paused", phase, paused), State::Paused));
         cases.push((
             case("settled", phase, |chain, phase| {
                 completed(chain, phase).set("settled_while_unconfigured", json!(true))

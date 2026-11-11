@@ -18,10 +18,10 @@ use crate::{
     state::PhaseStore,
 };
 
-mod normal;
-mod redo;
-mod stamps;
-mod states;
+mod normal_tests;
+mod redo_tests;
+mod stamp_tests;
+mod state_tests;
 
 pub(crate) const T0: &str = "2026-01-01T00:00:00+00:00";
 pub(crate) const T1: &str = "2026-01-01T01:00:00+00:00";

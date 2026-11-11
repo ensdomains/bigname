@@ -511,8 +511,13 @@ async fn settlement_completes_an_active_normal_row() -> Result<()> {
     let chain = "settle-moved";
     seed(pool, chain, &[running(chain, PhaseName::Ingest)]).await?;
     let before = read(pool, chain, PhaseName::Ingest).await?;
-    let observed = updated_at(&scratch, chain, PhaseName::Ingest).await?
-        + sqlx::types::time::Duration::seconds(1);
+    let observed: OffsetDateTime = sqlx::query_scalar(
+        "SELECT updated_at + interval '1 second' FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
     let mut connection = pool.acquire().await?;
     ensure!(
         !store
