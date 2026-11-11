@@ -182,10 +182,10 @@ async fn await_backends_exited(pool: &PgPool) -> TestResult {
     anyhow::bail!("test database backends did not exit")
 }
 
-/// The drop list and the keep list together are every index the baseline puts on
-/// `normalized_events`, and the install script rebuilds, and the drop script checks, exactly
-/// the drop list. A new index must
-/// be classified before it lands.
+/// The drop list, the keep list and the advisory list together are every index the baseline
+/// puts on `normalized_events`, and the install script rebuilds, and the drop script checks,
+/// exactly the drop list. A new index must be classified before it lands. An advisory index is
+/// outside the walk index set, so Interpret keeps it current through a walk.
 #[tokio::test]
 async fn walk_index_set_lists_cover_every_baseline_index() -> TestResult {
     let database = database("interpret_walk_index_set_lists").await?;
@@ -199,14 +199,25 @@ async fn walk_index_set_lists_cover_every_baseline_index() -> TestResult {
     .collect();
     database.cleanup().await?;
     let keep: BTreeSet<String> = KEEP.iter().map(|name| (*name).to_owned()).collect();
+    let advisory: BTreeSet<String> = bigname_storage::walk_index_set::ADVISORY
+        .iter()
+        .map(|index| index.name.to_owned())
+        .collect();
     let dropped = dropped();
     assert!(
         keep.is_disjoint(&dropped),
         "both kept and dropped: {:?}",
         keep.intersection(&dropped).collect::<Vec<_>>()
     );
+    assert!(
+        advisory.is_disjoint(&(&keep | &dropped)),
+        "advisory and in the walk index set: {:?}",
+        advisory
+            .intersection(&(&keep | &dropped))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
-        &keep | &dropped,
+        &(&keep | &dropped) | &advisory,
         baseline,
         "unclassified or unknown indexes"
     );
