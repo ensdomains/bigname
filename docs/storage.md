@@ -1044,8 +1044,9 @@ arms. Each arm is an ordered scan of its index that returns at most the count's 
 row, and the count is the capped sum. The arm's limit applies after its own namespace, lineage
 and duplicate conditions, so the scan also reads the rows those conditions drop. Rows read per
 arm are bounded by the cap plus one plus those dropped rows, for any key and any emitter, and
-`history/record_key_plan_tests.rs` pins the cap plus 17 on its fixture. A bitmap over the plain statement could not stop at the cap, and the emitter's
-own index read in order walks every event of a large emitter looking for a rare key. Without
+`history/record_key_plan_tests.rs` pins the cap plus 17 on its fixture. A bitmap over the
+plain statement could not stop at the cap, and the emitter's own index read in order walks
+every event of a large emitter looking for a rare key. Without
 a key the count keeps the plain statement, which for `kind=RecordChanged` can read the
 emitter's `RecordChanged` rows through the emitter-led index in order and stop at the cap.
 
