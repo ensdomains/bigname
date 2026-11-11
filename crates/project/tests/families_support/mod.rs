@@ -12,6 +12,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
+pub mod address_listing;
 mod child_listing;
 pub mod ens_v2_path;
 mod expiry_policy;
@@ -24,7 +25,7 @@ pub const CHAIN: &str = "ethereum-sepolia";
 pub const CONTENT_HASH: &str = bigname_test_support::PROJECTION_CONTENT_HASH;
 
 /// The tables a rebuild composes in its composition pass rather than in its ranges.
-pub const COMPOSED_TABLES: [&str; 16] = [
+pub const COMPOSED_TABLES: [&str; 17] = [
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
@@ -33,6 +34,7 @@ pub const COMPOSED_TABLES: [&str; 16] = [
     "project_name_summary",
     "project_child_listing",
     "project_child_listing_count",
+    "project_address_listing",
     "project_address_history_anchor",
     "project_history_source",
     "project_history_source_edge",
@@ -105,6 +107,7 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_child_listing",
     "project_child_listing_count",
     "project_child_preimage_watermark",
+    "project_address_listing",
     "project_lookup_name",
     "project_lookup_relation",
     "project_lookup_inventory",
@@ -117,6 +120,8 @@ pub struct Fixture {
     pub pool: PgPool,
     /// The child listing checks of this fixture's publications (`child_listing.rs`).
     listing_checks: child_listing::Checks,
+    /// The address listing checks of this fixture's publications (`address_listing.rs`).
+    address_listing_checks: address_listing::Checks,
 }
 
 impl Fixture {
@@ -171,6 +176,7 @@ impl Fixture {
             database,
             pool,
             listing_checks: child_listing::Checks::default(),
+            address_listing_checks: address_listing::Checks::default(),
         };
         fixture.lineage(CHAIN, blocks).await?;
         Ok(fixture)
@@ -231,8 +237,9 @@ impl Fixture {
         Ok(outcome)
     }
 
-    /// Every publication a family test makes must leave an exact expiry selector, and a child
-    /// listing equal to the children relation at the published block.
+    /// Every publication a family test makes must leave an exact expiry selector, a child listing
+    /// equal to the children relation at the published block, and an address listing equal to
+    /// the address-names route's rows.
     async fn check_publication(&self, chain: &str, outcome: &FamilyOutcome, target: i64) {
         if outcome.marker.is_some() {
             self.assert_expiry_selector()
@@ -241,6 +248,9 @@ impl Fixture {
             self.assert_child_listing(chain)
                 .await
                 .unwrap_or_else(|error| panic!("child listing at {target}: {error:#}"));
+            self.assert_address_listing(chain)
+                .await
+                .unwrap_or_else(|error| panic!("address listing at {target}: {error:#}"));
         }
     }
 

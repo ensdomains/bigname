@@ -467,7 +467,7 @@ async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes
             assert!(body.to_string().contains(&name), "{uri}: {body:#}");
             views.push(body["data"].clone());
         }
-        let bound = bigname_storage::families::name::assert_bound_names_match_the_walk(
+        let bound = bigname_storage::families::name::assert_bound_name_pages_chain(
             &database.pool,
             CHAIN,
             &format!("{resolver:#x}"),

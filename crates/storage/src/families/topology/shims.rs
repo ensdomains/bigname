@@ -1,8 +1,7 @@
 //! SQL fragments the topology readers share: the canonical event order over a family row's
 //! position columns, as a row value or read from a JSON position, and a child's effective
 //! NameWrapper fuses at the publication clock. Also the fragments the name-ordered candidate
-//! walks (search, a resolver's bound names, an address's reverse page) share for the surfaces
-//! that store no raw bytes.
+//! walks (search, an address's reverse page) share for the surfaces that store no raw bytes.
 //!
 //! The children surface filter (`CHILD_SURFACE_FILTER`, `children.rs`) drops every child whose
 //! surface is unreadable; no writer records a label-preimage exception for an unreadable

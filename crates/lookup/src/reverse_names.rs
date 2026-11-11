@@ -151,6 +151,15 @@ fn decode_multicall_results(return_data: &[u8]) -> Result<Vec<EnsReverseNameMult
                     });
                 }
             };
+            // PostgreSQL text and jsonb cannot hold a NUL byte, so a name containing one has the
+            // outcome of a malformed return: no value is written and the read counts as failed.
+            if value.contains('\0') {
+                return Ok(EnsReverseNameMulticallResult::Failed {
+                    message: "resolver name call returned a name containing a NUL byte, which \
+                              cannot be stored"
+                        .to_owned(),
+                });
+            }
             Ok(if value.is_empty() {
                 EnsReverseNameMulticallResult::NotFound
             } else {
@@ -232,6 +241,63 @@ mod tests {
         };
         assert!(
             message.starts_with("resolver name call return data is malformed:"),
+            "{message}"
+        );
+        Ok(())
+    }
+
+    fn successful_name_returns(names: &[&str]) -> Vec<u8> {
+        let results = names
+            .iter()
+            .map(|name| abi::Result3 {
+                success: true,
+                returnData: Bytes::from((name.to_string(),).abi_encode_params()),
+            })
+            .collect::<Vec<_>>();
+        (results,).abi_encode_params()
+    }
+
+    // A name record can be set to any string
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f),
+    // but PostgreSQL text and jsonb cannot hold a NUL byte, so such a name is a failed read.
+    #[test]
+    fn a_name_with_a_nul_byte_is_a_failed_read() -> Result<()> {
+        let encoded = successful_name_returns(&["\0ab.eth", "a\0b.eth", "ab.eth\0", "ab.eth"]);
+
+        let results = decode_multicall_results(&encoded)?;
+        assert_eq!(results.len(), 4);
+        for (name, result) in ["\0ab.eth", "a\0b.eth", "ab.eth\0"].iter().zip(&results) {
+            assert!(
+                matches!(
+                    result,
+                    EnsReverseNameMulticallResult::Failed { message } if message.contains("NUL byte")
+                ),
+                "name {name:?} must be a failed read that names the NUL byte, got {result:?}"
+            );
+        }
+        assert_eq!(
+            results[3],
+            EnsReverseNameMulticallResult::Success {
+                value: "ab.eth".to_owned()
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_utf8_name_is_a_failed_read() -> Result<()> {
+        let encoded = (vec![abi::Result3 {
+            success: true,
+            returnData: Bytes::from((Bytes::from(vec![0xff, 0x61]),).abi_encode_params()),
+        }],)
+            .abi_encode_params();
+
+        let results = decode_multicall_results(&encoded)?;
+        let [EnsReverseNameMulticallResult::Failed { message }] = results.as_slice() else {
+            panic!("a name that is not UTF-8 must be a failed read, got {results:?}");
+        };
+        assert!(
+            message.starts_with("resolver name call return data is malformed"),
             "{message}"
         );
         Ok(())
