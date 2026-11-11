@@ -6530,3 +6530,34 @@ binaries. Do not mark old rows ready under the new hash.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
 redo. It adds no schema-migration, table or setting.
+
+## Token lineage on ENSv2 registry role changes
+
+The build that carries the [token lineage](glossary.md#token-lineage) in ENSv2 registry role
+changes changes `crates/adapters/src/schema_v2/protocol/v2_registry/transfer.rs`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes:
+
+- A registry `PermissionChanged` from `EACRolesChanged` now carries its resource's
+  `token_lineage_id` in its `after_state`. A `RootPermissionChanged` carries the key as null,
+  since the root resource has no token lineage.
+- Interpret learns which token lineages earlier batches wrote from that key when it restores its
+  state. A restore happens at every batch boundary under the
+  [lookahead loader](glossary.md#lookahead-loader), at a process start and at a redo's first
+  batch. Before, a role change on a resource no token was linked to wrote the lineage, and the
+  next role change or `TokenResource` for that resource after a restore wrote it again at a
+  later block. The writer refused the second row as a data-integrity error and Interpret stopped
+  on that chain.
+- `/v1/diagnostics/events` shows the new key in those events' `after_state`. What the API
+  serves for roles, names and registrations is otherwise unchanged.
+
+Rows written by an older build lack the key. They are rewritten by re-derivation, not in place.
+An existing deployment finishes the full-range Interpret redo, then the Project redo it installs,
+before the matching API serves, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change shares that release's one Interpret and Project redo pair with its other
+hash-rotating changes.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.
