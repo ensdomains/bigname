@@ -197,25 +197,25 @@ async fn registry_event_counts_null_above_ten_thousand(database: &TestDatabase) 
         registry_event(&format!("registry-alpha-bulk-{n}"), None, "RegistryCreated", 65 + n % 19,
             ALPHA_REGISTRY, json!({ "source_event": "RegistryCreated", "registry": ALPHA_REGISTRY }))
     };
-    let uncapped = registry_payload(&database, &overview).await?;
+    let uncapped = registry_payload(database, &overview).await?;
     assert_eq!(uncapped["data"]["counts"]["events"], json!(6), "{uncapped}");
 
     // The fixture's six events and 9,994 more reach the cap: exact on the overview and the feed.
     let bulk = (0..9_994).map(created).collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &bulk).await?;
-    let at_cap = registry_payload(&database, &overview).await?;
+    let at_cap = registry_payload(database, &overview).await?;
     assert_eq!(at_cap["data"]["counts"]["events"], json!(10_000));
-    let total = registry_payload(&database, &feed).await?;
+    let total = registry_payload(database, &feed).await?;
     assert_eq!(total["page"]["total_count"], json!(10_000));
 
     // One more event: both are null, and the other counts are unchanged.
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[created(9_994)]).await?;
-    let above = registry_payload(&database, &overview).await?;
+    let above = registry_payload(database, &overview).await?;
     assert!(above["data"]["counts"].get("events").is_some());
     assert_eq!(above["data"]["counts"]["events"], Value::Null);
     assert_eq!(above["data"]["counts"]["roles"], uncapped["data"]["counts"]["roles"]);
     assert_eq!(above["data"]["counts"]["labels"], uncapped["data"]["counts"]["labels"]);
-    let total = registry_payload(&database, &feed).await?;
+    let total = registry_payload(database, &feed).await?;
     assert_eq!(total["page"]["total_count"], Value::Null);
     Ok(())
 }
