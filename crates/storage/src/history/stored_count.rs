@@ -115,7 +115,7 @@ pub(super) async fn load(
     canonical_only: bool,
 ) -> Result<Option<u64>> {
     // Red probe: the stored counts never serve.
-    if filter.namespace.is_some() || filter.namespace.is_none() {
+    if std::hint::black_box(true) {
         return Ok(receipt("rows_filter", None));
     }
     let Some(key) = key(filter, canonical_only) else {
