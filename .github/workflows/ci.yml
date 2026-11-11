@@ -409,7 +409,7 @@ jobs:
 
       - name: fingerprint_report
         env:
-          BASE_SHA: e45919cef5ab5309c19770726e67f6fbcc153be3
+          BASE_SHA: 12fe0da0e762a920867dce43c1123821baffc7ec
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           python3 - <<'PY'
