@@ -179,7 +179,10 @@ pub(super) async fn load_history_page(
 }
 
 /// Whether nothing anchors the page to a name, registration, address, resolver or contract,
-/// so the chain-position order index, not an anchor's index, drives the read.
+/// so the chain-position order index, not an anchor's index, drives the read. A page with a
+/// record key reads its arms' own indexes in the same chain-position order
+/// (`record_key_source.rs`), and is sent the same way: unprepared without an emitter scope,
+/// prepared with one.
 pub(super) fn order_index_drives_page(filter: &EventHistoryReadFilter) -> bool {
     filter.selectors.is_empty()
         && filter.registration_id.is_none()
