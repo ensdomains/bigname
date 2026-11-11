@@ -31,6 +31,9 @@ mod resolver_announcements;
 #[path = "tests/v2_registry_operators.rs"]
 mod v2_registry_operators;
 
+#[path = "tests/v2_permission_lineage.rs"]
+mod v2_permission_lineage;
+
 #[path = "tests/v2_reservation_lineage.rs"]
 mod v2_reservation_lineage;
 
