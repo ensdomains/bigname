@@ -466,7 +466,7 @@ async fn settlement_completes_an_active_normal_row() -> Result<()> {
             paused("settle-unconfigured-paused", PhaseName::Interpret),
         ),
     ] {
-        seed(pool, chain, &[row.clone()]).await?;
+        seed(pool, chain, std::slice::from_ref(&row)).await?;
         let phase: PhaseName = row.get("phase_name").as_str().unwrap_or_default().parse()?;
         let before = read(pool, chain, phase).await?;
         let observed = updated_at(&scratch, chain, phase).await?;
@@ -590,7 +590,7 @@ async fn completed_validation_fails_and_revalidation_completes() -> Result<()> {
             completed("validation-interpret", PhaseName::Interpret),
         ),
     ] {
-        seed(pool, chain, &[row.clone()]).await?;
+        seed(pool, chain, std::slice::from_ref(&row)).await?;
         let phase: PhaseName = row.get("phase_name").as_str().unwrap_or_default().parse()?;
         let before = read(pool, chain, phase).await?;
         refusal(
@@ -620,7 +620,7 @@ async fn completed_validation_fails_and_revalidation_completes() -> Result<()> {
                 .set("last_error", json!(EARLIER_FAILURE)),
         ),
     ] {
-        seed(pool, chain, &[row.clone()]).await?;
+        seed(pool, chain, std::slice::from_ref(&row)).await?;
         let phase: PhaseName = row.get("phase_name").as_str().unwrap_or_default().parse()?;
         let before = read(pool, chain, phase).await?;
         let mut connection = pool.acquire().await?;

@@ -75,7 +75,7 @@ The CHECKs refuse these. `phase_state_table_tests/state_tests.rs` inserts each a
 | A requested range outside Project, outside the execution range, or without a marker | `chain_phase_state_project_redo_request_check` |
 | Boundary markers outside an Ingest redo | `chain_phase_state_ingest_redo_source_boundaries_check` |
 | A manifest fingerprint outside an Ingest redo | `chain_phase_state_ingest_redo_manifest_authority_check` |
-| Failed with no error; running or completed with an error and no marker | `chain_phase_state_check8` |
+| Failed with no error. Running or completed with an error and no marker. | `chain_phase_state_check8` |
 | Completed with no finish time, a finish before the start, idle with a start time, a redo with a finish time | `chain_phase_state_check7` |
 | A verification level outside Verify | `chain_phase_state_verification_phase_check` |
 | A live handoff outside Ingest | `chain_phase_state_check6` |
