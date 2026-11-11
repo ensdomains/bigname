@@ -183,20 +183,48 @@ pub(crate) async fn get_registry(
     } else {
         None
     };
+    let current_meta = collection.meta()?;
+    let selected_meta = snapshot_meta(&selected_snapshot)?;
+    let is_current = current_meta
+        .as_of
+        .as_ref()
+        .and_then(|positions| positions.get(&numeric_chain_id.to_string()))
+        == selected_meta
+            .as_of
+            .as_ref()
+            .and_then(|positions| positions.get(&numeric_chain_id.to_string()));
     let events_cap = registry_events_count_cap();
     let events = if include_counts {
-        let count = bigname_storage::count_contract_events(
-            collection.conn().await?,
-            chain_id_slug,
-            &normalized_address,
-            &product_history_event_kinds(),
-            as_of_block,
-            events_cap,
-        )
-        .await
+        let conn = collection.conn().await?;
+        let kinds = product_history_event_kinds();
+        // The stored count describes the current publication only. A historical selection
+        // counts its rows through the selected block.
+        let count = match (as_of_block, events_cap) {
+            (Some(block), Some(cap)) if is_current && super::stored_event_counts_served() => {
+                bigname_storage::count_contract_events_at_publication(
+                    conn,
+                    chain_id_slug,
+                    &normalized_address,
+                    &kinds,
+                    block,
+                    cap,
+                )
+                .await
+            }
+            _ => bigname_storage::count_contract_events(
+                conn,
+                chain_id_slug,
+                &normalized_address,
+                &kinds,
+                as_of_block,
+                events_cap,
+            )
+            .await
+            // A capped count above its cap means the exact count was not computed.
+            .map(|count| Some(count).filter(|count| events_cap.is_none_or(|cap| *count <= cap))),
+        }
         .map_err(|_| internal_error(chain_id_slug, &normalized_address))?;
-        // A capped count above its cap means the exact count was not computed.
-        Some(Some(count).filter(|count| events_cap.is_none_or(|cap| *count <= cap)))
+        Some(count)
     } else {
         None
     };
@@ -221,16 +249,6 @@ pub(crate) async fn get_registry(
         },
         data: references.rows.iter().map(registry_name).collect(),
     };
-    let current_meta = collection.meta()?;
-    let selected_meta = snapshot_meta(&selected_snapshot)?;
-    let is_current = current_meta
-        .as_of
-        .as_ref()
-        .and_then(|positions| positions.get(&numeric_chain_id.to_string()))
-        == selected_meta
-            .as_of
-            .as_ref()
-            .and_then(|positions| positions.get(&numeric_chain_id.to_string()));
     let labels = if !include_counts {
         None
     } else if is_current {

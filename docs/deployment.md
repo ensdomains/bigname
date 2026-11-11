@@ -1494,6 +1494,7 @@ GRANT SELECT ON TABLE
     bigname_phase.project_history_source,
     bigname_phase.project_history_source_edge,
     bigname_phase.project_history_catalogue_marker,
+    bigname_phase.project_event_count,
     bigname_phase.project_address_record_node_index,
     bigname_phase.project_address_record_id_index,
     bigname_phase.project_name_history,
@@ -1519,14 +1520,18 @@ For an existing API role, after applying
 `20261005170000_project_address_history_catalogue.sql`, the schema owner must apply these
 additional SELECT grants before serving the new API binary. On a serving standby, wait for
 the schema-migration and grants applied on the primary to replay there. The API startup check
-refuses to start if any of these relations is absent or unreadable.
+refuses to start if any of the four catalogue relations is absent or unreadable. The list also
+carries `project_event_count`, which needs `20261104130000_project_event_count.sql` and which
+the startup check does not require (see
+[serving the stored event counts](#serving-the-stored-event-counts)).
 
 ```sql
 GRANT SELECT ON TABLE
     bigname_phase.project_address_history_anchor,
     bigname_phase.project_history_source,
     bigname_phase.project_history_source_edge,
-    bigname_phase.project_history_catalogue_marker
+    bigname_phase.project_history_catalogue_marker,
+    bigname_phase.project_event_count
 TO bigname_api;
 ```
 
@@ -6338,8 +6343,10 @@ catalogue window.
   the release: the family writer writes the table, so without it the first family block fails.
 - A family step that touches more than 10,000 count keys logs a `WARN` naming the chain, block
   and key count.
-- The readers do not change in this build. Event `total_count` and the registry overview's
-  `counts.events` still count at read.
+- The readers serve the stored counts once the family marker is live under this build's hash.
+  See [serving the stored event counts](#serving-the-stored-event-counts). Until then event
+  `total_count` and the registry overview's `counts.events` count at read, exact up to 10,000
+  and `null` above.
 - The count statement and its shared predicate are in `crates/project/src` and in
   `crates/storage/src/history/count_contract.rs`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The
@@ -6354,6 +6361,37 @@ catalogue window.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
+
+### Serving the stored event counts
+
+The API build that reads the stored event counts serves them as `include=total_count` on
+`/v1/events` reads that only an emitting contract anchors, and as the registry overview's
+`counts.events` on the current position (see [event counts](projections.md#event-counts)).
+
+- Clients see exact totals above 10,000 where they saw `null`. A read with `record_key`, a block
+  or timestamp window, or a `resolver` and a different `contract_address`, and the registry
+  overview at a historical `at`, still count rows: exact up to 10,000 and `null` above
+  ([history collection filters](api-v1-routes.md#history-collection-filters)).
+- The API role needs `SELECT` on `bigname_phase.project_event_count`. The provisioning grant
+  above lists it. For an existing role, the schema owner applies it on the primary:
+
+  ```sql
+  GRANT SELECT ON TABLE bigname_phase.project_event_count TO bigname_api;
+  ```
+
+  The grant turns the stored counts on, and no restart is needed after it. Without it the API
+  starts and serves as before: each read checks the privilege in its own transaction and counts
+  rows instead, and startup logs one `WARN` naming the table. A missing grant never fails a
+  request.
+- Each read also checks, in its own transaction, that every chain's family marker is servable
+  and stands at the block the read is bound to. During a Project redo, or after a publication
+  between a page's capture and its count, the read counts rows. A servable marker of this
+  build's projection content hash always stands over filled counts, so the reader needs no flag
+  and no ordering beyond the redo that fills the table.
+- The reader is in `crates/storage/src/history/` outside the hashed files and in `apps/api`, so
+  neither the [interpreter content hash](glossary.md#interpreter-content-hash) nor the
+  [projection content hash](glossary.md#projection-content-hash) rotates. It adds no
+  schema-migration.
 
 ## The address listing family
 
