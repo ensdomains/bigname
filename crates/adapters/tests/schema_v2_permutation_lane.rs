@@ -4943,15 +4943,15 @@ fn generated_registry_orders_are_reproducible_from_their_seed() -> Result<()> {
     Ok(())
 }
 
-/// The shapes the generated sweep counts but does not fail on, against the orders the open fix
-/// for TYR-510 lists: a label after `TokenResource`, with or without a pointer first, and a label
-/// over its own reservation. A label under another label's reservation, a label after pointers
-/// only, a second link of a registered token and a label after a released link keep no resource.
+/// The shapes the generated sweep must reach, against the orders the TYR-510 fix (#1420) lists: a
+/// label after `TokenResource`, with or without a pointer first, and a label over its own
+/// reservation. A label under another label's reservation, a label after pointers only, a second
+/// link of a registered token and a label after a released link keep no resource.
 #[test]
-fn registry_order_known_shapes_are_the_open_fix_orders() {
+fn registry_order_tyr_510_shapes_are_the_fix_orders() {
     use crate::permutation::registry_orders::{
         Action, Atom, Expiry, LABEL_OVER_RESERVATION, Pointer, Registry,
-        TOKEN_RESOURCE_BEFORE_LABEL, Token, known_shapes,
+        TOKEN_RESOURCE_BEFORE_LABEL, Token, tyr_510_shapes,
     };
     let registry = Registry::Declared;
     let token = Token {
@@ -5024,7 +5024,7 @@ fn registry_order_known_shapes_are_the_open_fix_orders() {
     ];
     for (actions, expected) in cases {
         assert_eq!(
-            known_shapes(&actions).into_iter().collect::<Vec<_>>(),
+            tyr_510_shapes(&actions).into_iter().collect::<Vec<_>>(),
             expected.into_iter().collect::<Vec<_>>(),
             "{actions:?}"
         );

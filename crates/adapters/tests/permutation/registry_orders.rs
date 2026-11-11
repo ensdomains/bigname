@@ -77,17 +77,14 @@ const RESOLVERS: [&str; 2] = [
 ];
 const SUBREGISTRY: &str = "0x00000000000000000000000000000000f0051903";
 
-/// Orders the open fix for TYR-510 changes. A label registered on a token that already holds a
-/// resource keeps it, and the token's live registration becomes the row the label stored. Until
-/// that fix lands, sequences with either shape are run and counted but do not fail the sweep. A
-/// later `TokenResource` for the same token is where the kept resource shows, in the rows or in
-/// live state, so the shapes cover that later-link drift too.
-pub const EXCLUDE_KNOWN: bool = true;
+/// Orders the TYR-510 fix (#1420) changed: a label registered on a token that already holds a
+/// resource keeps it, and the token's live registration becomes the row the label stored. The
+/// sweep gates them like any order and requires the default corpus to reach both.
 pub const TOKEN_RESOURCE_BEFORE_LABEL: &str =
     "LabelRegistered on a labelless token that holds a resource";
 pub const LABEL_OVER_RESERVATION: &str =
     "LabelRegistered over a reservation of the same label that holds a resource";
-pub const KNOWN_SHAPES: [&str; 2] = [TOKEN_RESOURCE_BEFORE_LABEL, LABEL_OVER_RESERVATION];
+pub const TYR_510_SHAPES: [&str; 2] = [TOKEN_RESOURCE_BEFORE_LABEL, LABEL_OVER_RESERVATION];
 
 /// Failure kinds tracked by open tickets. The sweep shrinks one finding of each, reports them and
 /// does not fail on them. Each comes out when its ticket lands.
@@ -1004,9 +1001,9 @@ fn announce_before_use(rng: &mut Rng, actions: &mut Vec<Action>) {
     actions.insert(at, action(vec![Atom::Announce], new_block, false));
 }
 
-/// Which known shapes a sequence reaches, by a model of the adapter's token entries: whether the
+/// Which TYR-510 shapes a sequence reaches, by a model of the adapter's token entries: whether the
 /// entry holds a resource, a registration, and which label.
-pub fn known_shapes(actions: &[Action]) -> BTreeSet<&'static str> {
+pub fn tyr_510_shapes(actions: &[Action]) -> BTreeSet<&'static str> {
     #[derive(Clone, Copy, Default)]
     struct Entry {
         resource: bool,
@@ -1316,7 +1313,7 @@ fn with_expiry(atom: Atom, to: Expiry) -> Option<Atom> {
 }
 
 /// Removes chunks of actions, then single events, then simplifies expiries and block breaks, while
-/// the sequence still fails with the same signature and reaches no excluded shape.
+/// the sequence still fails with the same signature.
 pub fn shrink(
     wiring: &Wiring,
     actions: &[Action],
@@ -1327,11 +1324,7 @@ pub fn shrink(
 ) -> Vec<Action> {
     let mut budget = SHRINK_BUDGET;
     let mut fails = |candidate: &[Action]| {
-        if candidate.is_empty()
-            || !well_formed(candidate)
-            || (EXCLUDE_KNOWN && !known_shapes(candidate).is_empty())
-            || budget == 0
-        {
+        if candidate.is_empty() || !well_formed(candidate) || budget == 0 {
             return false;
         }
         budget -= 1;
@@ -1442,8 +1435,8 @@ pub struct Sweep {
     pub sequences: usize,
     pub runs: usize,
     pub findings: Vec<Finding>,
-    /// Per known shape: runs that failed, runs that passed.
-    pub known: BTreeMap<&'static str, [usize; 2]>,
+    /// Per TYR-510 shape: runs that failed, runs that passed.
+    pub tyr_510_shapes: BTreeMap<&'static str, [usize; 2]>,
     pub atoms: BTreeMap<&'static str, usize>,
     pub labelled_registries: BTreeSet<Registry>,
     pub token_under_two_labels: usize,
@@ -1463,8 +1456,7 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
         let generated = generate(case_seed(base, case));
         sweep.sequences += 1;
         sweep.observe(&generated.actions);
-        let shapes = known_shapes(&generated.actions);
-        let excluded = EXCLUDE_KNOWN && !shapes.is_empty();
+        let shapes = tyr_510_shapes(&generated.actions);
         for (layout, split_kind) in RUNS {
             sweep.runs += 1;
             let result = check(
@@ -1475,11 +1467,10 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                 generated.seed,
             );
             for &shape in &shapes {
-                sweep.known.entry(shape).or_default()[usize::from(result.is_ok())] += 1;
+                sweep.tyr_510_shapes.entry(shape).or_default()[usize::from(result.is_ok())] += 1;
             }
             match result {
                 Ok(converged) => sweep.count_named(&converged),
-                Err(_) if excluded => {}
                 Err(error) => {
                     let kept = signature(&error);
                     if kept == DECLARED_STOP {
@@ -1621,11 +1612,9 @@ impl Sweep {
                 bail!("the default corpus names no registration at depth {depth}:\n{self}");
             }
         }
-        if EXCLUDE_KNOWN {
-            for shape in KNOWN_SHAPES {
-                if !self.known.contains_key(shape) {
-                    bail!("the default corpus never reaches the known shape {shape:?}:\n{self}");
-                }
+        for shape in TYR_510_SHAPES {
+            if !self.tyr_510_shapes.contains_key(shape) {
+                bail!("the default corpus never reaches the TYR-510 shape {shape:?}:\n{self}");
             }
         }
         Ok(())
@@ -1652,10 +1641,10 @@ impl fmt::Display for Sweep {
             self.named_grants,
             self.declared_stops
         )?;
-        for (shape, [red, green]) in &self.known {
+        for (shape, [red, green]) in &self.tyr_510_shapes {
             writeln!(
                 formatter,
-                "registry_orders known shape {shape:?}: failed_runs={red} passed_runs={green} excluded={EXCLUDE_KNOWN}"
+                "registry_orders TYR-510 shape {shape:?}: failed_runs={red} passed_runs={green}"
             )?;
         }
         for finding in &self.findings {
