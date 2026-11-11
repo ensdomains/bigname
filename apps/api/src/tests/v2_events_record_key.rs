@@ -5,8 +5,6 @@
 const RK_NAME: &str = "record-key.eth";
 const RK_RESOLVER: &str = "0x00000000000000000000000000000000000000d7";
 const RK_ADDRESS: &str = "0x0000000000000000000000000000000000007517";
-/// The keys producers store without a family prefix.
-const RK_UNALIASED: [&str; 3] = ["content", "contenthash", "name"];
 
 /// `record-key.eth` with a resolver pointer and one write of each stored key shape, plus four
 /// `text:avatar` writes and one record-version reset of the name's node.
@@ -531,11 +529,45 @@ fn stored_bare_record_keys_are_the_unaliased_set() -> Result<()> {
     );
     assert_eq!(
         bare,
-        RK_UNALIASED
+        crate::v2::UNALIASED_RECORD_KEYS
             .iter()
             .map(|key| (*key).to_owned())
             .collect::<BTreeSet<_>>(),
         "the producers' bare keys must be exactly the keys the alias leaves alone"
     );
     Ok(())
+}
+
+/// The listing of stored keys without a colon in ops/record-history-indexes/README.md, which an
+/// operator runs before a build that reads the bare-key alias serves a database, returns the
+/// unaliased keys the fixture stores, and the key index serves it.
+#[tokio::test]
+async fn ops_bare_key_listing_reads_the_key_index() -> Result<()> {
+    let readme = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ops/record-history-indexes/README.md"),
+    )?;
+    let (_, section) = readme
+        .split_once("## Stored keys without a colon")
+        .context("listing section")?;
+    let (_, block) = section.split_once("```sql\n").context("listing query")?;
+    let (query, _) = block.split_once("```").context("listing query end")?;
+    let database = TestDatabase::new_migrated().await?;
+    rk_seed(&database).await?;
+    let keys: Vec<String> = sqlx::query_scalar(query).fetch_all(&database.pool).await?;
+    assert_eq!(keys, crate::v2::UNALIASED_RECORD_KEYS.to_vec());
+    let mut transaction = database.pool.begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await?;
+    let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN {query}"))
+        .fetch_all(&mut *transaction)
+        .await?;
+    transaction.rollback().await?;
+    let plan = plan.join("\n");
+    assert!(
+        plan.contains("normalized_events_record_key_history_idx") && !plan.contains("Seq Scan"),
+        "{plan}"
+    );
+    database.cleanup().await
 }

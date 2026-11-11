@@ -147,4 +147,29 @@ mod tests {
         assert_eq!(keys["kind"], "RecordChanged,RecordVersionChanged");
         assert_eq!(keys["record_key"], "text:Case, and space ");
     }
+
+    #[test]
+    fn bare_record_keys_read_their_text_record() {
+        for (sent, stored) in [
+            ("avatar", "text:avatar"),
+            ("Avatar", "text:Avatar"),
+            (" avatar", "text: avatar"),
+            ("com.twitter", "text:com.twitter"),
+            ("Name", "text:Name"),
+            ("content", "content"),
+            ("contenthash", "contenthash"),
+            ("name", "name"),
+            ("text:avatar", "text:avatar"),
+            ("addr:60", "addr:60"),
+            ("dns:zonehash", "dns:zonehash"),
+            ("a:b", "a:b"),
+            (":", ":"),
+        ] {
+            let filters = HistoryFilters::parse(None, None, Some(sent.to_owned())).unwrap();
+            assert_eq!(filters.record_key.as_deref(), Some(stored), "{sent:?}");
+            let mut keys = BTreeMap::new();
+            filters.insert_cursor_keys(&mut keys);
+            assert_eq!(keys["record_key"], stored, "{sent:?}");
+        }
+    }
 }
