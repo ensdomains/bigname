@@ -976,24 +976,106 @@ fn panic_message(panic: &(dyn Any + Send)) -> String {
         .unwrap_or_else(|| "a panic with no message".to_owned())
 }
 
-/// How a run failed, so shrinking keeps the same failure.
-pub fn signature(error: &anyhow::Error) -> &'static str {
+/// A declared registry's internally inconsistent log stops the batch by design, in every layout
+/// and split alike (`crates/adapters/src/schema_v2/tests/inconsistent_log_skips.rs`). The deployed
+/// registry emits no such log, so the sweep counts these runs and does not fail on them.
+pub const DECLARED_STOP: &str = "declared registry stops the batch on an inconsistent log";
+const INCONSISTENT_LOGS: [&str; 3] = [
+    "has no retained TokenResource predecessor",
+    "does not confirm its retained resource",
+    "TokenResource is ambiguous",
+];
+
+/// How a run failed, precise enough that shrinking keeps the same failure.
+pub fn signature(error: &anyhow::Error) -> String {
     let text = format!("{error:#}");
     if text.contains("panicked: ") {
-        "panic"
-    } else if text.contains("live adapter state differs") || text.contains("live state differs") {
-        "live state differs from a restore"
-    } else if text.contains("batch-boundary artifacts") {
-        "batch-boundary artifact"
-    } else if text.contains("split replay") {
-        "split replay rows differ from the whole pass"
-    } else {
-        "other"
+        return "panic".to_owned();
+    }
+    if text.contains("fresh interpretation failed")
+        && INCONSISTENT_LOGS
+            .iter()
+            .any(|message| text.contains(message))
+    {
+        return DECLARED_STOP.to_owned();
+    }
+    if let Some(rest) = text.split_once("first difference:\n").map(|(_, rest)| rest) {
+        let field = rest
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches("live")
+            .trim()
+            .split([':', '(', ' '])
+            .next()
+            .unwrap_or_default();
+        return format!("live state differs from a restore at {field}");
+    }
+    if let Some((family, _)) = text.split_once(" is emitted twice with different guarded columns") {
+        let family = family.rsplit(' ').next().unwrap_or_default();
+        return format!("the writer would reject a repeated {family} row");
+    }
+    if text.contains("different normalized-event stream") {
+        return "the split replay derives a different event stream".to_owned();
+    }
+    if let Some((_, rest)) =
+        text.split_once("diverges between the whole-sequence pass and the split replay:")
+    {
+        let field = rest.split_whitespace().next().unwrap_or_default();
+        return format!("an event's {field} differs between the whole pass and the split replay");
+    }
+    if let Some((_, rest)) =
+        text.split_once("batch-boundary artifacts between the whole pass and the split replay: ")
+    {
+        return format!("batch-boundary artifact {rest}");
+    }
+    let first = text.lines().next().unwrap_or_default();
+    format!("other: {}", first.chars().take(120).collect::<String>())
+}
+
+/// The same event with another expiry, for the shrinker.
+fn with_expiry(atom: Atom, to: Expiry) -> Option<Atom> {
+    match atom {
+        Atom::Register {
+            registry,
+            token,
+            label,
+            owner,
+            expiry,
+        } if expiry != to => Some(Atom::Register {
+            registry,
+            token,
+            label,
+            owner,
+            expiry: to,
+        }),
+        Atom::Reserve {
+            registry,
+            token,
+            label,
+            expiry,
+        } if expiry != to => Some(Atom::Reserve {
+            registry,
+            token,
+            label,
+            expiry: to,
+        }),
+        Atom::Renew {
+            registry,
+            token,
+            expiry,
+        } if expiry != to => Some(Atom::Renew {
+            registry,
+            token,
+            expiry: to,
+        }),
+        _ => None,
     }
 }
 
-/// Removes chunks of actions, then single events, while the sequence still fails with
-/// `signature` and reaches no excluded shape.
+/// Removes chunks of actions, then single events, then simplifies expiries and block breaks, while
+/// the sequence still fails with the same signature and reaches no excluded shape.
 pub fn shrink(
     wiring: &Wiring,
     actions: &[Action],
@@ -1016,6 +1098,13 @@ pub fn shrink(
             .err()
             .is_some_and(|error| signature(&error) == signature_kept)
     };
+    let mut try_replace = |current: &mut Vec<Action>, candidate: Vec<Action>| {
+        let kept = fails(&candidate);
+        if kept {
+            *current = candidate;
+        }
+        kept
+    };
     let mut current = actions.to_vec();
     let mut chunk = (current.len() / 2).max(1);
     loop {
@@ -1025,8 +1114,7 @@ pub fn shrink(
             let end = (start + chunk).min(current.len());
             let mut candidate = current.clone();
             candidate.drain(start..end);
-            if fails(&candidate) {
-                current = candidate;
+            if try_replace(&mut current, candidate) {
                 removed = true;
             } else {
                 start = end;
@@ -1045,13 +1133,36 @@ pub fn shrink(
         while current[index].atoms.len() > 1 && atom < current[index].atoms.len() {
             let mut candidate = current.clone();
             candidate[index].atoms.remove(atom);
-            if fails(&candidate) {
-                current = candidate;
-            } else {
+            if !try_replace(&mut current, candidate) {
                 atom += 1;
             }
         }
         index += 1;
+    }
+    for index in 0..current.len() {
+        for atom in 0..current[index].atoms.len() {
+            for to in [Expiry::Far, Expiry::Past] {
+                if let Some(simpler) = with_expiry(current[index].atoms[atom], to) {
+                    let mut candidate = current.clone();
+                    candidate[index].atoms[atom] = simpler;
+                    if try_replace(&mut current, candidate) {
+                        break;
+                    }
+                }
+            }
+        }
+        for (new_block, same_transaction) in [(false, false), (true, false)] {
+            let action = &current[index];
+            if (action.new_block, action.same_transaction) == (new_block, same_transaction) {
+                continue;
+            }
+            let mut candidate = current.clone();
+            candidate[index].new_block = new_block;
+            candidate[index].same_transaction = same_transaction;
+            if try_replace(&mut current, candidate) {
+                break;
+            }
+        }
     }
     current
 }
@@ -1077,7 +1188,7 @@ pub struct Finding {
     pub seed: u64,
     pub layout: Layout,
     pub split: Split,
-    pub signature: &'static str,
+    pub signature: String,
     pub drawn: usize,
     pub shrunk: bool,
     pub minimal: Vec<Action>,
@@ -1098,6 +1209,8 @@ pub struct Sweep {
     /// Named `RegistrationGranted` rows by name depth: 2 for the declared registry's names, 3 for
     /// the announced registry's.
     pub named_grants: BTreeMap<usize, usize>,
+    /// Runs a declared registry's inconsistent log stopped; see [`DECLARED_STOP`].
+    pub declared_stops: usize,
     pub elapsed: Duration,
 }
 
@@ -1127,6 +1240,10 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                 Err(_) if excluded => {}
                 Err(error) => {
                     let kept = signature(&error);
+                    if kept == DECLARED_STOP {
+                        sweep.declared_stops += 1;
+                        break;
+                    }
                     let shrunk = sweep
                         .findings
                         .iter()
@@ -1140,7 +1257,7 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                             layout,
                             split_kind,
                             generated.seed,
-                            kept,
+                            &kept,
                         )
                     } else {
                         generated.actions.clone()
@@ -1267,11 +1384,12 @@ impl fmt::Display for Sweep {
         writeln!(formatter, "registry_orders atoms={:?}", self.atoms)?;
         writeln!(
             formatter,
-            "registry_orders labelled_registries={:?} token_under_two_labels={} tokens_under_one_label={} named_grants_by_depth={:?}",
+            "registry_orders labelled_registries={:?} token_under_two_labels={} tokens_under_one_label={} named_grants_by_depth={:?} declared_stops={}",
             self.labelled_registries,
             self.token_under_two_labels,
             self.tokens_under_one_label,
-            self.named_grants
+            self.named_grants,
+            self.declared_stops
         )?;
         for (shape, [red, green]) in &self.known {
             writeln!(
