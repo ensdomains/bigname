@@ -13,14 +13,18 @@
 //! its partial key indexes need. The row test compares the fenced statements with the previous
 //! ones on every input class, in order.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{Execute, PgConnection, Postgres, QueryBuilder, Row, postgres::PgArguments, raw_sql};
 
-use super::{AddressRead, Witness, catalogue_source, plan_tests};
+use super::{AddressRead, Witness, catalogue_source, matches::Membership, plan_tests, seams, walk};
 use crate::history::{
     ChainBlockRange, EventHistoryReadFilter, HistoryBlockWindow, HistoryOrder, HistoryScope,
     keyset::HistoryKeyset, paging::push_history_order_terms,
@@ -470,6 +474,255 @@ async fn catalogue_fenced_probes_keep_rows() -> Result<()> {
         Ok(())
     })
     .await
+}
+
+/// Rows a descending seek may read per probe loop: a bucket of the hot source holds at most 4.
+const BUCKET_ROWS: f64 = 16.0;
+
+/// A descending page of the hot wallet walks its buckets newest first. Every exhausted bucket
+/// takes a seek after it, and each seek's fenced probe of the hot name must read about one
+/// bucket's rows, not the rest of the name's history. The walk's own seek count is compared with
+/// the replay so the plans measured are the plans the walk runs.
+#[tokio::test]
+async fn catalogue_descending_seeks_read_about_a_bucket() -> Result<()> {
+    with_fixture("catalogue_fence_seek_rescan", async |connection| {
+        let mut failures = Vec::new();
+        let mut printed = false;
+        for statistics in [Statistics::Stale, Statistics::Fresh] {
+            if statistics == Statistics::Fresh {
+                raw_sql("ANALYZE normalized_events")
+                    .execute(&mut *connection)
+                    .await?;
+            }
+            for page_size in [1_usize, 20] {
+                let cell = format!("{}, page size {page_size}", statistics.label());
+                let published = published();
+                let case = Case {
+                    label: "hot wallet page",
+                    address: WALLET_HOT,
+                    order: HistoryOrder::Desc,
+                    record_key: None,
+                    kinds: None,
+                    window: None,
+                    unbounded: false,
+                    second_chain: false,
+                    all_namespaces: false,
+                    scope: HistoryScope::Both,
+                    few_rows: false,
+                    continue_after: None,
+                    statement: Statement::Seek { after: None },
+                    next_bucket: None,
+                };
+                let (read, filter) = inputs(&case, &published);
+                let page_limit = page_size + 1;
+
+                raw_sql("BEGIN READ ONLY").execute(&mut *connection).await?;
+                let stats = Arc::new(Mutex::new(seams::AddressHistoryWorkingSet::default()));
+                let mut output = walk::Accumulator::new(page_limit, Some(0));
+                seams::with_address_history_working_set(
+                    stats.clone(),
+                    walk::collect(
+                        &mut *connection,
+                        &read,
+                        &filter,
+                        None,
+                        None,
+                        &mut Membership::new(),
+                        &mut output,
+                    ),
+                )
+                .await?;
+                raw_sql("ROLLBACK").execute(&mut *connection).await?;
+                let counters = stats.lock().expect("working set").counters.clone();
+                let walk_seeks = counters.get("catalogue_bucket_seeks").copied().unwrap_or(0);
+
+                let mut seeks = Vec::new();
+                let mut bucket = seek_bucket(connection, &read, &filter, None).await?;
+                let mut replay_seeks = 1;
+                let mut accepted = 0;
+                while let Some(current) = bucket {
+                    let limit = (page_limit - accepted).clamp(1, 256);
+                    let mut query = QueryBuilder::<Postgres>::new("");
+                    catalogue_source::push_candidate_query(
+                        &mut query,
+                        &read,
+                        &filter,
+                        None,
+                        current,
+                        None,
+                        limit as i64,
+                    );
+                    let rows: Vec<Witness> = query
+                        .build_query_as()
+                        .persistent(false)
+                        .fetch_all(&mut *connection)
+                        .await?;
+                    let events = rows
+                        .iter()
+                        .map(|row| row.normalized_event_id)
+                        .collect::<BTreeSet<_>>()
+                        .len();
+                    accepted = (accepted + events).min(page_limit);
+                    if accepted >= page_limit {
+                        break;
+                    }
+                    ensure!(events < limit, "{cell}: a full bucket batch is not replayed");
+                    let (sql, arguments) = render(
+                        &read,
+                        &filter,
+                        None,
+                        Statement::Seek {
+                            after: Some(current),
+                        },
+                        true,
+                    )?;
+                    if !printed && statistics == Statistics::Fresh {
+                        printed = true;
+                        let (_, bind_arguments) = render(
+                            &read,
+                            &filter,
+                            None,
+                            Statement::Seek {
+                                after: Some(current),
+                            },
+                            true,
+                        )?;
+                        let values = match bind_values(connection, &sql, bind_arguments).await {
+                            Ok(values) => json!(values),
+                            Err(error) => json!(format!("{error:#}")),
+                        };
+                        unbuffered(&format!(
+                            "FENCE-RESCAN seek sql after bucket {current}:\n{sql}\nFENCE-RESCAN seek binds: {values}\n"
+                        ));
+                    }
+                    let plan = explain(connection, &sql, arguments, false).await?;
+                    let mut read_rows = 0.0;
+                    let mut heaviest = json!(null);
+                    for probe in probes(&plan[0]["Plan"]) {
+                        let loops = probe["loops"].as_u64().unwrap_or(0);
+                        if loops == 0 {
+                            continue;
+                        }
+                        let per_loop = probe["rows"].as_f64().unwrap_or(0.0)
+                            + probe["removed"].as_f64().unwrap_or(0.0);
+                        read_rows += per_loop * loops as f64;
+                        if statistics == Statistics::Fresh && per_loop > BUCKET_ROWS {
+                            failures.push(format!(
+                                "{cell}: the seek after bucket {current} read {per_loop} rows per \
+                                 loop, more than about a bucket ({BUCKET_ROWS}): {probe}"
+                            ));
+                        }
+                        if heaviest.is_null()
+                            || per_loop > heaviest["read_per_loop"].as_f64().unwrap_or(0.0)
+                        {
+                            heaviest = json!({"read_per_loop":per_loop,"probe":probe});
+                        }
+                    }
+                    let mut sorts = Vec::new();
+                    collect_sorts(&plan[0]["Plan"], &mut sorts);
+                    for sort in &sorts {
+                        if statistics == Statistics::Fresh
+                            && sort["over_probe"] == json!(true)
+                            && sort["input_rows"].as_f64().unwrap_or(0.0) > BUCKET_ROWS
+                        {
+                            failures.push(format!(
+                                "{cell}: the seek after bucket {current} sorted more than about a \
+                                 bucket ({BUCKET_ROWS}): {sort}"
+                            ));
+                        }
+                    }
+                    sorts.retain(|sort| sort["over_probe"] == json!(true));
+                    bucket = seek_bucket(connection, &read, &filter, Some(current)).await?;
+                    replay_seeks += 1;
+                    seeks.push(json!({"after":current,"next":bucket,"read_rows":read_rows,
+                        "execution_ms":plan[0]["Execution Time"],"heaviest":heaviest,
+                        "sorts":sorts}));
+                }
+                let total: f64 = seeks
+                    .iter()
+                    .map(|seek| seek["read_rows"].as_f64().unwrap_or(0.0))
+                    .sum();
+                let summary = json!({"cell":cell,"walk_seeks":walk_seeks,"replay_seeks":replay_seeks,
+                    "walk_ids":output.ids.len(),"replay_accepted":accepted,"counters":counters,
+                    "seek_rows_read_total":total,"seeks":seeks});
+                unbuffered(&format!("FENCE-RESCAN {summary}\n"));
+                if walk_seeks != replay_seeks || output.ids.len() != accepted {
+                    failures.push(format!(
+                        "{cell}: the replay does not match the walk (walk {walk_seeks} seeks, {} \
+                         ids; replay {replay_seeks} seeks, {accepted} events)",
+                        output.ids.len()
+                    ));
+                }
+            }
+        }
+        ensure!(
+            failures.is_empty(),
+            "descending catalogue seeks:\n{}",
+            failures.join("\n\n")
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Written past the test harness's capture so a passing run's log still carries the numbers.
+fn unbuffered(text: &str) {
+    let _ = std::io::stderr().write_all(text.as_bytes());
+}
+
+async fn seek_bucket(
+    connection: &mut PgConnection,
+    read: &AddressRead<'_>,
+    filter: &EventHistoryReadFilter,
+    after: Option<i64>,
+) -> Result<Option<i64>> {
+    let mut query = QueryBuilder::<Postgres>::new("");
+    catalogue_source::push_seek_query(&mut query, read, filter, after);
+    Ok(query
+        .build_query_scalar()
+        .persistent(false)
+        .fetch_one(&mut *connection)
+        .await?)
+}
+
+/// Every bind of a rendered statement as text, in order.
+async fn bind_values(
+    connection: &mut PgConnection,
+    sql: &str,
+    arguments: PgArguments,
+) -> Result<Vec<Option<String>>> {
+    let count = (1..)
+        .take_while(|n| sql.contains(&format!("${n}")))
+        .last()
+        .unwrap_or(0);
+    let select = format!(
+        "SELECT ARRAY[{}]::text[]",
+        (1..=count)
+            .map(|n| format!("${n}::text"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(sqlx::query_scalar_with(&select, arguments)
+        .fetch_one(&mut *connection)
+        .await?)
+}
+
+/// Sort nodes, with the rows their input produced and whether a probe lies beneath them.
+fn collect_sorts(node: &Value, sorts: &mut Vec<Value>) {
+    if node["Node Type"] == "Sort" {
+        let input = &node["Plans"][0];
+        let input_rows = input["Actual Rows"].as_f64().unwrap_or(0.0)
+            * input["Actual Loops"].as_f64().unwrap_or(0.0);
+        let over_probe = !probes(node).is_empty();
+        sorts.push(
+            json!({"method":node["Sort Method"],"space_kb":node["Sort Space Used"],
+            "input_rows":input_rows,"output_rows":node["Actual Rows"],"loops":node["Actual Loops"],
+            "over_probe":over_probe}),
+        );
+    }
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        collect_sorts(child, sorts);
+    }
 }
 
 fn published() -> BTreeMap<String, i64> {
