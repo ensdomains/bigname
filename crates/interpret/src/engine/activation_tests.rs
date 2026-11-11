@@ -98,6 +98,9 @@ mod registration_lifecycle;
 #[path = "tests/registry_reservation_lineage.rs"]
 mod registry_reservation_lineage;
 
+#[path = "tests/registry_relink.rs"]
+mod registry_relink;
+
 #[path = "tests/search_redo.rs"]
 mod search_redo;
 

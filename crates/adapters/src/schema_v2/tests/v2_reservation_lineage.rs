@@ -372,3 +372,77 @@ fn restore_takes_no_lineage_from_a_registration_row_naming_another_resource() ->
     );
     Ok(())
 }
+
+/// `TokenResource` for a token that holds another resource, after the registration and its link.
+fn link_to_another_resource(emitter: &str, announce: bool) -> Vec<RawLogInput> {
+    let token = versioned_token(LABEL, 0);
+    let owner: Address = OWNER.parse().unwrap();
+    let mut logs = Vec::new();
+    if announce {
+        logs.push(RegistryCreated {}.encode_log_data());
+    }
+    logs.extend([
+        v2_registry::LabelRegistered {
+            tokenId: token,
+            labelHash: keccak256(LABEL.as_bytes()),
+            label: LABEL.to_owned(),
+            owner,
+            expiry: LIVE_EXPIRY,
+            sender: owner,
+        }
+        .encode_log_data(),
+        v2_registry::TokenResource {
+            tokenId: token,
+            resource: token,
+        }
+        .encode_log_data(),
+        v2_registry::TokenResource {
+            tokenId: token,
+            resource: OTHER_RESOURCE.parse().unwrap(),
+        }
+        .encode_log_data(),
+    ]);
+    logs.into_iter()
+        .enumerate()
+        .map(|(index, log)| raw_at(log, 1, index as i64, emitter))
+        .collect()
+}
+
+/// A token that holds a resource cannot be linked to another one. On a declared registry the
+/// batch fails.
+#[test]
+fn a_link_to_another_resource_is_still_refused() {
+    let input = batch(
+        vec![declared_registry()],
+        Vec::new(),
+        1,
+        link_to_another_resource(ETH_REGISTRY, false),
+    );
+    let error = interpret_test_batch_incremental(input, None)
+        .expect_err("a declared registry's conflicting link fails the batch");
+    assert!(
+        format!("{error:#}").contains("does not confirm its retained resource"),
+        "{error:#}"
+    );
+}
+
+/// On a registry no manifest declares, the conflicting link is skipped and recorded.
+#[test]
+fn a_link_to_another_resource_is_skipped_on_an_announced_registry() -> anyhow::Result<()> {
+    let input = batch(
+        vec![declared_registry()],
+        Vec::new(),
+        1,
+        link_to_another_resource(ANNOUNCED_REGISTRY, true),
+    );
+    let (output, _) = interpret_test_batch_incremental(input, None)?;
+    assert_eq!(
+        output
+            .decode_skips
+            .iter()
+            .map(|skip| skip.inconsistency_site.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("token_resource_conflict")]
+    );
+    Ok(())
+}
