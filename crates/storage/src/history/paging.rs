@@ -13,6 +13,7 @@ use super::{
         HistoryKeyset, history_cursor_block_number, history_cursor_from_row, load_history_keyset,
         push_history_cursor_after, push_history_cursor_block_bound, push_history_cursor_cte,
     },
+    record_key_source::record_arm_chains,
     registration_identity::push_registration_filter,
     resolver_source::{ResolverPageBound, ResolverSource},
     selectors::HistorySelector,
@@ -153,9 +154,13 @@ pub(super) async fn load_history_page(
     // sqlx looks its statement cache up by SQL text before it consults `persistent`, so a
     // persistent execution of byte-identical text on the same connection would make this one
     // reuse that prepared statement.
+    // A page on the record arms is sent unprepared too, scoped by an emitter or not, so the
+    // scoped arm's index is chosen with the request's values (docs/storage.md, Table ownership).
+    let unprepared = order_index_drives_page(&filter)
+        || record_arm_chains(&filter, canonical_only, include_candidates).is_some();
     let rows = builder
         .build()
-        .persistent(!order_index_drives_page(&filter))
+        .persistent(!unprepared)
         .fetch_all(&mut *transaction)
         .await
         .context("failed to fetch normalized-event history page")?;
@@ -179,7 +184,9 @@ pub(super) async fn load_history_page(
 }
 
 /// Whether nothing anchors the page to a name, registration, address, resolver or contract,
-/// so the chain-position order index, not an anchor's index, drives the read.
+/// so the chain-position order index, not an anchor's index, drives the read. A page with a
+/// record key reads its arms' own indexes in the same chain-position order
+/// (`record_key_source.rs`), and is sent unprepared like this one, with an emitter scope too.
 pub(super) fn order_index_drives_page(filter: &EventHistoryReadFilter) -> bool {
     filter.selectors.is_empty()
         && filter.registration_id.is_none()
