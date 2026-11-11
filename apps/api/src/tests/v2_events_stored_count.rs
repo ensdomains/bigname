@@ -13,7 +13,7 @@
 // | R3 | 10,004 emitted rows and two pointer rows, the production cap | exact 10,006 / 10,004, not `null`; the page unchanged | `stored_count_is_exact_above_ten_thousand` |
 // | R4 | the stored statement, custom and generic plans | the key's primary key index, no sequential scan | `stored_count_reads_the_key_by_its_index` |
 // | R5 | a publication between capture and count | rows counted at the captured block | `a_publication_after_capture_counts_rows_at_the_captured_block` |
-// | R6 | marker not live, of another build, or orphaned, inside the read | rows counted | `an_unservable_marker_inside_the_read_counts_rows` |
+// | R6 | marker not live, of another build, or off the readable lineage, inside the read | rows counted | `an_unservable_marker_inside_the_read_counts_rows` |
 // | R7 | `record_key`, `from_block`, `to_block`, `from_timestamp`, `to_timestamp`, a resolver with another `contract_address` | rows counted | `filters_the_key_does_not_hold_count_rows` |
 // | R8 | registry overview at a past `at` | rows counted through the block | `registry_event_count_is_null_above_the_cap` row A3 (`v2_registry_event_count_cap.rs`) |
 // | R9 | registry overview, current position, above the cap | exact, equal to the feed; other counts unchanged | `registry_event_count_is_null_above_the_cap` rows A2 and A5 |
@@ -187,7 +187,7 @@ async fn stored_count_reads_the_key_by_its_index() -> Result<()> {
     sqlx::query(r#"
         INSERT INTO bigname_phase.project_event_count
             (chain_id, anchor_kind, anchor, namespace, event_kind, event_count)
-        SELECT 'ethereum-mainnet', kind, '0x' || lpad(to_hex(n), 40, '0'), 'ens', event_kind, 1 + n % 7
+        SELECT 'ethereum-mainnet', kind, '0xf' || lpad(to_hex(n), 39, '0'), 'ens', event_kind, 1 + n % 7
         FROM generate_series(1, 20000) n
         CROSS JOIN (VALUES (0::smallint), (1::smallint), (2::smallint)) kinds(kind)
         CROSS JOIN (VALUES ('RecordChanged'), ('ResolverChanged')) event_kinds(event_kind)
@@ -329,24 +329,18 @@ async fn an_unservable_marker_inside_the_read_counts_rows() -> Result<()> {
     use bigname_storage::history_anchor_read_test_hooks::{HistoryReadHookPoint, install};
     let database = TestDatabase::new_migrated().await?;
     sc_seed(&database, &sc_small_events()).await?;
-    let (lineage_state,): (String,) = sqlx::query_as(
-        "SELECT lineage.canonicality_state::text FROM bigname_phase.project_family_marker marker
-         JOIN bigname_phase.chain_lineage lineage ON lineage.chain_id = marker.chain_id
-          AND lineage.block_hash = marker.current_block_hash
-         WHERE marker.chain_id = $1",
+    // A finalized block cannot be orphaned in place, so the marker names a block the readable
+    // lineage does not hold, as after a reorg replaced it.
+    let (marker_hash,): (String,) = sqlx::query_as(
+        "SELECT current_block_hash FROM bigname_phase.project_family_marker WHERE chain_id = $1",
     )
     .bind(SC_CHAIN)
     .fetch_one(&database.pool)
     .await?;
-    let orphan = "UPDATE bigname_phase.chain_lineage lineage SET canonicality_state = 'orphaned'
-        FROM bigname_phase.project_family_marker marker
-        WHERE marker.chain_id = $1 AND lineage.chain_id = marker.chain_id
-          AND lineage.block_hash = marker.current_block_hash".to_owned();
-    let unorphan = format!("UPDATE bigname_phase.chain_lineage lineage
-        SET canonicality_state = '{lineage_state}'
-        FROM bigname_phase.project_family_marker marker
-        WHERE marker.chain_id = $1 AND lineage.chain_id = marker.chain_id
-          AND lineage.block_hash = marker.current_block_hash");
+    let orphan = "UPDATE bigname_phase.project_family_marker SET current_block_hash = '0xreplaced'
+        WHERE chain_id = $1".to_owned();
+    let unorphan = format!("UPDATE bigname_phase.project_family_marker
+        SET current_block_hash = '{marker_hash}' WHERE chain_id = $1");
     let restore_hash = format!("UPDATE bigname_phase.project_family_marker SET input_content_hash = '{}'
         WHERE chain_id = $1", bigname_content_hash::PROJECTION_CONTENT_HASH);
     let cases = [
@@ -354,7 +348,7 @@ async fn an_unservable_marker_inside_the_read_counts_rows() -> Result<()> {
             "UPDATE bigname_phase.project_family_marker SET state = 'live' WHERE chain_id = $1".to_owned()),
         ("another build", "UPDATE bigname_phase.project_family_marker SET input_content_hash = 'another-build' WHERE chain_id = $1".to_owned(),
             restore_hash),
-        ("orphaned", orphan, unorphan),
+        ("off the readable lineage", orphan, unorphan),
     ];
     for route in [
         format!("/v1/events?contract_address={SC_EMITTER}&include=total_count&page_size=200"),

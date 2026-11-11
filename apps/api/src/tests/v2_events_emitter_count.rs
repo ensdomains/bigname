@@ -133,7 +133,7 @@ async fn emitter_counts_null_above_the_opt_in_cap(database: &TestDatabase) -> Re
     let both = format!("{resolver}&contract_address={EMITTER_LARGE}");
 
     // Row 2: below the opt-in cap, the flag gives the exact count. The default does not count.
-    let default = v2_history_payload_for_database(&database, &resolver).await?;
+    let default = v2_history_payload_for_database(database, &resolver).await?;
     assert_eq!(default["page"]["total_count"], Value::Null);
     // The opt-in cap is raised above its production value of 10,000 for this row.
     crate::v2::with_emitter_count_cap(LARGE_TOTAL, async {
@@ -142,7 +142,7 @@ async fn emitter_counts_null_above_the_opt_in_cap(database: &TestDatabase) -> Re
             (contract.clone(), LARGE_EMITTED as u64),
             (both.clone(), LARGE_EMITTED as u64),
         ] {
-            let page = v2_history_payload_for_database(&database, &format!("{route}&include=total_count")).await?;
+            let page = v2_history_payload_for_database(database, &format!("{route}&include=total_count")).await?;
             assert_eq!(page["page"]["total_count"], json!(expected), "{route}");
         }
         anyhow::Ok(())
@@ -152,30 +152,30 @@ async fn emitter_counts_null_above_the_opt_in_cap(database: &TestDatabase) -> Re
     crate::v2::with_emitter_count_cap(OVERRIDE_CAP, async {
         // Rows 3, 4 and 5: above the opt-in cap the count is null, and the page is the
         // default page.
-        let counted = v2_history_payload_for_database(&database, &format!("{resolver}&include=total_count")).await?;
+        let counted = v2_history_payload_for_database(database, &format!("{resolver}&include=total_count")).await?;
         assert_eq!(counted["page"]["total_count"], Value::Null);
         assert_eq!(counted["data"], default["data"]);
         assert_eq!(counted["page"]["next_cursor"], default["page"]["next_cursor"]);
         assert_eq!(counted["page"]["has_more"], json!(true));
         for route in [&contract, &both] {
-            let page = v2_history_payload_for_database(&database, &format!("{route}&include=total_count")).await?;
+            let page = v2_history_payload_for_database(database, &format!("{route}&include=total_count")).await?;
             assert_eq!(page["page"]["total_count"], Value::Null, "{route}");
             assert_eq!(page_rows(&page).len(), 3, "{route}");
         }
 
         // Rows 13 and 14: null on a continuation page and in ascending order.
         let cursor = counted["page"]["next_cursor"].as_str().expect("first page cursor").to_owned();
-        let second = v2_history_payload_for_database(&database,
+        let second = v2_history_payload_for_database(database,
             &format!("{resolver}&include=total_count&cursor={cursor}")).await?;
         assert_eq!(second["page"]["total_count"], Value::Null);
         assert_eq!(page_rows(&second).len(), 3);
-        let ascending = v2_history_payload_for_database(&database,
+        let ascending = v2_history_payload_for_database(database,
             &format!("{resolver}&order=asc&include=total_count")).await?;
         assert_eq!(ascending["page"]["total_count"], Value::Null);
         assert_eq!(history_blocks(&ascending)[0], 101);
 
         // Row 6: a name anchor keeps the exact, uncapped opt-in above the override cap.
-        let name = v2_history_payload_for_database(&database,
+        let name = v2_history_payload_for_database(database,
             "/v1/events?name=history.eth&type=record&page_size=1&include=total_count").await?;
         assert!(name["page"]["total_count"].as_u64().expect("exact name count") > OVERRIDE_CAP);
         anyhow::Ok(())
@@ -365,14 +365,14 @@ async fn emitter_counts_null_above_ten_thousand(
 
     // At the cap: the contract anchors read the 10,000 emitted rows and count them exactly.
     for route in [&contract, &both] {
-        let page = v2_history_payload_for_database(&database, &format!("{route}&include=total_count")).await?;
+        let page = v2_history_payload_for_database(database, &format!("{route}&include=total_count")).await?;
         assert_eq!(page["page"]["total_count"], json!(10_000), "{route}");
     }
 
     // Above the cap: the resolver read also holds the two pointer changes, 10,002 rows. The count is
     // null and the page is the page without the flag.
-    let default = v2_history_payload_for_database(&database, &resolver).await?;
-    let counted = v2_history_payload_for_database(&database, &format!("{resolver}&include=total_count")).await?;
+    let default = v2_history_payload_for_database(database, &resolver).await?;
+    let counted = v2_history_payload_for_database(database, &format!("{resolver}&include=total_count")).await?;
     assert_eq!(counted["page"]["total_count"], Value::Null);
     assert_eq!(counted["data"], default["data"]);
     assert_eq!(counted["page"]["next_cursor"], default["page"]["next_cursor"]);
@@ -381,13 +381,13 @@ async fn emitter_counts_null_above_ten_thousand(
     // Above the cap on the contract anchors: one more emitted row takes them to 10,001.
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[emitted(10_000)]).await?;
     for route in [&contract, &both] {
-        let page = v2_history_payload_for_database(&database, &format!("{route}&include=total_count")).await?;
+        let page = v2_history_payload_for_database(database, &format!("{route}&include=total_count")).await?;
         assert_eq!(page["page"]["total_count"], Value::Null, "{route}");
         assert_eq!(page_rows(&page).len(), 3, "{route}");
     }
 
     // A name anchor keeps the exact, uncapped opt-in above the cap.
-    let name = v2_history_payload_for_database(&database,
+    let name = v2_history_payload_for_database(database,
         "/v1/events?name=history.eth&type=record&page_size=1&include=total_count").await?;
     assert!(name["page"]["total_count"].as_u64().expect("exact name count") > 10_000);
     Ok(())
