@@ -1000,6 +1000,31 @@ drops every row that is not a role change.
 `apps/api/src/tests/v2_registry_role_counts_index.rs` checks that both statements read the
 index under custom and generic plans and return what the unindexed read returns.
 
+History pages filtered by one record key (`/v1/events`, name history and address history with
+`record_key`) that no name, registration or address anchors read two arms per chain of their
+window (`crates/storage/src/history/record_key_source.rs`): the key's `RecordChanged` rows and
+the chain's `RecordVersionChanged` rows, each in page order and each stopped after one page.
+A `resolver` or `contract_address` scope is the emitter equality inside both arms. Three indexes
+on `normalized_events` serve them. The normalized-events baseline and
+`20261111120000_normalized_events_record_history_indexes.sql` install them:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_record_key_history_idx` | the `RecordChanged` arm of an unscoped page: activated, canonical `RecordChanged` rows by chain and `after_state ->> 'record_key'`, newest block first |
+| `normalized_events_record_emitter_key_history_idx` | the `RecordChanged` arm of a page scoped by an emitter: the same rows by chain, lowercased emitting address and key, newest block first |
+| `normalized_events_record_reset_history_idx` | the `RecordVersionChanged` arm, scoped or not: activated, canonical `RecordVersionChanged` rows by chain, newest block first. A scope filters these rows |
+
+Each arm has every equality the read carries in its index condition, so it reads at most one
+page of entries, and one probe for a key with no write on the chain. The lineage, namespace,
+window and duplicate conditions still drop some rows inside the arm, before its limit. A scoped
+read needs the emitter-led index. The key index would walk every write of a common key looking
+for one emitter, and `normalized_events_emitter_history_idx` would walk every event of a large
+resolver looking for one key. Without the indexes the arms return the same rows and walk the
+chain's events in page order. `history/record_key_plan_tests.rs` checks each arm's index and
+bound in unprepared, custom and generic plans, and the rows against the plain statement with
+and without the indexes. The prebuild is in
+[`ops/record-history-indexes/README.md`](../ops/record-history-indexes/README.md).
+
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
@@ -3117,7 +3142,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 34 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 37 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
@@ -3138,7 +3163,9 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
 `normalized_events_address_root_permission_idx`, `normalized_events_registry_roles_idx`,
-`normalized_events_project_node_history_idx`
+`normalized_events_record_key_history_idx`,
+`normalized_events_record_emitter_key_history_idx`,
+`normalized_events_record_reset_history_idx`, `normalized_events_project_node_history_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 A new index on `normalized_events` joins one list in the change that adds it: the drop list
@@ -3345,6 +3372,14 @@ instead of sorting every matching event; the remaining sort keys only order the
 events of one block. Anchored reads start from their anchor's own indexes. The
 older ascending `(chain_id, block_number)` index read backward puts events
 without a block first, so it cannot serve this order.
+
+A page with a `record_key` filter that no name, registration, or address
+anchors, scoped by `resolver` or `contract_address` or not, reads the key's
+writes and the record-version resets through their own partial indexes instead,
+one arm per chain of the window, each in the page order and stopped after one
+page ([table ownership](#table-ownership)). So a rare or unknown key costs one
+index probe per arm, and a window over several chains merges at most one page
+per arm.
 
 A continued page built by the ordinary history page builder also bounds the
 scan at the cursor event's block, read in the same transaction that validates

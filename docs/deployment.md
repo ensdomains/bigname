@@ -3419,8 +3419,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 34 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 51, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 37 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 54, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -5676,3 +5676,58 @@ The index reads `bigname_phase.entry_key_hashes`, so that function can no longer
 while the index exists. Where the recovery of
 `20261012120000_name_surfaces_project_path_indexes.sql` drops the function, drop this index
 first and build it again afterwards with the statements above.
+
+## Partial indexes for history pages filtered by a record key
+
+The build that adds `normalized_events_record_key_history_idx`,
+`normalized_events_record_emitter_key_history_idx` and
+`normalized_events_record_reset_history_idx` changes how `/v1/events`, name history and
+address history read a page with `record_key`
+([table ownership](storage.md#table-ownership)).
+
+- Before, a page with `record_key` that no name, registration or address anchored walked the
+  chain's events in page order and tested the key on every row. A rare key, an unknown key, or
+  a text key sent without its `text:` prefix read the chain's whole history, and the request
+  could answer `500` at the API's statement timeout.
+- Such a page now reads one arm for the key's writes and one for the record-version resets per
+  chain, each through its own partial index and stopped after one page. A `resolver` or
+  `contract_address` scope is the emitter equality inside both arms. The rows, their order and
+  the cursors do not change for a key sent as stored.
+- A `record_key` with no colon is now read as the text record `text:<key>`, so
+  `record_key=avatar` returns the `text:avatar` writes. The keys producers store without a
+  prefix, `content`, `contenthash` and `name`, stay exact. A history cursor issued before this
+  release under a bare text key is refused with 400. Restart the walk.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the changed statements are in serving readers, not hashed files. No redo is needed. The
+  change ships as an image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order on every database the build is deployed to:
+
+1. Build the three indexes with
+   [`ops/record-history-indexes/install.sql`](../ops/record-history-indexes/README.md),
+   concurrently and outside a transaction.
+2. Check them with the query in that README: three valid and ready indexes with the reviewed
+   definitions.
+3. List the stored record keys without a colon with the query in that README. It must return
+   only `content`, `contenthash` and `name`.
+4. Apply schema-migration `20261111120000_normalized_events_record_history_indexes.sql`.
+5. Swap the image.
+
+The schema-migration adopts an index of the reviewed name that is valid and ready with the
+reviewed definition, without a build and without a lock, so it is a no-op on a database where
+the script already built all three. An empty `normalized_events` builds them directly. A
+populated table without any one of them is refused, because an ordinary build would block
+writes to `normalized_events` for the whole build. The schema-migration refuses a name that is
+not an index, an index on another table or one that is not valid and ready, and another
+definition. Its error names the index and, for another definition, prints the definition it
+found and the one it expects. The README gives the recovery steps. Then run the
+schema-migrations again.
+
+`ops/walk-index-set/drop.sql` drops the three indexes with the other Project and API indexes,
+and its `install.sql` rebuilds them. Like every index `drop.sql` drops, the phase runner builds
+any of them that is missing before Project runs, and the API refuses to start while one is
+missing unless `BIGNAME_API_WALK_INDEX_SET_CHECK=warn`. With that setting and without the
+indexes, the new image returns the same pages, and a page with `record_key` walks the chain's
+events as before.
