@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use super::{
     EACRolesChanged, LabelUnregistered, TokenRegenerated, TokenResource, TransferBatch,
-    TransferSingle, single_event, token_state_event,
+    TransferSingle, merge, single_event, token_state_event,
     topology::{
         append_resolver_discovery_closures, append_subregistry_departure,
         append_terminal_boundaries, append_token_discovery_closures, append_v2_name_transitions,
@@ -57,6 +57,8 @@ pub(super) fn token_resource(
         resource_id,
         token_lineage_id,
     );
+    // A link that bound the registration leaves `resource_pending` false in it, live and restored.
+    let repeat = matches!(&linked.registration, Some(row) if row["resource_pending"] == false);
     let logical_name_id = linked
         .name
         .as_ref()
@@ -91,13 +93,16 @@ pub(super) fn token_resource(
             namehash: name.namehash,
             resource_id: Some(resource_id),
             token_lineage_id,
-            surface_binding_id: Some(surface_binding_id),
-            bind: true,
+            surface_binding_id: (!repeat).then_some(surface_binding_id),
+            bind: !repeat,
             binding_kind: "declared_registry_path".to_owned(),
             authority_arm: "ens_v2".to_owned(),
             source_kind: "TokenResource_name".to_owned(),
             preimage_metadata: None,
         });
+        if repeat {
+            return Ok(output);
+        }
         output.events.push(EventDraft {
             event_kind: "SurfaceBound".to_owned(),
             logical_name_id: logical_name_id.clone(),
@@ -117,38 +122,33 @@ pub(super) fn token_resource(
             state_scope: String::new(),
         });
         if let Some(registration) = linked.registration.as_ref() {
-            let mut linked_registration = registration.clone();
-            linked_registration
-                .as_object_mut()
-                .expect("registration state is an object")
-                .extend(
-                    json!({
-                        "authority_kind":"ens_v2_registry",
-                        "authority_key":format!(
-                            "ens-v2-registry:{}:{}:{}",
-                            raw.chain_id, selected.contract_instance_id, resource_word,
-                        ),
-                        "upstream_resource": resource_word,
-                        "resource_pending": false,
-                        "derived_from": "registry_state",
-                        "token_lineage_id": token_lineage_id.map(|id| id.to_string()),
-                        "current_token_id":token_id,
-                        "status":"registered",
-                        "registry_contract_instance_id":selected.contract_instance_id.to_string(),
-                    })
-                    .as_object()
-                    .expect("registration state is an object")
-                    .clone(),
-                );
+            let linked_registration = merge(
+                registration.clone(),
+                json!({
+                    "authority_kind":"ens_v2_registry",
+                    "authority_key":format!(
+                        "ens-v2-registry:{}:{}:{}",
+                        raw.chain_id, selected.contract_instance_id, resource_word,
+                    ),
+                    "upstream_resource": resource_word,
+                    "resource_pending": false,
+                    "derived_from": "registry_state",
+                    "token_lineage_id": token_lineage_id.map(|id| id.to_string()),
+                    "current_token_id":token_id,
+                    "status":"registered",
+                    "registry_contract_instance_id":selected.contract_instance_id.to_string(),
+                }),
+            );
             output.events.push(EventDraft {
                 event_kind: "RegistrationGranted".to_owned(),
                 logical_name_id: logical_name_id.clone(),
                 resource_id: Some(resource_id),
                 identity_suffix: format!("RegistrationGranted:linked:{token_id}"),
                 explicit_before: None,
-                after_state: linked_registration,
+                after_state: linked_registration.clone(),
                 state_scope: String::new(),
             });
+            state.set_v2_registration(&raw.emitting_address, &token_id, linked_registration);
             if let Some(owner) = registration
                 .get("registrant")
                 .or_else(|| registration.get("owner"))
