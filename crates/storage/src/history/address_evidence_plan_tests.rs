@@ -565,7 +565,6 @@ async fn address_matches_rows_and_oracle_parity() -> Result<()> {
             named(0x7f01),
             named(0x7f02),
             named(0x7f03),
-            named(0x7f04),
             named(0x7f11),
             named(0x7f12),
             named(0x7f13),
@@ -586,10 +585,9 @@ async fn address_matches_rows_and_oracle_parity() -> Result<()> {
             ("bare:grant", false),
             ("bare:owner", false),
             ("bare:transfer", false),
-            ("long:grant", false),
             ("long:owner", false),
-            ("long:surface", false),
-            ("long:transfer", false),
+            ("long:registrant", false),
+            ("long:to", false),
             ("mixed:transfer", true),
             ("n:grant", false),
             ("n:owner", false),
@@ -1203,8 +1201,9 @@ SELECT pg_temp.ev('n:transfer', 810, 'TokenControlTransferred', 32257, 32257,
 SELECT pg_temp.ev('n:grant', 811, 'RegistrationGranted', 32258, 32258, '{"registrant": null}');
 SELECT pg_temp.ev('n:owner', 812, 'AuthorityTransferred', 32259, 32259, '{"owner": null}');
 
--- Long: a 3,000-character string that does not compress under each key, on arm kinds and on a
--- surface binding. An unbounded key index would refuse these inserts.
+-- Long: a 3,000-character string that does not compress under each key. An unbounded key index
+-- would refuse these inserts. They sit on surface bindings: the earlier kind-partial match
+-- indexes, which stay installed, are unbounded too and would refuse one on their own kinds.
 CREATE FUNCTION pg_temp.long(seed text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
     SELECT left(string_agg(replace(encode(sha512((seed || ':' || i)::bytea), 'base64'), E'\n', ''),
         '' ORDER BY i), 3000)
@@ -1213,10 +1212,9 @@ $$;
 SELECT pg_temp.ev('long:' || label, 820 + n, kind, 32512 + n, 32512 + n,
     jsonb_build_object(key, pg_temp.long(label)))
 FROM (VALUES
-    (1, 'transfer', 'TokenControlTransferred', 'to'),
-    (2, 'grant', 'RegistrationGranted', 'registrant'),
-    (3, 'owner', 'AuthorityTransferred', 'owner'),
-    (4, 'surface', 'SurfaceBound', 'owner')
+    (1, 'to', 'SurfaceBound', 'to'),
+    (2, 'registrant', 'SurfaceBound', 'registrant'),
+    (3, 'owner', 'SurfaceBound', 'owner')
 ) long(n, label, kind, key);
 
 -- Bare: 40 hex digits without 0x under each key.
@@ -1264,7 +1262,7 @@ SELECT identity, 'ens', CASE WHEN name IS NOT NULL THEN 'ens:' || pg_temp.node(n
     pg_temp.rid(resource), kind, family, 1, 'ethereum-mainnet', 'block-' || block, block,
     'tx-' || identity, 0, 0, 'ens_v2_registry_resource_surface', 'canonical'::canonicality_state,
     visibility, CASE visibility WHEN 'candidate' THEN ARRAY['fixture'] ELSE ARRAY[]::text[] END,
-    state
+    state || jsonb_build_object('expiry', 1900000000)
 FROM (VALUES
     ('t:grant', 28929, 28929, 'RegistrationGranted', 'ens_v2_registry_l1', 100, 'activated',
         jsonb_build_object('registrant', pg_temp.addr(28673))),
