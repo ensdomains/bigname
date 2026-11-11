@@ -831,6 +831,35 @@ fn v2_reservation_then_link_emits_no_registration_row() -> Result<()> {
     Ok(())
 }
 
+/// A reservation is no registration, so two links after it emit no registration row.
+#[test]
+fn v2_reservation_then_two_links_emits_no_binding() -> Result<()> {
+    let token = versioned_token("order", 0);
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let blocks = vec![
+        vec![label_order_reserved(token, "order")],
+        vec![label_order_link(token)],
+        vec![label_order_link(token)],
+    ];
+    let input = v2_label_order_input(&wiring, 20_000_580, blocks)?;
+    let converged = converge(
+        "directed=v2-reservation-then-two-links",
+        input,
+        vec![0..1, 1..2, 2..3],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    let output = &converged.whole.output;
+    assert!(output.surface_bindings.is_empty());
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .all(|event| event.event_kind != "RegistrationGranted")
+    );
+    Ok(())
+}
+
 /// A second `TokenResource` for a named token that already holds the resource changes nothing:
 /// the whole pass and every split agree, and the writer accepts both.
 #[test]

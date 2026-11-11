@@ -480,3 +480,72 @@ async fn a_token_registered_again_under_its_released_token_id_stops_interpret() 
     database.cleanup().await?;
     Ok(())
 }
+
+sol! {
+    event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
+}
+
+/// The deployed registry registers a reserved label and links it in one call. The registration
+/// keeps the reservation's resource, and that first link still binds the name.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L472 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_reserved_label_registered_and_linked_binds_its_name_once() -> TestResult {
+    let database = sepolia_database("interpret_registry_relink_reserved").await?;
+    let pool = database.pool();
+    insert_block(
+        pool,
+        FIRST,
+        vec![
+            (
+                ETH_REGISTRY,
+                LabelReserved {
+                    tokenId: token(LABEL),
+                    labelHash: keccak256(LABEL.as_bytes()),
+                    label: LABEL.to_owned(),
+                    expiry: LIVE_EXPIRY,
+                    sender: owner(),
+                }
+                .encode_log_data(),
+            ),
+            (ETH_REGISTRY, registered(LABEL)),
+            (ETH_REGISTRY, mint(LABEL)),
+            (ETH_REGISTRY, link(LABEL)),
+        ],
+    )
+    .await?;
+    run(pool, Run::EachBlock, &[FIRST]).await?;
+    assert_eq!(
+        link_rows(pool, LABEL).await?,
+        [vec![FIRST], vec![FIRST], vec![FIRST], vec![FIRST]],
+        "links, bindings, SurfaceBound rows and linked registration rows"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A link before the label binds nothing, because there is no registration yet. The first link
+/// after the registration binds the name.
+#[tokio::test]
+async fn a_link_before_the_label_and_one_after_bind_the_name_once() -> TestResult {
+    let database = sepolia_database("interpret_registry_relink_before_label").await?;
+    let pool = database.pool();
+    insert_block(pool, FIRST, vec![(ETH_REGISTRY, link(LABEL))]).await?;
+    insert_block(
+        pool,
+        SECOND,
+        vec![
+            (ETH_REGISTRY, registered(LABEL)),
+            (ETH_REGISTRY, mint(LABEL)),
+        ],
+    )
+    .await?;
+    insert_block(pool, THIRD, vec![(ETH_REGISTRY, link(LABEL))]).await?;
+    run(pool, Run::EachBlock, &[FIRST, SECOND, THIRD]).await?;
+    assert_eq!(
+        link_rows(pool, LABEL).await?,
+        [vec![FIRST, THIRD], vec![THIRD], vec![THIRD], vec![THIRD]],
+        "links, bindings, SurfaceBound rows and linked registration rows"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
