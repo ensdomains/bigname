@@ -5,7 +5,10 @@ topology and phase projections, may call an admitted chain provider, compares
 the answer with indexed state where the route requires it, and returns the
 result without writing a reusable cache outcome or durable execution trace.
 
-Every API path is read-only. The lookup library retains a guarded
+Every API path reads only, with one exception: a name request whose plain
+labels prove a label bigname serves as its labelhash placeholder stages that
+label for the operator's preimage import, in a table no serving path reads
+([name inputs](api-v1.md#name-inputs)). The lookup library retains a guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) writer
 for non-API callers; API requests never create, refresh or clear its observations.
 The ledger is diagnostic only and is never consumed as a served answer.

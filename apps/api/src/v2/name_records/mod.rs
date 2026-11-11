@@ -25,7 +25,7 @@ use super::{
     SnapshotReadResource, Source, Status, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2_for_resource, default_requested_records,
     name_records_inventory::{RecordInventory, fill_records_route_abi_content_types},
-    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
+    resolve_v2_snapshot_for, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
 mod build;
@@ -33,9 +33,10 @@ mod keys;
 mod unretained;
 pub(crate) use build::{
     EXACT_NAME_AUTHORITY_NOT_VERIFIABLE, VERIFIED_NOT_SUPPORTED_REASON,
-    build_authority_unsupported_name_records, build_auto_name_records, build_indexed_name_records,
-    build_verified_name_records, ens_universal_resolver_discovery_candidate, indexed_record_answer,
-    indexed_records_requiring_verified_fallback, verified_discovery,
+    apply_inventory_completeness, build_authority_unsupported_name_records,
+    build_auto_name_records, build_indexed_name_records, build_verified_name_records,
+    ens_universal_resolver_discovery_candidate, indexed_record_answer,
+    indexed_records_requiring_verified_fallback, records_meta, verified_discovery,
 };
 pub(crate) use keys::{
     RecordSelection, inventory_only_request, parse_record_keys, records_include_inventory,
@@ -370,16 +371,11 @@ pub(crate) async fn get_name_records(
         }
     };
 
-    fill_records_route_abi_content_types(
-        &state.pool,
-        data.inventory.as_mut(),
-        record_inventory.as_ref(),
-    )
-    .await?;
+    let inventory = record_inventory.as_ref();
+    fill_records_route_abi_content_types(&state.pool, data.inventory.as_mut(), inventory).await?;
     data.canonical_name = alias.map(|alias| alias.canonical_name);
-    let mut meta = snapshot_meta(&selected_snapshot)?;
-    meta.source = Some(route_source);
-
+    let meta = records_meta(&selected_snapshot, route_source, &row, inventory)?;
+    super::support::heal_name_records(&state, &normalized, &row, &mut data);
     Ok(Json(Envelope {
         data,
         page: None,

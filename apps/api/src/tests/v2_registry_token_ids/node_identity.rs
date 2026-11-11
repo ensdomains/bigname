@@ -455,16 +455,31 @@ async fn produced_node_names_agree_across_ranges_restarts_redo_and_public_routes
             "a structural child has no invented expiry: {expiry_listing:#}"
         );
         let mut views = vec![row.clone(), expiry_listing["data"].clone()];
-        for uri in [
-            format!(
-                "/v1/names/{}/subnames?include=counts",
-                tl_path(&spelling(&[b"unknown", b"eth"]))
+        // A bracketed `eth` is read as `eth`, so the subnames request proves that label and
+        // its rows show it (docs/api-v1.md, "Name inputs"). The other two take no name input.
+        let shown = format!("{}.eth", spelling(&labels[..2]));
+        for (uri, served) in [
+            (
+                format!(
+                    "/v1/names/{}/subnames?include=counts",
+                    tl_path(&spelling(&[b"unknown", b"eth"]))
+                ),
+                &shown,
             ),
-            format!("/v1/addresses/{HOLDER}/names?namespace=ens&relation=owner&page_size=100"),
-            format!("/v1/resolvers/1/{resolver:#x}?page_size=100"),
+            (
+                format!("/v1/addresses/{HOLDER}/names?namespace=ens&relation=owner&page_size=100"),
+                &name,
+            ),
+            (
+                format!("/v1/resolvers/1/{resolver:#x}?page_size=100"),
+                &name,
+            ),
         ] {
             let body = get(&database, &uri).await?;
-            assert!(body.to_string().contains(&name), "{uri}: {body:#}");
+            assert!(
+                body.to_string().contains(served.as_str()),
+                "{uri}: {body:#}"
+            );
             views.push(body["data"].clone());
         }
         let bound = bigname_storage::families::name::assert_bound_name_pages_chain(
@@ -660,7 +675,8 @@ async fn produced_identity_enriches_only_at_publication_and_reanchors_after_stru
     run(&engine, 120, 121, bigname_interpret::RunMode::Normal).await?;
     publish(&database, 121).await?;
     let before = detail(&database, &labels).await?;
-    assert_eq!(before["name"], spelling(&labels));
+    // The request's bracketed `eth` is read as `eth`, which proves that label.
+    assert_eq!(before["name"], format!("{}.eth", spelling(&labels[..1])));
     assert_eq!(before["created_at"], "1700000121");
     run(&engine, 122, 122, bigname_interpret::RunMode::Normal).await?;
     // Interpret has observed bytes, while the compatible Project publication is still 121.

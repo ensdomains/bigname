@@ -20,7 +20,11 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
   retire stale direct-resolution observations through the guarded projection
   lifecycle trigger; it does not write a live/indexed comparison.
 - API code reads phase projections and request-scoped lookup output without
-  database writes. Non-API lookup callers retain the guarded divergence writer.
+  database writes, except the label candidates a name request proves, which it
+  inserts into `bigname_phase.ens_names` for the preimage import
+  ([name inputs](../api-v1.md#name-inputs)). The API owns that statement. Storage
+  owns the table and its one reader, the import. Non-API lookup callers retain
+  the guarded divergence writer.
   Project may only retire ledger rows
   when publication changes an ENS Mainnet exact resolver to null.
 - Storage owns [canonicality](../glossary.md#canonicality), snapshot selection, reusable row reads,

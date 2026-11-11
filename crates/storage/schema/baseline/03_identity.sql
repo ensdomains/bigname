@@ -667,6 +667,18 @@ $$;
 CREATE INDEX IF NOT EXISTS name_surfaces_project_entry_keys_idx ON name_surfaces USING gin(entry_key_hashes(labelhashes));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_path_hash_idx ON name_surfaces(namespace, hash_array_extended(labelhashes, 0));
 
+-- The expiring listing of GET /v1/names with `parent` (storage:families.name.expiring_names)
+-- selects the names one label below the parent by labelhash path. This index keys every
+-- surface by the hash of its parent's path, its labelhashes after the first, each through
+-- entry_key_hashes, so a parent with few names below it is read from here and not from the
+-- expiry window. It is not partial, because PostgreSQL estimates an expression from an
+-- index's statistics only when the index has no predicate, and those statistics send a parent
+-- with many names below it to the expiry index. The statement also compares the labelhashes
+-- themselves, so a hash collision never lists a name. Keep it identical to
+-- migrations/20261104120000_name_surfaces_project_parent_key_index.sql.
+CREATE INDEX IF NOT EXISTS name_surfaces_project_parent_key_idx
+    ON name_surfaces (namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0));
+
 -- Current spelling and lexical membership are derived atomically by Interpret and verified imports.
 CREATE TABLE IF NOT EXISTS name_search_documents (
     search_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

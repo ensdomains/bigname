@@ -7,6 +7,18 @@ fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// The labelhash path of `parent` as a `text[]` literal, bound twice by the parent test.
+pub(crate) fn path_literal(parent: &str) -> String {
+    format!(
+        "ARRAY[{}]::text[]",
+        crate::name_current::parent_labelhash_path(parent)
+            .iter()
+            .map(|labelhash| literal(labelhash))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
 /// Explain the actual selector after applying the requested plan-cache mode. The values below
 /// follow `push_expiring_selection`'s bindings; PostgreSQL checks their arity and types. This is
 /// a test-support seam, never a production query path. Call on a dedicated measurement connection.
@@ -49,9 +61,8 @@ pub async fn explain_expiring_selection(
             )),
         }
         if let Some(parent) = &filter.parent {
-            let (one_below, deeper) = crate::name_current::parent_like_patterns(parent);
-            values.push(literal(&one_below));
-            values.push(literal(&deeper));
+            let path = path_literal(parent);
+            values.extend([path.clone(), path]);
         }
         if let Some(at) = window.expires_after {
             values.push(at.to_string());

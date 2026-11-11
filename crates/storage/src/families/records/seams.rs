@@ -15,6 +15,7 @@ mod scoped {
         static COMPOSE_CHUNK: usize;
         static COMPOSED_NAME_BATCHES: Arc<Mutex<Vec<usize>>>;
         static EXACT_TOTAL_CAP: usize;
+        static EXACT_TOTAL_OPT_IN_CAP: usize;
         static ADDRESS_NAME_PATHS: Arc<Mutex<Vec<&'static str>>>;
         static WALK_FILTER_NAMES: Arc<Mutex<Vec<usize>>>;
         static WALK_CREATED_AT_CLEARED: String;
@@ -112,6 +113,18 @@ mod scoped {
         EXACT_TOTAL_CAP
             .try_with(|cap| *cap)
             .unwrap_or(super::EXACT_TOTAL_CAP)
+    }
+
+    /// Runs `future` with `include=total_count` counting an address's names only when it has at
+    /// most `cap` candidate names, instead of [`super::EXACT_TOTAL_OPT_IN_CAP`].
+    pub async fn with_exact_total_opt_in_cap<F: Future>(cap: usize, future: F) -> F::Output {
+        EXACT_TOTAL_OPT_IN_CAP.scope(cap, future).await
+    }
+
+    pub(crate) fn exact_total_opt_in_cap() -> usize {
+        EXACT_TOTAL_OPT_IN_CAP
+            .try_with(|cap| *cap)
+            .unwrap_or(super::EXACT_TOTAL_OPT_IN_CAP)
     }
 
     /// Runs `future` with an address-names walk sizing its steps as it first did: four pages
@@ -252,22 +265,30 @@ mod scoped {
 const COMPOSE_CHUNK: usize = 256;
 
 /// The most candidate names an address-names or resolves-to page composes in full; above it
-/// the page walks, and its total is null unless `include=total_count` asks for it.
+/// the page walks, and its total is null unless `include=total_count` asks for it and the address
+/// has at most [`EXACT_TOTAL_OPT_IN_CAP`] candidate names.
 const EXACT_TOTAL_CAP: usize = 1_000;
+
+/// The most candidate names `include=total_count` counts on an address-names page that walks.
+/// The count composes every candidate, a chunk at a time, before the walk. Above this many it
+/// is not run and the total is null.
+const EXACT_TOTAL_OPT_IN_CAP: usize = 10_000;
+const _: () = assert!(EXACT_TOTAL_OPT_IN_CAP > EXACT_TOTAL_CAP);
 
 #[cfg(any(test, feature = "test-support"))]
 pub use scoped::{
     ListingPageHook, ListingPlan, candidate_statement, lookup_work_timer, note_lookup_work,
     with_address_name_paths, with_compose_chunk, with_composed_address_names,
-    with_composed_name_batches, with_exact_total_cap, with_inventory_read_counter,
-    with_legacy_walk_batches, with_listing_page_hook, with_listing_plans, with_lookup_work,
-    with_role_read_counter, with_walk_created_at_cleared, with_walk_filter_names,
+    with_composed_name_batches, with_exact_total_cap, with_exact_total_opt_in_cap,
+    with_inventory_read_counter, with_legacy_walk_batches, with_listing_page_hook,
+    with_listing_plans, with_lookup_work, with_role_read_counter, with_walk_created_at_cleared,
+    with_walk_filter_names,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::{
     after_listing_page, compose_chunk, composed_address_names, exact_total_cap,
-    legacy_walk_batches, listing_plans_wanted, note_address_name_path, note_composed_batch,
-    note_listing_plan, note_walk_filter, walk_created_at_cleared,
+    exact_total_opt_in_cap, legacy_walk_batches, listing_plans_wanted, note_address_name_path,
+    note_composed_batch, note_listing_plan, note_walk_filter, walk_created_at_cleared,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use scoped::{note_inventory_read, note_role_read};
@@ -275,6 +296,11 @@ pub(super) use scoped::{note_inventory_read, note_role_read};
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn exact_total_cap() -> usize {
     EXACT_TOTAL_CAP
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn exact_total_opt_in_cap() -> usize {
+    EXACT_TOTAL_OPT_IN_CAP
 }
 
 #[cfg(not(any(test, feature = "test-support")))]

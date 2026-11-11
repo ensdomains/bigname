@@ -475,7 +475,7 @@ field requires no schema migration or replay.
 | `project_lookup_name`, `project_lookup_relation`, `project_lookup_inventory`, `project_lookup_record`, `project_lookup_dependency` | Project | Journalled current lookup facts, exact relations and per-resource selected records/dependencies; published with the family marker. |
 | `name_search_documents`, `name_search_postings` | Interpret and the verified label-preimage importer | Atomic current spelling and lexical indexes; rebuilt from surface and retained verified label evidence. |
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
-| `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
+| `ens_names` | operator rainbow load, and the API's [label candidates](deployment.md#api-label-candidates) | Unverified rainbow-table candidates consumed by the import command. No serving path reads them. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding or because they contradict themselves or their emitter's earlier logs, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
@@ -635,15 +635,19 @@ Family indexes serve these concrete readers:
   names are composed, and the listing rules run again over them. The page shows each name as
   served, imported preimages included. The capability gate is never stored, because a
   classification can change while no name is composed again. `include=total_count` counts
-  the same names on the same snapshot, with the surface fences as one semi-join, so it reads
-  every listed name of the resolver. The count is sent unprepared, inside a savepoint that sets
-  `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count with the resolver's own
-  values even on a session set to `force_generic_plan`. A cached generic plan guesses a few hundred names and
-  probes every name's surfaces in a nested loop. On the plan test's 1.1 million names the
-  unprepared count takes about 0.4 s and that generic plan about 3.7 s. The unprepared count
-  hashes the surfaces in a parallel semi-join. On those 1.1 million names, with the default
-  `work_mem` and 2 parallel workers, it writes about 243 MB of temp files per count, an amount
-  that grows with the chain's surfaces. Interpret writes a surface's raw bytes and its shadow
+  the same names on the same snapshot with the page's statement under a limit: the same index
+  range in page order, the surface fences as the same scalar subquery, and no cursor. It stops
+  after 100,001 names pass the fences, and the API serves `null` above 100,000. So a count
+  reads index rows in page order until 100,001 pass, whatever the resolver's size. The
+  fences are not written as `EXISTS`, which the planner can run as a semi-join that hashes
+  every surface before the first row, past any limit. The count is sent unprepared, inside a
+  savepoint that sets `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count
+  with the resolver's own values and limit even on a session set to `force_generic_plan`.
+  The savepoint also sets `enable_sort = off`. A resolver whose size the planner estimates
+  below the limit would otherwise be read by a bitmap scan of every listed row, each probed
+  by the fences, and then sorted. Without a sort only the index range in page order meets the
+  count's order.
+  Interpret writes a surface's raw bytes and its shadow
   state in place when it observes a preimage for it, and keeps the surface's block. The summary
   writer reads them as the composed block does (`loaders::surfaces_at`): only when the surface's
   preimage witness is a readable `PreimageObserved` at or below the block. Otherwise the surface
@@ -822,6 +826,25 @@ so a `LIKE` prefix becomes a range on it under any database collation. The name 
 gives that range only under the C collation. The prefix index has the name order index's
 predicate, and the reader carries the same bounds. Its order is byte order, so the reader
 sorts the matched rows into name order.
+
+The expiring listing of `GET /v1/names` with `parent` adds one more, installed by the identity
+baseline and `20261104120000_name_surfaces_project_parent_key_index.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_surfaces_project_parent_key_idx` | `storage:families.name.expiring_names` and `storage:families.name.expiring_union`: the surfaces one label below a parent, by namespace and the hash of their labelhashes after the first |
+
+It is a btree on `(namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0))` over
+every surface. It is not partial, because PostgreSQL estimates an expression from an index's
+statistics only when the index has no predicate. The statement keeps its visibility and
+root-name terms as filters. The statement also compares
+the labelhashes after the first with the parent's path, so a hash collision never lists a name.
+A parent with few names below it is read from this index. A parent above most names, such as
+`eth`, is read from `project_name_summary_expiry_idx`, with the key compared on each row. With a
+parent, both statements run unprepared, so each is planned with its own parent and the index statistics
+choose between the two. `crates/storage/src/families/name/list/expiring/parent_tests.rs` checks
+the rows of every parent class and the rows each plan examines. Interpret pays one btree entry
+when it inserts a surface.
 
 Interpret and the verified label-preimage importer write `name_search_documents`. The
 API's prefix search adds three read-only indexes on it, installed by the identity baseline
@@ -1443,7 +1466,8 @@ earlier checkpoint is recorded as `failed` so ordinary phase execution can
 resume it. A saved Verify final checkpoint stays `failed` until current
 configuration and retained verification evidence pass the completed-Verify
 checks. A lock still held by another runner, or a lost lock connection during
-the state update, stops the new runner or refuses the redo. The update and lock use one database
+the state update, refuses the redo. A supervised runner runs that chain again
+with backoff until the lock is free. The update and lock use one database
 connection. If the client cannot tell whether PostgreSQL committed the update
 before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
@@ -1490,8 +1514,8 @@ backoff. Until the retry takes the lock again, the lock is free.
 A redo that starts in that gap wins. It settles the row and runs. While it
 runs, the supervisor's Live retry fails with `InvalidTransition`, which is not
 retried, so that chain's supervisor stops. Other chains keep running, and the
-process exits nonzero once every chain has stopped. Restart the supervisor
-after the redo finishes.
+runner stays up until it is stopped. Restart the runner after the redo
+finishes.
 
 The lost attempt's head publication can still commit while that redo runs.
 When it replaces readable blocks, it stamps a required redo on Interpret,
@@ -1522,8 +1546,7 @@ depends on the redo:
   have completed. Until then it is refused because Project is not completed.
   The completion error says so.
 - A supervisor's own required redo refused at completion stops that chain.
-  The next supervisor start reruns the required redo. No operator action is
-  needed.
+  Restart the runner. That start reruns the required redo.
 
 Project is treated differently at completion. A Project redo that a stamp
 overtook after its last progress write still completes on one condition.
@@ -2065,7 +2088,10 @@ candidate, where the generator records `hash =
 keccak256(name)`.[^graph-ens-rainbow-table][^graph-ens-rainbow-hash]
 
 Authority stays split between the two tables. `ens_names` is an unverified
-staging store: every operator-loaded row is only a claim. `label_preimages`
+staging store: every operator-loaded row is only a claim. The API also stages
+there each label a name request proves
+([name inputs](api-v1.md#name-inputs)), and the import checks those rows like
+any other. `label_preimages`
 remains the verified store: a candidate becomes a preimage row only when it is
 exactly one DNS label and re-hashes — keccak256 of the raw label bytes — to the
 row's recorded hash. A rejected candidate leaves no trace beyond the import's
@@ -2086,7 +2112,13 @@ fills a table the importer never reads, and the run reports zero scanned rows
 rather than failing — the phase table exists, it is just empty. Load the dump's
 rows into `bigname_phase.ens_names` without letting the rest of the dump run
 against that table: `\copy` the data section, or extract the dump's `COPY`
-statement and retarget only that. Do not rewrite the dump's schema
+statement and retarget only that. A `COPY` into the table fails on the first
+hash it already holds, and API hosts may already have staged label candidates
+there. Setting `BIGNAME_API_LABEL_STAGING_PER_SECOND=0` stops new candidates
+but keeps those already staged. So whenever the table may hold candidates, copy
+into a temporary table and insert from it with `ON CONFLICT DO NOTHING`. Copy
+directly only when staging is `0` on every API host and the table is still empty
+after that. Do not rewrite the dump's schema
 qualification globally, because the same rewrite also redirects the dump's
 `DROP TABLE`
 (upstream: .refs/ens_rainbow/src/main.rs:L33 @ ens_rainbow@bc44492)
@@ -3234,6 +3266,12 @@ one, so a runner or API of the previous release still finds the names it expects
 by another relation stops Project instead. The
 [walk index set README](../ops/walk-index-set/README.md#the-phase-runners-rebuild) describes the
 rebuild, its log lines and its failures.
+
+The API reads the same state at startup and refuses to start while any of these indexes is
+missing, not valid and ready, or under a name another relation holds, unless
+`BIGNAME_API_WALK_INDEX_SET_CHECK=warn` (`apps/api/src/startup_preflight.rs`,
+[the API's startup check](../ops/walk-index-set/README.md#the-apis-startup-check)). It reads
+an index with another definition as found, as the runner does.
 
 ## Projection publication
 
