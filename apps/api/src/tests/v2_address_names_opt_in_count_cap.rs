@@ -32,9 +32,10 @@ async fn address_names_count_is_exact_above_the_walks_opt_in_cap() -> Result<()>
     assert_listing_bound(&unasked, &names);
     let exact = capped_listing_read(&database, &counted).await?;
     assert_listing_bound(&exact, &counted);
+    // Red: the release line's rule, `null` above the opt-in cap, on the served route.
     assert_eq!(
         exact.payload["page"]["total_count"],
-        json!(OPT_IN_NAMES),
+        Value::Null,
         "{}",
         exact.payload
     );
