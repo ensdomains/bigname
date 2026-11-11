@@ -244,7 +244,6 @@ fn check_child_probe(plan: &Value, wanted: usize, surfaced: usize, cell: &str) -
         !probes.is_empty(),
         "{cell}: no surface read is keyed on a wanted child: {plan}"
     );
-    let mut found = 0.0;
     for scan in &probes {
         ensure!(
             scan["Index Name"] == "name_surfaces_pkey",
@@ -262,12 +261,25 @@ fn check_child_probe(plan: &Value, wanted: usize, surfaced: usize, cell: &str) -
             read <= wanted as f64,
             "{cell}: the wanted children's probe read {read} rows for {wanted} children: {plan}"
         );
-        found += scan["Actual Rows"].as_f64().unwrap_or(0.0)
-            * scan["Actual Loops"].as_f64().unwrap_or(0.0);
     }
+    // EXPLAIN reports a scan's rows as a rounded mean per loop, so the surfaces found are read
+    // from the `wanted_child` CTE, which runs once.
+    let found = cte_rows(root, "CTE wanted_child");
     ensure!(
-        found == surfaced as f64,
-        "{cell}: the probe found {found} surfaces for {surfaced} surfaced children: {plan}"
+        found == Some(surfaced as f64),
+        "{cell}: wanted_child holds {found:?} surfaces for {surfaced} surfaced children: {plan}"
     );
     Ok(())
+}
+
+/// The rows of the CTE `name`, which runs once.
+fn cte_rows(plan: &Value, name: &str) -> Option<f64> {
+    if plan["Subplan Name"] == name {
+        return plan["Actual Rows"].as_f64();
+    }
+    plan["Plans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|child| cte_rows(child, name))
 }
