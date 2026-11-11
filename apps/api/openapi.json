@@ -4389,6 +4389,244 @@
         }
       }
     },
+    "/v1/resolvers": {
+      "get": {
+        "operationId": "get_v1_resolvers",
+        "tags": [
+          "resolvers"
+        ],
+        "x-fern-sdk-group-name": "resolvers",
+        "x-fern-sdk-method-name": "resolvers",
+        "description": "See [GET /v1/resolvers](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolvers).",
+        "parameters": [
+          {
+            "name": "role_holder",
+            "in": "query",
+            "required": true,
+            "description": "EVM address in hexadecimal form, in any letter case. Lists the resolvers on which this address holds ENSv2 roles.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain_id",
+            "in": "query",
+            "required": false,
+            "description": "Supported numeric EVM chain ID. Keeps the resolvers on that chain.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "description": "Maximum rows per page: 1 through 200.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The requested answer, including the empty or in-band outcomes documented below.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolversByRoleHolderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_input`: Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "invalid_input"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found`: The selected resource or namespace does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "not_found"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "`request_timeout`: The configured whole-request deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "request_timeout"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`stale`: The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "stale"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`internal_error`: Unexpected serving failure; verified provider transport failures also use this error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "internal_error"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`overloaded`: The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "overloaded"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/resolvers/{chain_id}/{address}": {
       "get": {
         "operationId": "get_v1_resolvers_chain_id_address",
@@ -9778,6 +10016,37 @@
           "powers"
         ]
       },
+      "RoleHolderResolver": {
+        "type": "object",
+        "properties": {
+          "chain_id": {
+            "type": "integer",
+            "description": "Numeric EVM chain ID."
+          },
+          "address": {
+            "type": "string",
+            "description": "Lowercase EVM address of the resolver."
+          },
+          "grant_count": {
+            "type": "integer",
+            "description": "Number of the holder's current ENSv2 EAC grants on the resolver, one per EAC resource, the root resource included; at least 1."
+          },
+          "powers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionPower"
+            },
+            "description": "Union of those grants' powers, in lexicographic order; see [permission powers vocabulary](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#permission-powers-vocabulary)."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "chain_id",
+          "address",
+          "grant_count",
+          "powers"
+        ]
+      },
       "ErrorEnvelope": {
         "type": "object",
         "properties": {
@@ -10170,6 +10439,33 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ResolverRole"
+            },
+            "description": "Requested result data."
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page",
+            "description": "Standard collection pagination metadata."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "meta",
+          "data",
+          "page"
+        ],
+        "description": "Success envelope for the corresponding product operation."
+      },
+      "ResolversByRoleHolderResponse": {
+        "type": "object",
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/Meta",
+            "description": "Response metadata; present even when empty."
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleHolderResolver"
             },
             "description": "Requested result data."
           },
