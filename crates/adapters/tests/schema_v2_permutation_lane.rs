@@ -14,6 +14,8 @@
 //! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (144 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
 //! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
+//! - `BIGNAME_REGISTRY_ORDER_CASES` and `BIGNAME_REGISTRY_ORDER_SEED` drive the generated ENSv2
+//!   registry orders instead; see `permutation/registry_orders.rs`.
 //!
 //! The knobs drop some of the assertions about what the corpus reaches, because those are
 //! properties of the default corpus rather than of any seed: a reduced or reseeded run drops the
@@ -49,7 +51,7 @@ use permutation::{
     },
     invariants::{Converged, IdentityReferences, assert_upsert_guards_agree, converge, split},
     names::{labelhash, namehash},
-    pool_v2,
+    pool_v2, registry_orders,
     scenario::{self, BurstPhase},
     world::{
         BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_MAINNET, ENS_V2_SEPOLIA, GeneratedLog,
@@ -4626,4 +4628,495 @@ fn matching_release_except_binding(
             ))
             .then_some((exempt, opening))
     })
+}
+
+/// Generated ENSv2 registry orders, with no ordering repair, hold `converge` in every block
+/// layout and batch split. See `permutation/registry_orders.rs` for the alphabet, the knobs and the
+/// soak invocation.
+#[test]
+fn generated_registry_orders_converge_in_every_layout_and_split() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let cases = knob(
+        "BIGNAME_REGISTRY_ORDER_CASES",
+        registry_orders::DEFAULT_CASES,
+    )?;
+    let base = knob("BIGNAME_REGISTRY_ORDER_SEED", registry_orders::DEFAULT_SEED)?;
+    if cases == 0 {
+        bail!("BIGNAME_REGISTRY_ORDER_CASES must be at least 1");
+    }
+    let sweep = registry_orders::sweep(&wiring, base, cases);
+    eprintln!("{sweep}");
+    sweep.verdict(cases == registry_orders::DEFAULT_CASES && base == registry_orders::DEFAULT_SEED)
+}
+
+#[test]
+fn generated_registry_orders_are_reproducible_from_their_seed() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let seed = registry_orders::case_seed(registry_orders::DEFAULT_SEED, 1);
+    let first = registry_orders::generate(seed);
+    let again = registry_orders::generate(seed);
+    assert_eq!(first.actions, again.actions);
+    assert!(registry_orders::well_formed(&first.actions));
+    for (layout, _) in registry_orders::RUNS {
+        let (left, _) = registry_orders::input(&wiring, &first.actions, layout)?;
+        let (right, _) = registry_orders::input(&wiring, &again.actions, layout)?;
+        assert_eq!(
+            format!("{:?}", left.raw_logs),
+            format!("{:?}", right.raw_logs)
+        );
+    }
+    let other =
+        registry_orders::generate(registry_orders::case_seed(registry_orders::DEFAULT_SEED, 2));
+    assert_ne!(first.actions, other.actions);
+    Ok(())
+}
+
+/// The shapes the generated sweep counts but does not fail on, against the orders the open fix
+/// for TYR-510 lists: a label after `TokenResource`, with or without a pointer first, and a label
+/// over its own reservation. A label under another label's reservation, a label after pointers
+/// only, a second link of a registered token and a label after a released link keep no resource.
+#[test]
+fn registry_order_known_shapes_are_the_open_fix_orders() {
+    use crate::permutation::registry_orders::{
+        Action, Atom, Expiry, LABEL_OVER_RESERVATION, Pointer, Registry,
+        TOKEN_RESOURCE_BEFORE_LABEL, Token, known_shapes,
+    };
+    let registry = Registry::Declared;
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let block = |atoms: Vec<Atom>| Action {
+        atoms,
+        new_block: true,
+        same_transaction: false,
+    };
+    let register = |label| Atom::Register {
+        registry,
+        token,
+        label,
+        owner: 1,
+        expiry: Expiry::Far,
+    };
+    let reserve = |label| Atom::Reserve {
+        registry,
+        token,
+        label,
+        expiry: Expiry::Far,
+    };
+    let link = Atom::Link {
+        registry,
+        token,
+        resource: token,
+    };
+    let resolver = Atom::Resolver {
+        registry,
+        token,
+        to: Pointer::Other(0),
+    };
+    let unregister = Atom::Unregister { registry, token };
+    let cases = [
+        (
+            vec![block(vec![link]), block(vec![register(0)])],
+            Some(TOKEN_RESOURCE_BEFORE_LABEL),
+        ),
+        (
+            vec![
+                block(vec![resolver]),
+                block(vec![link]),
+                block(vec![register(0)]),
+            ],
+            Some(TOKEN_RESOURCE_BEFORE_LABEL),
+        ),
+        (
+            vec![block(vec![reserve(0), register(0)]), block(vec![link])],
+            Some(LABEL_OVER_RESERVATION),
+        ),
+        (
+            vec![block(vec![reserve(0)]), block(vec![register(1)])],
+            None,
+        ),
+        (vec![block(vec![resolver]), block(vec![register(0)])], None),
+        (
+            vec![block(vec![register(0), link]), block(vec![link])],
+            None,
+        ),
+        (
+            vec![
+                block(vec![link]),
+                block(vec![unregister]),
+                block(vec![register(0)]),
+            ],
+            None,
+        ),
+    ];
+    for (actions, expected) in cases {
+        assert_eq!(
+            known_shapes(&actions).into_iter().collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>(),
+            "{actions:?}"
+        );
+    }
+}
+
+/// Runs one generated-order finding, kept as a named test, through the sweep's own check.
+fn registry_order_finding(context: &str, actions: &[registry_orders::Action]) -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    registry_orders::check(
+        &wiring,
+        actions,
+        registry_orders::Layout::Drawn,
+        registry_orders::Split::BatchPerBlock,
+        0,
+    )
+    .map(|_| ())
+    .with_context(|| {
+        format!(
+            "{context}:\n{}",
+            registry_orders::describe(actions, registry_orders::Layout::Drawn)
+        )
+    })
+}
+
+fn in_new_block(atoms: Vec<registry_orders::Atom>) -> registry_orders::Action {
+    registry_orders::Action {
+        atoms,
+        new_block: true,
+        same_transaction: false,
+    }
+}
+
+/// Shrunk from seed 18271353455406254376 (and, on the declared registry, 4567838365441019466):
+/// an announced registry registers a label whose expiry has already passed and links its resource
+/// in the same transaction. Live state marks the registration's expiry retirement as emitted; a
+/// restore from the stored rows does not.
+#[test]
+fn registry_order_finding_an_expired_registration_linked_in_one_transaction() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
+    let token = Token {
+        label: 1,
+        version: 0,
+    };
+    registry_order_finding(
+        "an expired registration linked in one transaction",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            in_new_block(vec![
+                Atom::Register {
+                    registry: Registry::Announced,
+                    token,
+                    label: 1,
+                    owner: 2,
+                    expiry: Expiry::Past,
+                },
+                Atom::Link {
+                    registry: Registry::Announced,
+                    token,
+                    resource: token,
+                },
+            ]),
+        ],
+    )
+}
+
+/// Shrunk from seeds 9135676728762764436 and 6413280996045462611 in the first sweep: a
+/// registration with no `TokenResource`, a role grant on its resource in the same transaction, and
+/// another grant in a later block. The split replay re-emits the token lineage the first grant
+/// anchored, anchored at the later grant, which the writer's upsert guard rejects. The same kind
+/// of refusal as TYR-522, on the token lineage instead of the surface binding.
+#[test]
+fn registry_order_finding_role_grants_on_an_unlinked_registration() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let registry = Registry::Declared;
+    let grant = |account| Atom::Roles {
+        registry,
+        resource: Some(token),
+        account,
+        old: 0,
+        new: 3,
+    };
+    registry_order_finding(
+        "role grants on an unlinked registration",
+        &[
+            in_new_block(vec![
+                Atom::Register {
+                    registry,
+                    token,
+                    label: 0,
+                    owner: 1,
+                    expiry: Expiry::Far,
+                },
+                grant(1),
+            ]),
+            in_new_block(vec![grant(2)]),
+        ],
+    )
+}
+
+/// The deployed registry's order around the same role grant: `register` links the resource before
+/// it grants the owner's roles, and a later `grantRoles` regenerates the token
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L479 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L503-L542 @ ens_v2@a971bd64).
+#[test]
+fn registry_order_deployed_role_grant_after_a_registration() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let next = Token {
+        label: 0,
+        version: 1,
+    };
+    let registry = Registry::Declared;
+    let grant = |account| Atom::Roles {
+        registry,
+        resource: Some(token),
+        account,
+        old: 0,
+        new: 3,
+    };
+    registry_order_finding(
+        "a deployed role grant after a registration",
+        &[
+            in_new_block(vec![
+                Atom::Register {
+                    registry,
+                    token,
+                    label: 0,
+                    owner: 1,
+                    expiry: Expiry::Far,
+                },
+                Atom::Mint {
+                    registry,
+                    token,
+                    to: 1,
+                },
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+                grant(1),
+            ]),
+            in_new_block(vec![
+                grant(2),
+                Atom::Burn {
+                    registry,
+                    token,
+                    from: 1,
+                },
+                Atom::Regenerate {
+                    registry,
+                    from: token,
+                    to: next,
+                },
+                Atom::Mint {
+                    registry,
+                    token: next,
+                    to: 1,
+                },
+            ]),
+        ],
+    )
+}
+
+/// Shrunk from seed 11156509979789779317: an announced registry registers and links a label,
+/// registers the same live token again in a later block, then sets its resolver. The split replay
+/// attributes one event differently from the whole pass.
+#[test]
+fn registry_order_finding_a_live_token_registered_again() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Pointer, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let registry = Registry::Announced;
+    let register = Atom::Register {
+        registry,
+        token,
+        label: 0,
+        owner: 3,
+        expiry: Expiry::Far,
+    };
+    registry_order_finding(
+        "a live token registered again",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            in_new_block(vec![
+                register,
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+            ]),
+            in_new_block(vec![register]),
+            in_new_block(vec![
+                Atom::Unregister {
+                    registry,
+                    token: Token {
+                        label: 1,
+                        version: 0,
+                    },
+                },
+                Atom::Resolver {
+                    registry,
+                    token,
+                    to: Pointer::Other(0),
+                },
+            ]),
+        ],
+    )
+}
+
+/// Shrunk from seed 1494661391878574169: the declared registry registers a label whose expiry has
+/// passed and links it, registers the same token again in the same block with an expiry that
+/// lapses before the next block, and a later block sets its resolver. The split replay derives a
+/// different expiry release than the whole pass.
+#[test]
+fn registry_order_finding_an_expired_token_registered_again_until_the_next_block() -> Result<()> {
+    use crate::permutation::registry_orders::{Action, Atom, Expiry, Pointer, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let registry = Registry::Declared;
+    let register = |owner, expiry| Atom::Register {
+        registry,
+        token,
+        label: 0,
+        owner,
+        expiry,
+    };
+    registry_order_finding(
+        "an expired token registered again until the next block",
+        &[
+            in_new_block(vec![Atom::RootEth]),
+            in_new_block(vec![
+                register(1, Expiry::Past),
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+            ]),
+            Action {
+                atoms: vec![register(2, Expiry::Lapses(1))],
+                new_block: false,
+                same_transaction: false,
+            },
+            in_new_block(vec![Atom::Resolver {
+                registry,
+                token,
+                to: Pointer::Other(0),
+            }]),
+        ],
+    )
+}
+
+/// Shrunk from seed 14847395240998665607: an announced registry points a token it never
+/// registered at itself, unregisters the token in the next transaction, and transfers it in a
+/// later block. Only the whole pass marks the transfer's registry state as pending hydration.
+#[test]
+fn registry_order_finding_a_transfer_of_an_unregistered_pointer_token() -> Result<()> {
+    use crate::permutation::registry_orders::{Action, Atom, Pointer, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let registry = Registry::Announced;
+    registry_order_finding(
+        "a transfer of an unregistered pointer token",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            in_new_block(vec![Atom::Subregistry {
+                registry,
+                token,
+                to: Pointer::Announced,
+            }]),
+            Action {
+                atoms: vec![Atom::Unregister { registry, token }],
+                new_block: false,
+                same_transaction: false,
+            },
+            in_new_block(vec![Atom::Transfer {
+                registry,
+                token,
+                from: 2,
+                to: 2,
+            }]),
+        ],
+    )
+}
+
+/// A `LabelReserved` over a token that is already registered and minted, for the declared and an
+/// announced registry, in every layout and split the sweep runs, so a batch boundary falls at each
+/// step. The register and the mint come in separate transactions and in one.
+#[test]
+fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, RUNS, Registry, Token};
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let mut failures = Vec::new();
+    for registry in [Registry::Declared, Registry::Announced] {
+        let register = Atom::Register {
+            registry,
+            token,
+            label: 0,
+            owner: 1,
+            expiry: Expiry::Far,
+        };
+        let mint = Atom::Mint {
+            registry,
+            token,
+            to: 1,
+        };
+        let reserve = Atom::Reserve {
+            registry,
+            token,
+            label: 0,
+            expiry: Expiry::Far,
+        };
+        let announce = (registry == Registry::Announced).then_some(Atom::Announce);
+        for steps in [
+            vec![vec![register], vec![mint], vec![reserve]],
+            vec![vec![register, mint], vec![reserve]],
+        ] {
+            let actions = announce
+                .map(|atom| vec![atom])
+                .into_iter()
+                .chain(steps)
+                .map(in_new_block)
+                .collect::<Vec<_>>();
+            for (layout, split_kind) in RUNS {
+                if let Err(error) = registry_orders::check(&wiring, &actions, layout, split_kind, 0)
+                {
+                    failures.push(format!(
+                        "{registry:?} {layout:?} {split_kind:?}:\n{}\n  {error:#}",
+                        registry_orders::describe(&actions, layout)
+                    ));
+                }
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "{} runs of a reservation over a registered token failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+    Ok(())
 }
