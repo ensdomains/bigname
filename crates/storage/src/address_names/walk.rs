@@ -85,6 +85,9 @@ pub struct AddressNamesPageRequest<'a> {
 
 /// The page of `request`, with an exact total when `exact_total` asks for it or the address has
 /// at most the cap of candidate names, else a null total.
+///
+/// No route calls it since the stored listing serves the route (`listing.rs`). It stays as the
+/// oracle the API tests compare the listing with, and is deleted with the walk in PR 4.
 pub async fn load_family_address_names_capped_page(
     db: impl Into<crate::ReadDb<'_>>,
     request: &AddressNamesPageRequest<'_>,

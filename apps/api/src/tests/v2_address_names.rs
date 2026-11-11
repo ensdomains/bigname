@@ -631,7 +631,7 @@ async fn v2_get_address_names_pages_through_large_finite_expiries() -> Result<()
     for (order, expected_names, expected_expiries) in [
         ("asc", ["shared-one.eth", "shared-two.eth", "gamma.eth", "beta.eth", "alpha.eth"],
             [1_862_006_400_i64, 1_862_006_400, 253_402_300_800, 253_402_300_801, 253_402_300_801]),
-        ("desc", ["beta.eth", "alpha.eth", "gamma.eth", "shared-one.eth", "shared-two.eth"],
+        ("desc", ["alpha.eth", "beta.eth", "gamma.eth", "shared-two.eth", "shared-one.eth"],
             [253_402_300_801_i64, 253_402_300_801, 253_402_300_800, 1_862_006_400, 1_862_006_400]),
     ] {
         let mut listed = Vec::new();
@@ -705,8 +705,8 @@ async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> 
     assert_eq!(
         names(expires_desc["data"].as_array().expect("expires desc data")),
         vec![
-            "shared-one.eth",
             "shared-two.eth",
+            "shared-one.eth",
             "gamma.eth",
             "alpha.eth",
             "beta.eth"

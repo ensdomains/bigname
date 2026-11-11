@@ -24,6 +24,30 @@ impl Fixture {
         .fetch_optional(&self.pool)
         .await?;
         let (block, content_hash) = marker.unwrap_or_default();
+        // The reader serves only the chains whose publication it holds, and keys its pages by
+        // `resource_id`: no stored row is on a chain with no marker, and no listed row lacks one.
+        let unmarked: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT listing.chain_id FROM project_address_listing listing
+             WHERE NOT EXISTS (SELECT 1 FROM project_family_marker marker
+                               WHERE marker.chain_id = listing.chain_id)",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        ensure!(
+            unmarked.is_empty(),
+            "address listing rows on chains with no family marker: {unmarked:?}"
+        );
+        let unkeyed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM project_address_listing
+             WHERE chain_id = $1 AND listed AND resource_id IS NULL",
+        )
+        .bind(chain)
+        .fetch_one(&self.pool)
+        .await?;
+        ensure!(
+            unkeyed == 0,
+            "{chain} lists {unkeyed} address listing rows with no resource"
+        );
         if block.is_none() {
             let stored: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM project_address_listing WHERE chain_id = $1",
