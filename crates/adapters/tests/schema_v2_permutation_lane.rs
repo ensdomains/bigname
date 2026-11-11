@@ -5881,7 +5881,7 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             "a live re-registration, a third symptom",
             third,
             "",
-            live_again,
+            live_again.clone(),
             None,
         ),
         // TYR-525, a label registered back on a token id it left.
@@ -5903,7 +5903,7 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             "the resource dropped live, no label moved",
             dropped,
             dropped_text,
-            live_again.clone(),
+            live_again,
             None,
         ),
         // TYR-526.
