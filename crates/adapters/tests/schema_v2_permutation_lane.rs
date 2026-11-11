@@ -4996,15 +4996,15 @@ fn generated_registry_orders_are_reproducible_from_their_seed() -> Result<()> {
     Ok(())
 }
 
-/// The shapes the generated sweep counts but does not fail on, against the orders the open fix
-/// for TYR-510 lists: a label after `TokenResource`, with or without a pointer first, and a label
-/// over its own reservation. A label under another label's reservation, a label after pointers
-/// only, a second link of a registered token and a label after a released link keep no resource.
+/// The shapes the generated sweep must reach, against the orders the TYR-510 fix (#1420) lists: a
+/// label after `TokenResource`, with or without a pointer first, and a label over its own
+/// reservation. A label under another label's reservation, a label after pointers only, a second
+/// link of a registered token and a label after a released link keep no resource.
 #[test]
-fn registry_order_known_shapes_are_the_open_fix_orders() {
+fn registry_order_tyr_510_shapes_are_the_fix_orders() {
     use crate::permutation::registry_orders::{
         Action, Atom, Expiry, LABEL_OVER_RESERVATION, Pointer, Registry,
-        TOKEN_RESOURCE_BEFORE_LABEL, Token, known_shapes,
+        TOKEN_RESOURCE_BEFORE_LABEL, Token, tyr_510_shapes,
     };
     let registry = Registry::Declared;
     let token = Token {
@@ -5077,7 +5077,7 @@ fn registry_order_known_shapes_are_the_open_fix_orders() {
     ];
     for (actions, expected) in cases {
         assert_eq!(
-            known_shapes(&actions).into_iter().collect::<Vec<_>>(),
+            tyr_510_shapes(&actions).into_iter().collect::<Vec<_>>(),
             expected.into_iter().collect::<Vec<_>>(),
             "{actions:?}"
         );
@@ -5507,14 +5507,15 @@ fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result
     Ok(())
 }
 
-/// The sweep's known-finding tags fire on their tickets' orders and not on near misses, so a new
-/// divergence of the same kind still fails the sweep: a registration live when emitted that lapses
-/// later, a lapsed label renewed to an expiry that has still passed, a difference other than the
-/// hydration flag, a pointer token that was labelled first, and a single `TokenResource`.
+/// The sweep's known-finding tags fire only when both the order's shape and the failure's symptom
+/// are their ticket's, so a new divergence still fails the sweep. Near misses in shape: a
+/// registration live when emitted that lapses later, a lapsed label renewed to an expiry that has
+/// still passed, a pointer token transferred with no unregister, a single `TokenResource`. Near
+/// misses in symptom: each ticket's order with another kind of difference.
 #[test]
 fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     use crate::permutation::registry_orders::{
-        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522, TYR_525, TYR_526, Token,
+        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522_S_A3, TYR_525, TYR_526, Token,
         known_failure,
     };
     let registry = Registry::Announced;
@@ -5555,6 +5556,7 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
         token,
         to: Pointer::Announced,
     };
+    let unregister = Atom::Unregister { registry, token };
     let transfer = Atom::Transfer {
         registry,
         token,
@@ -5569,22 +5571,68 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
         },
         to: Pointer::Other(0),
     };
+    let flags = "live state differs from a restore at expiry_retirement_emitted";
     let stream = "the split replay derives a different event stream";
     let bindings = "the writer would reject a repeated surface_bindings row";
     let after = "an event's after_state differs between the whole pass and the split replay";
-    let pending = "after_state\n      whole={\"registry_hydration_pending\":true}\n   replayed={}";
+    let released = "only in the whole pass (1): x:RegistrationReleased:expiry:y:0";
+    let bound = "only in the whole pass (1): x:SurfaceBound:y:0";
+    let pending = "after_state\n      whole={\"a\":1,\"registry_hydration_pending\":true}\n   replayed={\"a\":1}";
+    let pending_and_more = "after_state\n      whole={\"a\":1,\"registry_hydration_pending\":true}\n   replayed={\"a\":2}";
+    let pending_on_replay = "after_state\n      whole={\"a\":1}\n   replayed={\"a\":1,\"registry_hydration_pending\":true}";
     let other = "after_state\n      whole={\"to\":\"0x01\"}\n   replayed={\"to\":\"0x02\"}";
+    let expired = vec![block(vec![register(Expiry::Past)])];
+    let released_pointer = vec![
+        block(vec![pointer]),
+        block(vec![unregister]),
+        block(vec![transfer]),
+    ];
+    let relinked = vec![block(vec![register(Expiry::Far), link]), block(vec![link])];
+    let relinked_after_release = vec![
+        block(vec![register(Expiry::Far), link]),
+        block(vec![unregister]),
+        block(vec![link]),
+    ];
     let cases = [
+        // TYR-525.
         (
-            "a registration already expired",
-            stream,
+            "an expired registration, retirement flags",
+            flags,
             "",
-            vec![block(vec![register(Expiry::Past)])],
+            expired.clone(),
             Some(TYR_525),
         ),
         (
-            "a registration live when emitted that lapses later",
+            "an expired registration, an expiry release",
             stream,
+            released,
+            expired.clone(),
+            Some(TYR_525),
+        ),
+        (
+            "an expired registration, another stream difference",
+            stream,
+            bound,
+            expired.clone(),
+            None,
+        ),
+        (
+            "an expired registration, an after-state difference",
+            after,
+            pending,
+            expired.clone(),
+            None,
+        ),
+        (
+            "an expired registration, a writer refusal",
+            bindings,
+            "",
+            expired,
+            None,
+        ),
+        (
+            "a registration live when emitted that lapses later",
+            flags,
             "",
             vec![
                 block(vec![register(Expiry::Lapses(0))]),
@@ -5594,7 +5642,7 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
         ),
         (
             "a live reservation cut to a passed expiry",
-            stream,
+            flags,
             "",
             vec![
                 block(vec![reserve(Expiry::Far)]),
@@ -5604,7 +5652,7 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
         ),
         (
             "a lapsed reservation renewed to an expiry that has still passed",
-            stream,
+            flags,
             "",
             vec![
                 block(vec![reserve(Expiry::Lapses(0))]),
@@ -5613,40 +5661,107 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             ],
             None,
         ),
+        // TYR-526.
         (
-            "a transfer of an unlabelled pointer token, hydration flag on one side",
+            "a released pointer token, the hydration flag",
             after,
             pending,
-            vec![block(vec![pointer]), block(vec![transfer])],
+            released_pointer.clone(),
             Some(TYR_526),
         ),
         (
-            "a transfer of an unlabelled pointer token, another difference",
-            after,
-            other,
-            vec![block(vec![pointer]), block(vec![transfer])],
-            None,
-        ),
-        (
-            "a transfer of a pointer token labelled first",
+            "a released pointer token labelled first, the hydration flag",
             after,
             pending,
             vec![
                 block(vec![register(Expiry::Far)]),
                 block(vec![pointer]),
+                block(vec![unregister]),
                 block(vec![transfer]),
             ],
+            Some(TYR_526),
+        ),
+        (
+            "a released pointer token, the flag and another field",
+            after,
+            pending_and_more,
+            released_pointer.clone(),
             None,
         ),
         (
-            "a second TokenResource for a linked token",
-            bindings,
-            "",
-            vec![block(vec![register(Expiry::Far), link]), block(vec![link])],
-            Some(TYR_522),
+            "a released pointer token, the flag on the split side",
+            after,
+            pending_on_replay,
+            released_pointer.clone(),
+            None,
         ),
         (
-            "a single TokenResource",
+            "a released pointer token, another field",
+            after,
+            other,
+            released_pointer.clone(),
+            None,
+        ),
+        (
+            "a released pointer token, a writer refusal",
+            bindings,
+            "",
+            released_pointer.clone(),
+            None,
+        ),
+        (
+            "a released pointer token, a stream difference",
+            stream,
+            released,
+            released_pointer,
+            None,
+        ),
+        (
+            "a pointer update and no unregister, the hydration flag",
+            after,
+            pending,
+            vec![block(vec![pointer]), block(vec![transfer])],
+            None,
+        ),
+        // S-A3. A second TokenResource for a token still holding its binding converges since
+        // #1425, so a refusal there is a new finding.
+        (
+            "a second TokenResource, a writer refusal",
+            bindings,
+            "",
+            relinked.clone(),
+            None,
+        ),
+        (
+            "a second TokenResource, a stream difference",
+            stream,
+            bound,
+            relinked.clone(),
+            None,
+        ),
+        (
+            "a second TokenResource, an after-state difference",
+            after,
+            pending,
+            relinked,
+            None,
+        ),
+        (
+            "a relink after a release, a writer refusal",
+            bindings,
+            "",
+            relinked_after_release.clone(),
+            Some(TYR_522_S_A3),
+        ),
+        (
+            "a relink after a release, a stream difference",
+            stream,
+            bound,
+            relinked_after_release,
+            None,
+        ),
+        (
+            "a single TokenResource, a writer refusal",
             bindings,
             "",
             vec![block(vec![register(Expiry::Far), link])],
