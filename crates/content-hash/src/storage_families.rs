@@ -202,6 +202,10 @@ pub(crate) const COMPOSITION_FILES: &[Classified] = &[
         LIFECYCLE,
     ),
     project(
+        "crates/storage/src/families/control/lifecycle/graveyard.rs",
+        LIFECYCLE,
+    ),
+    project(
         "crates/storage/src/families/control/lifecycle/laterals.rs",
         LIFECYCLE,
     ),
@@ -258,7 +262,6 @@ const READER_FILES: &[&str] = &[
     // The composed-row listings and the API-side topology enrichment (`batch::load`).
     "crates/storage/src/families/name/bound.rs",
     "crates/storage/src/families/name/bound_parity.rs",
-    "crates/storage/src/families/name/bound_walk.rs",
     "crates/storage/src/families/name/list.rs",
     "crates/storage/src/families/name/list/search_rows.rs",
     "crates/storage/src/families/name/list/search_test_support.rs",

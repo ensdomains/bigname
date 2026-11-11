@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::model::RawLogInput;
+use super::{catalog::Selected, model::RawLogInput};
 
 pub(super) fn stable_uuid(seed: &str) -> Uuid {
     let hash = keccak256(seed.as_bytes());
@@ -62,13 +62,32 @@ pub(super) fn namehash(labels: &[String]) -> String {
 }
 
 pub(super) fn namehash_raw<'a>(labels: impl DoubleEndedIterator<Item = &'a [u8]>) -> String {
-    let node = labels.rev().fold(B256::ZERO, |node, label| {
-        let mut input = [0u8; 64];
-        input[..32].copy_from_slice(node.as_slice());
-        input[32..].copy_from_slice(keccak256(label).as_slice());
-        keccak256(input)
-    });
+    let node = labels
+        .rev()
+        .fold(B256::ZERO, |node, label| child_namehash(node, label));
     format!("{node:#x}")
+}
+
+/// The node of the name with `label` under the name whose node is `parent`.
+pub(super) fn child_namehash(parent: B256, label: &[u8]) -> B256 {
+    let mut input = [0u8; 64];
+    input[..32].copy_from_slice(parent.as_slice());
+    input[32..].copy_from_slice(keccak256(label).as_slice());
+    keccak256(input)
+}
+
+/// Our limit on the labels of a name read from a log, set at the DNS wire bound: a DNS-encoded
+/// name fits in 255 bytes, so it has at most 127 labels, and 128 is the next power of two. The
+/// longest real names are far below it. A dot-separated name over the limit gets no name
+/// observation (`raw_name_observation`), and its event keeps the value. Interpreting it reads no
+/// name state, so dependency collection requests none. For an ENSv2 resolver's DNS-encoded name
+/// over the limit, collection requests the name's own node and none of its parents.
+pub(super) const MAX_NAME_SEGMENTS: usize = 128;
+
+/// Whether `raw_name` has more than `MAX_NAME_SEGMENTS` dot-separated segments. Every dot
+/// starts a segment, so an empty label between two dots counts too.
+pub(super) fn exceeds_name_segment_cap(raw_name: &[u8]) -> bool {
+    raw_name.iter().filter(|byte| **byte == b'.').count() >= MAX_NAME_SEGMENTS
 }
 
 pub(super) fn dns_encode(labels: &[String]) -> anyhow::Result<Vec<u8>> {
@@ -153,6 +172,46 @@ impl EventStringSelector {
             after_state.insert("raw_selector_key".to_owned(), raw_selector_key.clone());
         }
     }
+}
+
+/// The longest record key, in bytes, that a resolver record event may carry. Project stores the
+/// key in the primary keys of its record tables and in the text hydration order index. A
+/// PostgreSQL btree index row holds at most 2,704 bytes, and the widest of those rows carries
+/// about 200 bytes besides the key, so a longer key that does not compress cannot be stored.
+///
+/// The bound applies to the formatted key as it is stored (`text:{key}`, `text_opaque:0x{hex}`,
+/// `data:{key}`, `dns:{resource}:0x{hex}`), not to the raw key in the log: an opaque key is
+/// stored as hex and doubles in length. `str::len` counts UTF-8 bytes, as PostgreSQL's
+/// `octet_length` does. The longest record key set on mainnet is 2,126 bytes, so every key in
+/// use keeps updating under its own key.
+pub(super) const MAX_RECORD_KEY_BYTES: usize = 2_400;
+
+/// Whether `record_key` is longer than [`MAX_RECORD_KEY_BYTES`], logging one warning when it is.
+/// The caller then skips the log as it skips one whose indexed key is not the hash of its key:
+/// no record event, no substitute key and no row.
+pub(super) fn record_key_over_cap(
+    selected: &Selected,
+    raw: &RawLogInput,
+    record_family: &str,
+    record_key: &str,
+) -> bool {
+    if record_key.len() <= MAX_RECORD_KEY_BYTES {
+        return false;
+    }
+    tracing::warn!(
+        chain_id = %raw.chain_id,
+        block_number = raw.block_number,
+        block_hash = %raw.block_hash,
+        transaction_hash = %raw.transaction_hash,
+        log_index = raw.log_index,
+        emitting_address = %raw.emitting_address,
+        source_family = %selected.source.source_family,
+        event = %selected.event.name,
+        record_family = %record_family,
+        record_key_bytes = record_key.len(),
+        "resolver record key is longer than 2400 bytes; log skipped, no record written"
+    );
+    true
 }
 
 pub(super) fn event_string_selector(record_family: &str, raw_key: &[u8]) -> EventStringSelector {

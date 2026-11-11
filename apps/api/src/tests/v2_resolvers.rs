@@ -155,7 +155,7 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     );
 
     assert_eq!(
-        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
+        bigname_storage::families::name::assert_bound_name_pages_chain(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
             .await?,
         ["alpha.eth", "beta.eth"]
     );
@@ -278,7 +278,7 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
     .await?;
     assert_eq!(body["data"]["bound_names"]["data"], json!([]));
     assert!(
-        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
+        bigname_storage::families::name::assert_bound_name_pages_chain(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
             .await?
             .is_empty()
     );
@@ -342,7 +342,7 @@ async fn v2_get_resolver_omits_a_released_name_from_bound_names() -> Result<()> 
     .await?;
     assert_eq!(body["data"]["bound_names"]["data"], json!([]));
     assert!(
-        bigname_storage::families::name::assert_bound_names_match_the_walk(
+        bigname_storage::families::name::assert_bound_name_pages_chain(
             &database.pool,
             "ethereum-mainnet",
             "0x0000000000000000000000000000000000000abc",
@@ -394,7 +394,7 @@ async fn v2_get_resolver_lists_a_root_registry_pointer_without_projected_authori
         vec!["eth"]
     );
     assert_eq!(
-        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", ROUND2_RESOLVER, None).await?,
+        bigname_storage::families::name::assert_bound_name_pages_chain(&database.pool, "ethereum-mainnet", ROUND2_RESOLVER, None).await?,
         ["eth"]
     );
     database.cleanup().await
@@ -506,7 +506,7 @@ async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Resu
     .await?;
     assert_eq!(body["data"]["bound_names"]["data"], json!([]));
     assert!(
-        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
+        bigname_storage::families::name::assert_bound_name_pages_chain(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
             .await?
             .is_empty()
     );
@@ -570,7 +570,7 @@ async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported()
     .await?;
     assert_eq!(body["data"]["bound_names"]["data"], json!([]));
     assert!(
-        bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
+        bigname_storage::families::name::assert_bound_name_pages_chain(&database.pool, "ethereum-mainnet", V2_RESOLVER_ADDRESS, None)
             .await?
             .is_empty()
     );
@@ -600,7 +600,7 @@ async fn v2_get_resolver_includes_ownerless_name_when_bindings_are_supported() -
         (Some("ens"), vec![]),
     ] {
         assert_eq!(
-            bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, "base-mainnet", V2_RESOLVER_ADDRESS, namespace)
+            bigname_storage::families::name::assert_bound_name_pages_chain(&database.pool, "base-mainnet", V2_RESOLVER_ADDRESS, namespace)
                 .await?,
             listed,
             "{namespace:?}"
@@ -725,7 +725,7 @@ async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Res
 
     for (chain, listed) in [("ethereum-mainnet", "alpha.eth"), ("base-mainnet", "beta.base.eth")] {
         assert_eq!(
-            bigname_storage::families::name::assert_bound_names_match_the_walk(&database.pool, chain, V2_RESOLVER_ADDRESS, None).await?,
+            bigname_storage::families::name::assert_bound_name_pages_chain(&database.pool, chain, V2_RESOLVER_ADDRESS, None).await?,
             [listed],
             "{chain}"
         );

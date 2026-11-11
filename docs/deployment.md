@@ -6356,3 +6356,221 @@ families. The composition pass derives every row in the names stream.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
+
+## A hydrated name or text value with a NUL byte is a failed read
+
+The build that treats a resolver's NUL-bearing answer as a failed read changes
+`crates/lookup/src/reverse_names.rs` and `crates/lookup/src/text_records.rs`, the decoders of
+Ethereum Mainnet's text and reverse-name [hydration](glossary.md#hydration) reads (see
+[follow-only hydration](projections.md#follow-only-hydration)).
+
+What changes for names and reverse records:
+
+- A name owner can set a text record, and an address owner its reverse name, to a string
+  containing a NUL byte
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105-L132 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f).
+  PostgreSQL text and jsonb cannot store a NUL. Before, when the head
+  block's hydration read returned such a value, the block's write was refused and that chain's
+  Project stopped, once under the supervised runner and again after every restart.
+- Now that read is a failed read, the same outcome as a malformed return. No value is written,
+  the failure is counted in `hydration_failures` or `attempt_failures`, and the selector waits
+  out the 7,200-block failed-read retry delay. The block publishes.
+- The API serves the event-derived baseline for that record or reverse record, as for any
+  failed read. A value without a NUL byte, an empty answer and a malformed return are read as
+  before.
+- Verified lookups do not change. Their record decoder is not one of these two.
+
+Both files are inputs of the [projection content hash](glossary.md#projection-content-hash)
+only, so the build rotates it for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate. An existing
+deployment needs one full-range Project redo and no Interpret redo, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. It finishes that Project redo before the matching API serves, as the
+[handoff](#phase-runner-configuration) describes.
+
+It adds no table, schema-migration, manifest or setting. The manifest-authority fingerprint and
+the compiled watch plan are unchanged, so stamp no Interpret or Ingest redo.
+
+## Names the ENSv2 Graveyard holds are released
+
+The build that serves a name the admitted ENSv2 Graveyard holds as an ended registration
+([Graveyard-held names](api-v1.md#graveyard-held-names)) changes the lifecycle composition
+(`crates/storage/src/families/control/lifecycle/`). It rotates the
+[projection content hash](glossary.md#projection-content-hash) for every chain. The
+[interpreter content hash](glossary.md#interpreter-content-hash) does not rotate.
+
+What changes for names:
+
+- A `.eth` second-level name the Graveyard claimed, and a subname it cleared, serve `status`
+  `released` with `expires_at: null` and `expires_at_reason: released`, no `grace_ends_at`, no
+  `ens_v1.expires_at`, no `owner` and no `manager`. Before, such a name served `active` with no
+  owner and no expiry, or `released` with its old lease expiry.
+- Its `lapsed_registration` names its holder before the claim, released at the claim's block, so
+  that holder lists it under `relation=former_owner`. Before, only a name with a retained
+  release of its lease carried the block.
+- It leaves the expiry listing of `GET /v1/names`. Its parent's subnames page left it out before
+  and still does.
+- A name on the `ens_v2` arm, including a label registered in ENSv2 after a claim, is unchanged.
+
+These rows arrive through re-derivation. Every chain needs one full-range Project redo and no
+Interpret redo, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary)
+under matching runner and API binaries. The change rides the next release that redoes
+Project and shares that release's Project redo. Do not mark old rows ready under the new
+hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo. No schema-migration is included.
+
+## The bound-name walk leaves the test build
+
+The build that deletes the walk the bound-name listing replaced
+(`crates/storage/src/families/name/bound_walk.rs`) changes no code that runs and no stored row.
+The walk was compiled only for tests. Its module line is in
+`crates/storage/src/families/name/mod.rs`, an input of the name summary composition. The build
+also edits a comment in `crates/storage/src/families/topology/shims.rs`, an input of the child
+listing composition.
+
+- The [projection content hash](glossary.md#projection-content-hash) rotates for every chain,
+  although no derived row changes. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not rotate. Every chain
+  needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next release that redoes Project and shares that release's
+  Project redo.
+- It adds no schema-migration, table or setting.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+Interpret or Ingest redo.
+
+## Token lineage on a registered reservation
+
+The build that carries the [token lineage](glossary.md#token-lineage) in an ENSv2 registration
+that confirms an earlier reservation changes
+`crates/adapters/src/schema_v2/protocol/v2_registry.rs` and
+`crates/adapters/src/schema_v2/state_v2.rs`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain, and the
+projection content hash follows through it.
+
+What changes:
+
+- A `RegistrationGranted` from `LabelRegistered` for a label the registry had reserved carries
+  the reservation's `token_lineage_id` in its `after_state`, beside the `upstream_resource` and
+  `resource_id` it already carried.
+- Interpret restores a token's lineage from that row. Before, the restore of such a row cleared
+  the lineage the reservation row had restored. The next transfer or token regeneration for
+  that token after a restore then named its resource with no lineage. The writer refused the
+  row as a data-integrity error and Interpret stopped on that chain. A
+  restore happens at every batch boundary under the
+  [lookahead loader](glossary.md#lookahead-loader), at a process start and at a redo's first
+  batch.
+- A restore no longer clears a reservation's lineage when an older registration row names the
+  same resource without the key, or with a null one. A row that names a different resource
+  still attaches it with no lineage.
+- A registry whose registration also emits `TokenResource`, as the deployed PermissionedRegistry
+  does, was not affected
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L466-L472 @ ens_v2@a971bd64).
+- `/v1/diagnostics/events` shows the new key in those events' `after_state`. What the API serves
+  for names and registrations is otherwise unchanged.
+
+Rows written by an older build lack the key. They are rewritten by re-derivation, not in place.
+An existing deployment finishes the full-range Interpret redo and then the stamped Project redo
+it installs before the matching API serves, as the [handoff](#phase-runner-configuration)
+describes, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+matching runner and API binaries. The change rides the next re-derivation release and shares
+that release's one Interpret and Project redo pair with its other hash-rotating changes. Do not
+mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.
+
+## Names of more than 128 labels
+
+The build that hashes a name and its parents in one pass, and observes no dot-separated name of
+more than 128 labels ([architecture](architecture.md#normalization-and-preimage-observation),
+[storage semantics](storage.md#interpret-process-memory)), changes `crates/adapters/src`. It
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes for names:
+
+- A resolver `NameChanged`, a reverse registrar `NameForAddrChanged` or an ENSv2 resolver
+  `NameUpdated` whose name has more than 128 dot-separated labels yields no preimage
+  observation and no shadow name surface. Its `RecordChanged` row still carries the value.
+- An ENSv2 resolver's DNS-encoded name of more than 128 labels is still observed. Lookahead
+  dependency collection requests only that name's own node for it.
+- A name of at most 128 labels, which every DNS-encodable name is, is interpreted exactly as
+  before. So is every name a declared NameWrapper's `NameWrapped` carries.
+
+An existing deployment finishes the full-range Interpret redo and then the stamped Project redo
+it installs before the matching API serves, as the [handoff](#phase-runner-configuration)
+describes, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+matching runner and API binaries. The change rides the next re-derivation release and shares
+that release's one Interpret and Project redo pair with its other hash-rotating changes. Do not
+mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.
+
+## Token lineage on ENSv2 registry role changes
+
+The build that carries the [token lineage](glossary.md#token-lineage) in ENSv2 registry role
+changes changes `crates/adapters/src/schema_v2/protocol/v2_registry/transfer.rs`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes:
+
+- A registry `PermissionChanged` from `EACRolesChanged` now carries its resource's
+  `token_lineage_id` in its `after_state`. A `RootPermissionChanged` carries the key as null,
+  since the root resource has no token lineage.
+- Interpret learns which token lineages earlier batches wrote from that key when it restores its
+  state. A restore happens at every batch boundary under the
+  [lookahead loader](glossary.md#lookahead-loader), at a process start and at a redo's first
+  batch. Before, a role change on a resource no token was linked to wrote the lineage, and the
+  next role change or `TokenResource` for that resource after a restore wrote it again at a
+  later block. The writer refused the second row as a data-integrity error and Interpret stopped
+  on that chain.
+- `/v1/diagnostics/events` shows the new key in those events' `after_state`. What the API
+  serves for roles, names and registrations is otherwise unchanged.
+
+Rows written by an older build lack the key. They are rewritten by re-derivation, not in place.
+An existing deployment finishes the full-range Interpret redo, then the Project redo it installs,
+before the matching API serves, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. The change shares that release's one Interpret and Project redo pair with its other
+hash-rotating changes.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.
+
+## Resolver record keys longer than 2,400 bytes
+
+The build that skips a resolver record log whose stored record key would be longer than 2,400
+bytes ([architecture](architecture.md#record_inventory),
+[known divergence](upstream.md#record-key-length-limit)) changes `crates/adapters/src`. It
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+The [projection content hash](glossary.md#projection-content-hash) includes it, so that
+rotates too.
+
+What changes for names:
+
+- A text, data or DNS record write whose stored key would be longer than 2,400 bytes yields no
+  `RecordChanged`. That covers `TextChanged`, `DataChanged`, `DNSRecordChanged` and
+  `DNSRecordDeleted` from an ENSv1 or Basenames resolver, `TextChanged` from a PublicResolverV2
+  or any other ENSv2 resolver, and an ENSv2 record-ID resolver's `TextUpdated` and
+  `DataUpdated`. Interpret logs one `WARN` naming the log, its emitter and the key's length, and
+  the batch continues.
+- Before this build, such a write with a key that does not compress stopped Project at its
+  block.
+- Every key of at most 2,400 bytes is interpreted exactly as before. The longest record key set
+  on mainnet is about 2.1 KB.
+
+An existing deployment finishes the full-range Interpret redo and then the stamped Project redo
+it installs before the matching API serves, as the [handoff](#phase-runner-configuration)
+describes, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+matching runner and API binaries. The change rides the next re-derivation release and shares
+that release's one Interpret and Project redo pair with its other hash-rotating changes. Do not
+mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.

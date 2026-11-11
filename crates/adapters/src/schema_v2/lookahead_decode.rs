@@ -7,7 +7,10 @@ use crate::{
     evm_abi::{decode_event_log, decode_event_log_data_as, hex_string},
     schema_v2::{
         catalog::Selected,
-        common::{decode_dns_labels, namehash_raw},
+        common::{
+            MAX_NAME_SEGMENTS, child_namehash, decode_dns_labels, exceeds_name_segment_cap,
+            namehash_raw,
+        },
         model::RawLogInput,
         protocol::v1::{
             authority_transition::child_node,
@@ -35,18 +38,37 @@ fn topic(raw: &RawLogInput, index: usize) -> anyhow::Result<B256> {
         .context("invalid dependency topic")
 }
 
-fn labels(
+/// Requests the node of the name `labels` spell and of each of its parents, the root included.
+/// Folding from the root hashes each label once, so the cost is linear in the label count.
+fn labels<'a>(
     dependencies: &mut V1BatchDependencies,
     namespace: &str,
-    labels: &[Vec<u8>],
+    labels: impl DoubleEndedIterator<Item = &'a [u8]>,
 ) -> anyhow::Result<()> {
-    for start in 0..=labels.len() {
-        dependencies.node(
-            namespace,
-            &namehash_raw(labels[start..].iter().map(Vec::as_slice)),
-        )?;
+    let mut node = B256::ZERO;
+    dependencies.node(namespace, &format!("{node:#x}"))?;
+    for label in labels.rev() {
+        node = child_namehash(node, label);
+        dependencies.node(namespace, &format!("{node:#x}"))?;
     }
     Ok(())
+}
+
+/// A dot-separated name from a log. Interpretation observes no name over the cap
+/// (`raw_name_observation`), so such a name requests nothing.
+fn dotted_name(
+    dependencies: &mut V1BatchDependencies,
+    namespace: &str,
+    raw_name: &[u8],
+) -> anyhow::Result<()> {
+    if exceeds_name_segment_cap(raw_name) {
+        return Ok(());
+    }
+    labels(
+        dependencies,
+        namespace,
+        raw_name.split(|byte| *byte == b'.'),
+    )
 }
 
 pub(super) fn collect(
@@ -102,7 +124,7 @@ pub(super) fn collect(
                         name.push(b"base".to_vec());
                     }
                     name.push(b"eth".to_vec());
-                    labels(out, namespace, &name)?;
+                    labels(out, namespace, name.iter().map(Vec::as_slice))?;
                     hash
                 };
                 out.node(namespace, &registrar_namehash(selected, label))?;
@@ -123,8 +145,10 @@ pub(super) fn collect(
                     &raw.data,
                     "NameWrapped log is malformed",
                 )?;
+                // Not capped: only the declared wrapper is selected for this event, and the
+                // fold keeps its cost linear.
                 let raw_labels = decode_dns_labels(&event.name)?;
-                labels(out, namespace, &raw_labels)?;
+                labels(out, namespace, raw_labels.iter().map(Vec::as_slice))?;
                 out.node(namespace, &hex_string(event.node))?;
             }
             "NameUnwrapped" | "ExpiryExtended" | "FusesSet" => {
@@ -168,15 +192,7 @@ pub(super) fn collect(
                         &selected.event.topic0,
                         "NameChanged log is malformed",
                     )?;
-                    labels(
-                        out,
-                        namespace,
-                        &decoded
-                            .name
-                            .split(|b| *b == b'.')
-                            .map(<[u8]>::to_vec)
-                            .collect::<Vec<_>>(),
-                    )?;
+                    dotted_name(out, namespace, &decoded.name)?;
                 }
             }
             _ => unsupported(out, selected),
@@ -190,15 +206,7 @@ pub(super) fn collect(
                     &selected.event.topic0,
                     "NameForAddrChanged log is malformed",
                 )?;
-                labels(
-                    out,
-                    namespace,
-                    &event
-                        .name
-                        .split(|b| *b == b'.')
-                        .map(<[u8]>::to_vec)
-                        .collect::<Vec<_>>(),
-                )?;
+                dotted_name(out, namespace, &event.name)?;
             }
             _ => unsupported(out, selected),
         },
@@ -237,7 +245,8 @@ pub(super) fn collect(
                     "migration bridge NameRenewed log is malformed",
                 )?;
                 // The bridge renews `.eth` names only (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/interfaces/IETHRenewer.sol:L15 @ ens_v2_sepolia_20260916@366de741).
-                labels(out, namespace, &[decoded.label.to_vec(), b"eth".to_vec()])?;
+                let label: &[u8] = &decoded.label;
+                labels(out, namespace, [label, b"eth".as_slice()].into_iter())?;
             }
             _ => unsupported(out, selected),
         },
@@ -268,15 +277,7 @@ fn v2_resolver(
                 &selected.event.topic0,
                 "NameChanged log is malformed",
             )?;
-            labels(
-                out,
-                namespace,
-                &decoded
-                    .name
-                    .split(|b| *b == b'.')
-                    .map(<[u8]>::to_vec)
-                    .collect::<Vec<_>>(),
-            )?;
+            dotted_name(out, namespace, &decoded.name)?;
         }
         "NamedResource" | "NamedAddrResource" | "NamedTextResource" | "Linked" => {
             let (topics, data, topic0) = (&raw.topics, &raw.data, &selected.event.topic0);
@@ -299,7 +300,14 @@ fn v2_resolver(
             if let Ok(raw_labels) = decode_dns_labels(&name)
                 && !raw_labels.is_empty()
             {
-                labels(out, namespace, &raw_labels)?;
+                let raw_labels = raw_labels.iter().map(Vec::as_slice);
+                // Any address can emit these. Over the cap, request only the node that
+                // interpretation's observation of the name reads.
+                if raw_labels.len() > MAX_NAME_SEGMENTS {
+                    out.node(namespace, &namehash_raw(raw_labels))?;
+                } else {
+                    labels(out, namespace, raw_labels)?;
+                }
             }
         }
         "ResolverCreated" | "AddressUpdated" | "ContenthashUpdated" | "ABIUpdated"
