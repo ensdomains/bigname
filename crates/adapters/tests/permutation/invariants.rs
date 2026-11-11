@@ -720,8 +720,15 @@ fn session_difference(live: &AdapterSession, restored: &AdapterSession) -> Strin
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let at = |lines: &[&str]| {
+        lines
+            .get(prefix)
+            .map_or_else(|| "<end>".to_owned(), |line| line.trim().to_owned())
+    };
     format!(
-        "\n    live:\n{}\n    restored:\n{}",
+        "\n    first difference:\n      live     {}\n      restored {}\n    live:\n{}\n    restored:\n{}",
+        at(&live),
+        at(&restored),
         window(&live),
         window(&restored)
     )
