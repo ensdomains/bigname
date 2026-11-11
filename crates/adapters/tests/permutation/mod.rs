@@ -6,6 +6,7 @@ pub mod names;
 pub mod pool_v1;
 pub mod pool_v1_sepolia;
 pub mod pool_v2;
+pub mod registry_orders;
 pub mod rng;
 pub mod scenario;
 pub mod world;
