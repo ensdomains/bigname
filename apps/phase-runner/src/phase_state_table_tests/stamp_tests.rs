@@ -412,3 +412,70 @@ async fn required_ingest_copy_stamps_and_rewrites_ownership() -> Result<()> {
     expect_unchanged(&before, &read(pool, chain, ingest).await?)?;
     scratch.cleanup().await
 }
+
+#[tokio::test]
+async fn the_project_stamp_after_an_interpret_redo_is_unclipped_and_extend_keeps_a_higher_end()
+-> Result<()> {
+    let scratch = Scratch::create("phase_state_unclipped_stamp").await?;
+    let pool = scratch.pool();
+    let project = PhaseName::Project;
+
+    // Project at 60 on another projection content hash, Ingest complete through 100, the first
+    // ingested block 10: an Interpret redo's completion stamps Project over 10..=100, above its
+    // cursor, through `stamp_unclipped_in_transaction` (`redo_hash_adoption.rs:150-160`).
+    let chain = "unclipped-project";
+    seed(
+        pool,
+        chain,
+        &[
+            completed(chain, PhaseName::Ingest),
+            completed(chain, PhaseName::Interpret),
+            completed(chain, project)
+                .set("current_block_number", json!(60))
+                .set("current_block_hash", json!("h60"))
+                .set("target_block_number", json!(60))
+                .set("target_block_hash", json!("h60"))
+                .set("input_content_hash", json!("old-projection-hash")),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO ingest_cursors (chain_id, source_key, source_kind, seed_basis,
+                                     start_block_number, next_block_number)
+         VALUES ($1, 'rpc', 'rpc', 'ethereum_head', 10, 101)",
+    )
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    let before = read(pool, chain, project).await?;
+    let mut transaction = pool.begin().await?;
+    ensure!(
+        crate::redo_hash_adoption::stamp_project_after_interpret(
+            &mut transaction,
+            chain,
+            BlockRange { from: 20, to: 30 },
+            None,
+        )
+        .await?
+    );
+    transaction.commit().await?;
+    let after = read(pool, chain, project).await?;
+    expect_state(&after, State::RequiredPending)?;
+    ensure!(range(&after) == (json!(10), json!(100)), "{after}");
+    ensure!(after["redo_requested_from_block_number"] == json!(10));
+    ensure!(after["redo_requested_to_block_number"] == json!(100));
+    ensure!(after["current_block_number"] == json!(60));
+    unchanged_except(&before, &after, writes::CREATE_STAMP)?;
+
+    // A later clipped stamp on that redo: the new end is clipped to 60, and the recorded end
+    // above the cursor stays (`redo_stamp.rs:222-228`).
+    let before = after;
+    ensure!(stamp(pool, chain, project, 20).await?);
+    let after = read(pool, chain, project).await?;
+    expect_state(&after, State::RequiredPending)?;
+    ensure!(range(&after) == (json!(10), json!(100)), "{after}");
+    ensure!(after["redo_requested_to_block_number"] == json!(100));
+    ensure!(after["redo_attempt_generation"] == json!(2));
+    unchanged_except(&before, &after, writes::EXTEND_STAMP)?;
+    scratch.cleanup().await
+}
