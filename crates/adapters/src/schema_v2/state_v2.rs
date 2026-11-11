@@ -95,16 +95,16 @@ impl State {
         let token_key = v2_key(&emitter, token_id);
         let mut replaced = Vec::new();
         let previous = self.v2_tokens.remove(&token_key);
-        let retained_reservation_resource = previous.as_ref().filter(|previous| {
+        // Keeps the label's reservation resource, or a link made before any label, as a restore does.
+        let retained = previous.as_ref().filter(|previous| {
+            let label = previous.raw_label.as_deref();
             previous.registration.is_none()
                 && registration.is_some()
-                && previous.raw_label.as_deref() == Some(raw_label)
+                && label.is_none_or(|label| label == raw_label)
         });
-        let upstream_resource =
-            retained_reservation_resource.and_then(|previous| previous.upstream_resource.clone());
-        let resource_id = retained_reservation_resource.and_then(|previous| previous.resource_id);
-        let token_lineage_id =
-            retained_reservation_resource.and_then(|previous| previous.token_lineage_id);
+        let upstream_resource = retained.and_then(|previous| previous.upstream_resource.clone());
+        let resource_id = retained.and_then(|previous| previous.resource_id);
+        let token_lineage_id = retained.and_then(|previous| previous.token_lineage_id);
         if let Some(previous) = previous.as_ref() {
             if previous.resolver.is_some() {
                 self.set_v2_resolver_token_index(&emitter, token_id, false);
@@ -116,12 +116,10 @@ impl State {
             if let Some(subregistry) = previous.subregistry.as_deref() {
                 self.mark_v2_registry_dirty(subregistry);
             }
-        }
-        if let Some(previous) = previous.as_ref()
-            && let Some(previous_label) = previous.raw_label.as_ref()
-        {
-            self.v2_entry_by_parent_label
-                .remove(&(emitter.clone(), previous_label.clone()));
+            if let Some(previous_label) = previous.raw_label.as_ref() {
+                self.v2_entry_by_parent_label
+                    .remove(&(emitter.clone(), previous_label.clone()));
+            }
         }
         if let Some(previous) = previous {
             replaced.push((token_id.to_owned(), previous));
@@ -301,6 +299,8 @@ impl State {
         self.replace_v2_expiry_index(&key, previous_expiry, Some(expiry));
         self.mark_v2_token_component_dirty(&key);
     }
+    /// Replaces a registered token's registration. A reservation, which has none, keeps none.
+    #[rustfmt::skip]    pub(in crate::schema_v2) fn set_v2_registration(&mut self, emitter: &str, token_id: &str, registration: Value) { if let Some(entry) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) && entry.registration.is_some() { entry.registration = Some(registration); } }
     #[rustfmt::skip]    pub(in crate::schema_v2) fn clear_v2_expiry_retirement(&mut self, emitter: &str, token_id: &str, preserve_ancestor_expiry: bool) { if let Some(entry) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) && (!preserve_ancestor_expiry || entry.resource_expiry_retirement_emitted) { entry.expiry_retirement_emitted = false; entry.resource_expiry_retirement_emitted = false; } }
     pub(in crate::schema_v2) fn transfer_v2_registrant(
         &mut self,
