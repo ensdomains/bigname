@@ -5459,6 +5459,7 @@ fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result
 /// registration live when emitted that lapses later, a lapsed label renewed to an expiry that has
 /// still passed, a pointer token transferred with no unregister, a single `TokenResource`. Near
 /// misses in symptom: each ticket's order with another kind of difference.
+#[test]
 fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     use crate::permutation::registry_orders::{
         Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522, TYR_522_S_A3, TYR_525, TYR_526,
