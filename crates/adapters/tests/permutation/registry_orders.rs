@@ -104,16 +104,20 @@ pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L460 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222-L224 @ ens_v2@a971bd64).
 pub const TYR_525: &str = "TYR-525";
-/// TYR-526: a pointer update or unregister on a token that was never registered, then a transfer
-/// of it. Only the whole pass marks the transfer's registry state as pending hydration.
+/// TYR-526: a pointer update and an unregister of a token, with or without a label, then a
+/// transfer of it. Only the whole pass marks the transfer's registry state as pending hydration.
 pub const TYR_526: &str = "TYR-526";
 
-const TYR_525_KINDS: [&str; 4] = [
-    "live state differs from a restore at expiry_retirement_emitted",
-    "live state differs from a restore at resource_expiry_retirement_emitted",
-    "batch-boundary artifact {\"rebased_attributions\"",
-    "the split replay derives a different event stream",
-];
+/// TYR-525's symptoms: the expiry retirement flags differ between live state and a restore, the
+/// split replay re-attributes an event, or the two passes release a registration on expiry
+/// differently.
+fn tyr_525_symptom(signature: &str, text: &str) -> bool {
+    signature == "live state differs from a restore at expiry_retirement_emitted"
+        || signature == "live state differs from a restore at resource_expiry_retirement_emitted"
+        || signature == "batch-boundary artifact {\"rebased_attributions\": 1}"
+        || (signature == "the split replay derives a different event stream"
+            && text.contains(":RegistrationReleased:expiry:"))
+}
 
 /// The open ticket a failure belongs to, judged on its kind, the failure text and the order's
 /// shape in the layout it failed in. A kind alone never tags: each ticket names an order.
@@ -132,14 +136,12 @@ pub fn known_failure(
             TYR_522
         });
     }
-    if TYR_525_KINDS.iter().any(|kind| signature.starts_with(kind))
-        && emits_a_passed_or_live_label(actions, layout)
-    {
+    if tyr_525_symptom(signature, text) && emits_a_passed_or_live_label(actions, layout) {
         return Some(TYR_525);
     }
     if signature.starts_with("an event's after_state differs")
-        && only_one_side_is_pending_hydration(text)
-        && transfers_an_unlabelled_pointer_token(actions)
+        && only_the_whole_pass_is_pending_hydration(text)
+        && transfers_a_released_pointer_token(actions)
     {
         return Some(TYR_526);
     }
@@ -273,42 +275,56 @@ fn emits_a_passed_or_live_label(actions: &[Action], layout: Layout) -> bool {
     false
 }
 
-/// The whole pass's and the split replay's after states of the diverging event, of which exactly
-/// one marks the registry state as pending hydration.
-fn only_one_side_is_pending_hydration(text: &str) -> bool {
-    let side = |marker: &str| {
-        text.lines()
-            .find(|line| line.trim_start().starts_with(marker))
-            .is_some_and(|line| line.contains("\"registry_hydration_pending\":true"))
+/// The diverging event's after states differ only in the whole pass marking the registry state as
+/// pending hydration.
+fn only_the_whole_pass_is_pending_hydration(text: &str) -> bool {
+    let (Some(whole), Some(replayed)) =
+        (after_state(text, "whole="), after_state(text, "replayed="))
+    else {
+        return false;
     };
-    side("whole=") != side("replayed=")
+    let flag = "\"registry_hydration_pending\":true";
+    [format!("{flag},"), format!(",{flag}")]
+        .iter()
+        .any(|cut| whole.contains(cut.as_str()) && whole.replacen(cut.as_str(), "", 1) == replayed)
 }
 
-/// A transfer of a token whose registry updated a pointer on it, with no label event on it before.
-fn transfers_an_unlabelled_pointer_token(actions: &[Action]) -> bool {
-    let mut labelled = BTreeSet::new();
+fn after_state<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    text.lines()
+        .find_map(|line| line.trim_start().strip_prefix(marker))
+}
+
+/// A transfer of a token after its registry updated a pointer on it and unregistered it, with or
+/// without a label. A label event after the unregister starts the token over.
+fn transfers_a_released_pointer_token(actions: &[Action]) -> bool {
     let mut pointed = BTreeSet::new();
+    let mut released = BTreeSet::new();
     for atom in atoms(actions) {
         match atom {
+            Atom::Resolver {
+                registry, token, ..
+            }
+            | Atom::Subregistry {
+                registry, token, ..
+            } => {
+                pointed.insert((registry, token));
+            }
+            Atom::Unregister { registry, token } => {
+                released.insert((registry, token));
+            }
             Atom::Register {
                 registry, token, ..
             }
             | Atom::Reserve {
                 registry, token, ..
             } => {
-                labelled.insert((registry, token));
-            }
-            Atom::Resolver {
-                registry, token, ..
-            }
-            | Atom::Subregistry {
-                registry, token, ..
-            } if !labelled.contains(&(registry, token)) => {
-                pointed.insert((registry, token));
+                released.remove(&(registry, token));
             }
             Atom::Transfer {
                 registry, token, ..
-            } if pointed.contains(&(registry, token)) => return true,
+            } if pointed.contains(&(registry, token)) && released.contains(&(registry, token)) => {
+                return true;
+            }
             _ => {}
         }
     }
