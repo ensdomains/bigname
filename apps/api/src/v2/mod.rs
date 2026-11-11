@@ -15,6 +15,8 @@ mod events;
 mod history;
 mod history_context;
 mod history_filters;
+#[cfg(test)]
+pub(crate) use history_filters::UNALIASED_RECORD_KEYS;
 pub(crate) mod history_keyset;
 mod history_values;
 mod list_cursor;

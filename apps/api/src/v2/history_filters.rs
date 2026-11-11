@@ -6,6 +6,14 @@ use super::params::parse_event_types;
 use super::vocab::HistoryEventTypeSet;
 use super::{QueryParams, V2Error, V2Result, product_history_event_kinds};
 
+/// The record keys producers store without a family prefix: the legacy content record, the
+/// content hash and the name. Every other stored key has one, such as `addr:60` or
+/// `text:avatar`, so a `record_key` with no colon outside this list is read as the text record
+/// `text:<key>`. A bare key a producer stores and this list lacks could no longer be asked for.
+/// `stored_bare_record_keys_are_the_unaliased_set` decodes every declared record event through
+/// the adapters and fails when one stores another bare key.
+pub(crate) const UNALIASED_RECORD_KEYS: [&str; 3] = ["content", "contenthash", "name"];
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct HistoryFilters {
     excluded_types: Option<HistoryEventTypeSet>,
@@ -43,7 +51,9 @@ impl HistoryFilters {
             })
             .transpose()?;
         // History keys are stored selectors, not profile lookup inputs. Preserve their exact
-        // decoded spelling, including commas, whitespace, and keys outside lookup's grammar.
+        // decoded spelling, including commas, whitespace, and keys outside lookup's grammar,
+        // apart from the text prefix of a bare key. The storage read and the cursor binding
+        // both carry the stored spelling.
         if record_key.as_deref() == Some("") {
             return Err(V2Error::invalid_input("record_key must not be empty"));
         }
@@ -55,7 +65,7 @@ impl HistoryFilters {
         Ok(Self {
             excluded_types,
             kinds,
-            record_key,
+            record_key: record_key.map(stored_record_key),
         })
     }
 
@@ -73,6 +83,16 @@ impl HistoryFilters {
 
     pub(crate) fn is_explicit(&self) -> bool {
         self.excluded_types.is_some() || self.kinds.is_some() || self.record_key.is_some()
+    }
+}
+
+/// The stored spelling of a requested `record_key`: `text:<key>` for a key with no colon that
+/// no producer stores bare, the key itself otherwise.
+fn stored_record_key(key: String) -> String {
+    if key.contains(':') || UNALIASED_RECORD_KEYS.contains(&key.as_str()) {
+        key
+    } else {
+        format!("text:{key}")
     }
 }
 
