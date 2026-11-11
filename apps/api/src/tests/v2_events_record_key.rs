@@ -139,6 +139,26 @@ fn rk_ids(identities: &[&str]) -> Vec<String> {
     identities.iter().map(|identity| hkw_id(identity)).collect()
 }
 
+/// The rows of `ids` this file's fixture wrote. The shared fixtures add record-version resets
+/// of their own names, which an unanchored read also lists.
+fn rk_only(ids: Vec<String>) -> Vec<String> {
+    let ours = rk_ids(&[
+        "rk-avatar-1",
+        "rk-addr",
+        "rk-avatar-2",
+        "rk-reset",
+        "rk-content",
+        "rk-avatar-3",
+        "rk-text-content",
+        "rk-contenthash",
+        "rk-name",
+        "rk-zonehash",
+        "rk-literal",
+        "rk-avatar-4",
+    ]);
+    ids.into_iter().filter(|id| ours.contains(id)).collect()
+}
+
 /// Every page of `base` one row at a time: the row ids and each page's next cursor.
 async fn rk_walk(database: &TestDatabase, base: &str) -> Result<(Vec<String>, Vec<String>)> {
     let mut ids = Vec::new();
@@ -176,9 +196,9 @@ async fn bare_text_record_keys_read_the_text_record_on_every_route() -> Result<(
         let stored = format!("{route}&record_key=text:avatar&order=asc");
         let bare = format!("{route}&record_key=avatar&order=asc");
         let (ids, _) = hkw_baseline(&database, &stored).await?;
-        assert_eq!(ids, expected, "{stored}");
+        assert_eq!(rk_only(ids.clone()), expected, "{stored}");
         let (bare_ids, _) = hkw_baseline(&database, &bare).await?;
-        assert_eq!(bare_ids, expected, "{bare}");
+        assert_eq!(bare_ids, ids, "{bare}");
         assert_eq!(
             rk_walk(&database, &bare).await?,
             rk_walk(&database, &stored).await?,
@@ -220,7 +240,7 @@ async fn record_key_spellings_stay_exact_apart_from_the_text_alias() -> Result<(
         for (key, identities) in cases {
             let uri = format!("{route}&record_key={key}&order=asc");
             let (ids, _) = hkw_baseline(&database, &uri).await?;
-            assert_eq!(ids, rk_ids(identities), "{uri}");
+            assert_eq!(rk_only(ids), rk_ids(identities), "{uri}");
         }
     }
     database.cleanup().await
@@ -230,10 +250,15 @@ async fn record_key_spellings_stay_exact_apart_from_the_text_alias() -> Result<(
 async fn record_key_cursors_bind_the_canonical_spelling() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     rk_seed(&database).await?;
-    let second = rk_ids(&["rk-avatar-2"]);
     for route in rk_routes() {
         let stored = format!("{route}&record_key=text:avatar&order=asc&page_size=1");
         let bare = format!("{route}&record_key=avatar&order=asc&page_size=1");
+        let (ids, _) = hkw_baseline(
+            &database,
+            &format!("{route}&record_key=text:avatar&order=asc"),
+        )
+        .await?;
+        let second = ids[1..2].to_vec();
         // A cursor issued under either spelling continues under the other.
         for (issued, continued) in [(&bare, &stored), (&stored, &bare)] {
             let cursor = hk_next_cursor(&hk_ok(&database, issued).await?)?;
@@ -337,7 +362,8 @@ async fn unanchored_record_key_events_match_the_plain_statement() -> Result<()> 
 /// Every record key a producer stores without a colon is one the bare-key alias leaves alone,
 /// and every key the alias leaves alone is one a producer stores. Each event a checked-in
 /// manifest declares as `RecordChanged` is decoded from a synthetic log through the adapters,
-/// from each declared contract the event may come from and from an undeclared address.
+/// with every manifest of its chain that declares such an event, from each declared contract
+/// the event may come from and from an undeclared address.
 #[test]
 fn stored_bare_record_keys_are_the_unaliased_set() -> Result<()> {
     use std::collections::BTreeSet;
@@ -386,6 +412,14 @@ fn stored_bare_record_keys_are_the_unaliased_set() -> Result<()> {
                 .iter()
                 .filter(|loaded| loaded.manifest.chain == chain)
                 .map(|loaded| &loaded.manifest)
+                .filter(|manifest| {
+                    manifest.abi.events.iter().any(|event| {
+                        event
+                            .normalized_events
+                            .iter()
+                            .any(|kind| kind == "RecordChanged")
+                    })
+                })
                 .collect();
             let mut manifests = Vec::new();
             let mut admissions = Vec::new();

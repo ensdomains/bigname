@@ -91,6 +91,29 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                         "mode": format!("{mode:?}"), "case": case, "operation": label,
                         "record_key": key, "kinds": kinds, "expected_count": count, "plan": plan,
                     }));
+                    if label == "page" && key.is_some() {
+                        // A key page reads the record arms (`record_key_plan_tests.rs`): the
+                        // write arm through the emitter and the key, one page at most.
+                        let mut scans = Vec::new();
+                        resolver_page_scans(&plan[0]["Plan"], &mut scans);
+                        let visited: f64 = scans
+                            .iter()
+                            .map(|scan| {
+                                (scan["Actual Rows"].as_f64().unwrap_or(0.0)
+                                    + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                                    * scan["Actual Loops"].as_f64().unwrap_or(1.0)
+                            })
+                            .sum();
+                        let encoded = plan.to_string();
+                        ensure!(
+                            !kinds.iter().any(|kind| kind == "RecordChanged")
+                                || encoded
+                                    .contains("normalized_events_record_emitter_key_history_idx"),
+                            "{label} {mode:?}: {plan}"
+                        );
+                        ensure!(visited <= 100.0, "{label} {mode:?} read past a page: {plan}");
+                        continue;
+                    }
                     let mut scans = Vec::new();
                     page_scans(&plan[0]["Plan"], &mut scans);
                     ensure!(scans.len() == 1, "{label} {mode:?}: {plan}");
