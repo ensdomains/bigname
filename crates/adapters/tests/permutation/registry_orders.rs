@@ -85,6 +85,8 @@ const RESOLVERS: [&str; 2] = [
     "0x00000000000000000000000000000000f0051902",
 ];
 const SUBREGISTRY: &str = "0x00000000000000000000000000000000f0051903";
+/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48 @ ens_v2@a971bd64)
+const ROLE_WAS_RESERVED: u64 = 1 << 32;
 
 /// Orders the TYR-510 fix (#1420) changed: a label registered on a token that already holds a
 /// resource keeps it, and the token's live registration becomes the row the label stored. The
@@ -763,8 +765,8 @@ pub enum Atom {
         registry: Registry,
         resource: Option<Token>,
         account: u8,
-        old: u8,
-        new: u8,
+        old: u64,
+        new: u64,
     },
     Regenerate {
         registry: Registry,
@@ -1239,8 +1241,8 @@ fn draw(rng: &mut Rng) -> Vec<Atom> {
             registry,
             resource: (!rng.chance(1, 5)).then_some(token.resource()),
             account: owner,
-            old: rng.below(4) as u8,
-            new: rng.below(4) as u8,
+            old: rng.below(4) as u64,
+            new: rng.below(4) as u64,
         }],
         81..=84 => vec![Atom::Regenerate {
             registry,
@@ -1353,7 +1355,27 @@ fn deployed_reservation_close(rng: &mut Rng) -> Vec<Action> {
             false,
         ),
         action(
-            deployed_register(registry, token, token.label, owner, Expiry::Far, None),
+            deployed_register(registry, token, token.label, owner, Expiry::Far, None)
+                .into_iter()
+                .map(|atom| match atom {
+                    // `register` over a reservation adds ROLE_WAS_RESERVED to the owner's roles
+                    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@a971bd64).
+                    Atom::Roles {
+                        registry,
+                        resource,
+                        account,
+                        old,
+                        new,
+                    } => Atom::Roles {
+                        registry,
+                        resource,
+                        account,
+                        old,
+                        new: new | ROLE_WAS_RESERVED,
+                    },
+                    other => other,
+                })
+                .collect(),
             true,
             false,
         ),
