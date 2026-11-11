@@ -5046,3 +5046,218 @@ fn registry_order_known_shapes_are_the_open_fix_orders() {
         );
     }
 }
+
+/// Runs one generated-order finding, kept as a named test, through the sweep's own check.
+fn registry_order_finding(context: &str, actions: &[registry_orders::Action]) -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    registry_orders::check(
+        &wiring,
+        actions,
+        registry_orders::Layout::Drawn,
+        registry_orders::Split::BatchPerBlock,
+        0,
+    )
+    .map(|_| ())
+    .with_context(|| {
+        format!(
+            "{context}:\n{}",
+            registry_orders::describe(actions, registry_orders::Layout::Drawn)
+        )
+    })
+}
+
+fn in_new_block(atoms: Vec<registry_orders::Atom>) -> registry_orders::Action {
+    registry_orders::Action {
+        atoms,
+        new_block: true,
+        same_transaction: false,
+    }
+}
+
+/// Shrunk from seed 18271353455406254376 (and, on the declared registry, 4567838365441019466):
+/// an announced registry registers a label whose expiry has already passed and links its resource
+/// in the same transaction. Live state marks the registration's expiry retirement as emitted; a
+/// restore from the stored rows does not.
+#[test]
+fn registry_order_finding_an_expired_registration_linked_in_one_transaction() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
+    let token = Token {
+        label: 1,
+        version: 0,
+    };
+    registry_order_finding(
+        "an expired registration linked in one transaction",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            in_new_block(vec![
+                Atom::Register {
+                    registry: Registry::Announced,
+                    token,
+                    label: 1,
+                    owner: 2,
+                    expiry: Expiry::Past,
+                },
+                Atom::Link {
+                    registry: Registry::Announced,
+                    token,
+                    resource: token,
+                },
+            ]),
+        ],
+    )
+}
+
+/// Shrunk from seeds 9135676728762764436 and 6413280996045462611: a registration with no
+/// `TokenResource`, a role grant on its resource in the same transaction, and another grant in a
+/// later block. The split replay re-emits the token lineage the first grant anchored, anchored at
+/// the later grant, which the writer's upsert guard rejects.
+#[test]
+fn registry_order_finding_role_grants_on_an_unlinked_registration() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let registry = Registry::Declared;
+    let grant = |account| Atom::Roles {
+        registry,
+        resource: Some(token),
+        account,
+        old: 0,
+        new: 3,
+    };
+    registry_order_finding(
+        "role grants on an unlinked registration",
+        &[
+            in_new_block(vec![
+                Atom::Register {
+                    registry,
+                    token,
+                    label: 0,
+                    owner: 1,
+                    expiry: Expiry::Far,
+                },
+                grant(1),
+            ]),
+            in_new_block(vec![grant(2)]),
+        ],
+    )
+}
+
+/// The deployed registry's order around the same role grant: `register` links the resource before
+/// it grants the owner's roles, and a later `grantRoles` regenerates the token
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L479 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L503-L542 @ ens_v2@a971bd64).
+#[test]
+fn registry_order_deployed_role_grant_after_a_registration() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let next = Token {
+        label: 0,
+        version: 1,
+    };
+    let registry = Registry::Declared;
+    let grant = |account| Atom::Roles {
+        registry,
+        resource: Some(token),
+        account,
+        old: 0,
+        new: 3,
+    };
+    registry_order_finding(
+        "a deployed role grant after a registration",
+        &[
+            in_new_block(vec![
+                Atom::Register {
+                    registry,
+                    token,
+                    label: 0,
+                    owner: 1,
+                    expiry: Expiry::Far,
+                },
+                Atom::Mint {
+                    registry,
+                    token,
+                    to: 1,
+                },
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+                grant(1),
+            ]),
+            in_new_block(vec![
+                grant(2),
+                Atom::Burn {
+                    registry,
+                    token,
+                    from: 1,
+                },
+                Atom::Regenerate {
+                    registry,
+                    from: token,
+                    to: next,
+                },
+                Atom::Mint {
+                    registry,
+                    token: next,
+                    to: 1,
+                },
+            ]),
+        ],
+    )
+}
+
+/// Shrunk from seed 11156509979789779317: an announced registry registers and links a label,
+/// registers the same live token again in a later block, then sets its resolver. The split replay
+/// attributes one event differently from the whole pass.
+#[test]
+fn registry_order_finding_a_live_token_registered_again() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Pointer, Registry, Token};
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let registry = Registry::Announced;
+    let register = Atom::Register {
+        registry,
+        token,
+        label: 0,
+        owner: 3,
+        expiry: Expiry::Far,
+    };
+    registry_order_finding(
+        "a live token registered again",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            in_new_block(vec![
+                register,
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+            ]),
+            in_new_block(vec![register]),
+            in_new_block(vec![
+                Atom::Unregister {
+                    registry,
+                    token: Token {
+                        label: 1,
+                        version: 0,
+                    },
+                },
+                Atom::Resolver {
+                    registry,
+                    token,
+                    to: Pointer::Other(0),
+                },
+            ]),
+        ],
+    )
+}
