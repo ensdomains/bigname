@@ -7049,3 +7049,43 @@ WHERE canonicality_state NOT IN ('canonical', 'safe', 'finalized');
   which this release does not ship.
 - It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
   watch plan are unchanged, so stamp no Ingest redo.
+
+## Main merged into the integration branch: event counts and registration leads in their own pass streams
+
+The build that merges main into the integration branch brings main's composition pass (the
+catalogue built once at the pass block, the names stream on parallel workers and the lookup
+inventories stream) together with this branch's child listing, stored event counts and
+address listing. Two of this branch's families wrote inside a loop main removed, so each now
+has a [composition pass](glossary.md#composition-pass) stream of its own, and the pass runs
+eight streams. The change adds two schema-migrations. The served rows are the same, row for
+row, as block-by-block publication gives them.
+
+- Both content hashes rotate for every chain: the
+  [interpreter content hash](glossary.md#interpreter-content-hash) through main's lost-witness
+  change and the [projection content hash](glossary.md#projection-content-hash) through the
+  pass. Every chain needs one full re-derivation, an Interpret redo and then a full-range
+  Project redo, under matching runner and API binaries.
+- The event count stream (`compose_stream` 6) builds `project_event_count` once at the pass
+  block. It reads the events once, one block span a transaction, into the work table
+  `project_compose_event_count_work`, then sums them per key partition. It splits as the
+  catalogue build does (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` and
+  `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS`) and runs under its `work_mem`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM`). Its span statement sorts each
+  span's keys, so on a dense chain set the `work_mem` option as for the catalogue build. The
+  runner logs each partition with its rows and time.
+- The leads stream (`compose_stream` 7) runs right after the names stream and decides the
+  address listing's `registration_lead` per key partition of the addresses. The names
+  stream's workers write the listing rows and decide no lead, since one group's rows can lie
+  in several workers' chunks.
+- The child listing parents stream is `compose_stream` 5. The values 3 and 4 keep their
+  meaning. The pass runs 0, 7, 5, 1, 2, 4, 6, then 3.
+- The schema-migration `20261112120000_project_compose_stream_order_comments.sql` changes the
+  repair record's `compose_stream` and `compose_cursor` comments only. The schema-migration
+  `20261112130000_project_compose_event_count_work.sql` adds the event count stream's work
+  table, empty. Every family run of this build writes it, so run it first. The API reads
+  neither and needs no grant.
+- Before a database takes this build, `project_repair_record` must show no row in state
+  `composing`. A pass an older build left is reset, never resumed, but the check keeps an
+  interrupted pass from going unnoticed.
+- The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+  Ingest redo.

@@ -577,11 +577,13 @@ pub(crate) async fn step_chunk(
     step: &steps::Step,
     work_mem: Option<&str>,
 ) -> Result<(&'static str, u64)> {
-    // Red-first probe: the two streams run their partitions and write nothing.
-    let _ = (transaction, chain_id, block, step, work_mem);
+    steps::set_work_mem(transaction, work_mem).await?;
     match stream {
-        Stream::EventCounts => Ok((counts::WORK, 0)),
-        _ => Ok((super::tables::ADDRESS_LISTING.name, 0)),
+        Stream::EventCounts => counts::run(transaction, chain_id, block.number, step).await,
+        _ => {
+            require_composed(transaction, chain_id, "leads stream").await?;
+            leads::run(transaction, chain_id, step).await
+        }
     }
 }
 
