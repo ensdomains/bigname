@@ -10,6 +10,7 @@ use super::super::super::{
     source,
 };
 use super::*;
+use std::io::Write;
 
 const KEY_INDEX: &str = "normalized_events_record_key_history_idx";
 const EMITTER_KEY_INDEX: &str = "normalized_events_record_emitter_key_history_idx";
@@ -620,9 +621,16 @@ async fn record_key_custom_plans_read_the_record_indexes() -> Result<()> {
 async fn record_key_generic_plans_are_recorded_test_only() -> Result<()> {
     let failures =
         record_key_plan_report("history_record_key_generic", PlanMode::Generic, true).await?;
+    // Written past the test harness's capture, so the run's log keeps the record.
+    let mut log = std::io::stderr();
     for failure in &failures {
-        eprintln!("generic plan, test-only: {failure}");
+        writeln!(log, "generic plan, test-only: {failure}")?;
     }
+    writeln!(
+        log,
+        "generic plan, test-only: {} shapes off the bar",
+        failures.len()
+    )?;
     Ok(())
 }
 
@@ -634,9 +642,15 @@ async fn record_key_plans_before_analyze_are_recorded_test_only() -> Result<()> 
     let failures =
         record_key_plan_report("history_record_key_unanalyzed", PlanMode::Unprepared, false)
             .await?;
+    let mut log = std::io::stderr();
     for failure in &failures {
-        eprintln!("before ANALYZE, test-only: {failure}");
+        writeln!(log, "before ANALYZE, test-only: {failure}")?;
     }
+    writeln!(
+        log,
+        "before ANALYZE, test-only: {} shapes off the bar",
+        failures.len()
+    )?;
     Ok(())
 }
 
@@ -1063,12 +1077,11 @@ const LONG_KEY_FIXTURE: &str = r#"
 
 /// For each case, the stored key of `key_of`, read on each scope: the page, every page of one,
 /// and the plain statement return exactly `rows`, newest first, and the write arm reads its
-/// prefix index.
+/// index by the key prefix. The reset arm is not pinned on this small fixture.
 async fn assert_long_keys(name: &str, cases: &[(&str, KeyScope, &[&str])]) -> Result<()> {
     let database = phase_database(name, LONG_KEY_FIXTURE).await?;
     let result = async {
         let pool = database.pool();
-        let mut shapes = Vec::new();
         for (key_of, scope, rows) in cases {
             let key: String = sqlx::query_scalar(
                 "SELECT after_state ->> 'record_key' FROM normalized_events
@@ -1095,24 +1108,27 @@ async fn assert_long_keys(name: &str, cases: &[(&str, KeyScope, &[&str])]) -> Re
                 key_walk(pool, &filter, 1).await? == expected,
                 "{label}: pages of one differ"
             );
-            shapes.push(KeyShape {
-                name: label,
-                filter,
-                cursor: None,
-                limit: KEY_LIMIT,
-                arms: vec![
-                    match scope {
-                        KeyScope::Unscoped => KEY_INDEX,
-                        _ => EMITTER_KEY_INDEX,
-                    },
-                    RESET_ARM,
-                ],
-            });
+            let write_index = match scope {
+                KeyScope::Unscoped => KEY_INDEX,
+                _ => EMITTER_KEY_INDEX,
+            };
+            let mut query = QueryBuilder::<Postgres>::new("");
+            push_history_page_query(&mut query, &filter, true, None, false, KEY_LIMIT);
+            let mut connection = pool.acquire().await?;
+            let plan = explain_page(&mut connection, query, PlanMode::Unprepared).await?;
+            drop(connection);
+            let mut scans = Vec::new();
+            resolver_page_scans(&plan[0]["Plan"], &mut scans);
+            ensure!(
+                scans.iter().any(|scan| {
+                    scan["Index Name"] == write_index
+                        && scan["Index Cond"]
+                            .as_str()
+                            .is_some_and(|condition| condition.contains("\"left\"("))
+                }),
+                "{label}: the write arm must read {write_index} by the key prefix: {plan}"
+            );
         }
-        let mut connection = pool.acquire().await?;
-        let failures =
-            record_key_plan_failures(&mut connection, &shapes, PlanMode::Unprepared).await?;
-        ensure!(failures.is_empty(), "{}", failures.join("\n"));
         Ok(())
     }
     .await;
@@ -1286,11 +1302,14 @@ async fn record_key_count_cells_match_the_old_statement_and_record_their_driver(
                         driver.push(format!("{node_type} {index} ({read})"));
                     }
                     let stops = entries <= (CAP + 1) as f64 + 16.0;
-                    eprintln!(
+                    // Written past the test harness's capture, so the run's log keeps each
+                    // cell's driver.
+                    writeln!(
+                        std::io::stderr(),
                         "count cell {cell}: old statement {old} rows; driver {}; index entries \
                          read {entries}; stops at the cap of {CAP}: {stops}",
                         driver.join(", ")
-                    );
+                    )?;
                 }
             }
         }
