@@ -30,7 +30,7 @@ indexes. The API starts and serves without it, with a WARN at startup when it is
 ## Building the index
 
 Build the index on every database the build is deployed to before its schema-migrations run.
-Schema-migration `20261112120000_project_grant_resolver_role_holder_index.sql` adopts it by
+Schema-migration `20261112140000_project_grant_resolver_role_holder_index.sql` adopts it by
 name and refuses a populated table without it, so it never builds it in place: an ordinary
 `CREATE INDEX` on a populated table would block writes to `project_grant` for the whole build.
 

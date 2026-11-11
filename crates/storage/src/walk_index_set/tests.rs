@@ -12,7 +12,7 @@ const RECORD_HISTORY_INSTALL_SQL: &str =
 const ROLE_HOLDER_INSTALL_SQL: &str =
     include_str!("../../../../ops/resolver-role-holder-index/install.sql");
 const ROLE_HOLDER_MIGRATION: &str = include_str!(
-    "../../../../migrations/20261112120000_project_grant_resolver_role_holder_index.sql"
+    "../../../../migrations/20261112140000_project_grant_resolver_role_holder_index.sql"
 );
 
 /// The index names of every line of `script` that starts with `statement`, in script order.

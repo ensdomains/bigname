@@ -13,7 +13,7 @@ SET statement_timeout = '6h';
 -- resolves to nothing passes. After the build it also requires the index to exist, so the
 -- script fails instead of reporting success. README.md describes the recovery.
 -- The definition is the one the schema-migration
--- 20261112120000_project_grant_resolver_role_holder_index.sql checks. The function's own SET
+-- 20261112140000_project_grant_resolver_role_holder_index.sql checks. The function's own SET
 -- search_path clause makes search_path pg_catalog while it runs, so PostgreSQL always prints
 -- the table's schema name, and the expected text keeps it. Its SET quote_all_identifiers
 -- clause turns that setting off for the same read: when the session has it on, PostgreSQL

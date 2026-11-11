@@ -5753,7 +5753,7 @@ Roll it out in this order on every database the build is deployed to:
    concurrently and outside a transaction.
 2. Check it with the query in that README: one valid and ready index with the reviewed
    definition.
-3. Apply schema-migration `20261112120000_project_grant_resolver_role_holder_index.sql`.
+3. Apply schema-migration `20261112140000_project_grant_resolver_role_holder_index.sql`.
 4. Swap the image.
 
 The schema-migration adopts an index of the reviewed name that is valid and ready with the

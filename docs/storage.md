@@ -757,7 +757,7 @@ Family indexes serve these concrete readers:
   resolver grants from the cursor. It never reads the derived ENSv1 and Basenames resolver
   authority rows, which share the scope kind and far outnumber them. The statement carries the
   index predicate as literals, so the index qualifies under generic plans too. Schema-migration
-  `20261112120000_project_grant_resolver_role_holder_index.sql` adopts the index. It is
+  `20261112140000_project_grant_resolver_role_holder_index.sql` adopts the index. It is
   advisory: an operator prebuilds it with
   [`ops/resolver-role-holder-index/install.sql`](../ops/resolver-role-holder-index/README.md),
   the phase runner never builds it, and the API starts and serves without it, with a WARN at

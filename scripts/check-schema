@@ -543,7 +543,7 @@ registry_roles_index_migration="$ROOT/migrations/20261102140000_normalized_event
 resolver_link_order_index_migration="$ROOT/migrations/20261103130000_project_resolver_link_order_index.sql"
 parent_key_index_migration="$ROOT/migrations/20261104120000_name_surfaces_project_parent_key_index.sql"
 record_history_index_migration="$ROOT/migrations/20261111120000_normalized_events_record_history_indexes.sql"
-role_holder_index_migration="$ROOT/migrations/20261112120000_project_grant_resolver_role_holder_index.sql"
+role_holder_index_migration="$ROOT/migrations/20261112140000_project_grant_resolver_role_holder_index.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.

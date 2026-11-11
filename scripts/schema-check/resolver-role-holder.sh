@@ -1,11 +1,11 @@
 # Sourced by check-schema with its scratch schema and assertion helpers.
-# 20261112120000_project_grant_resolver_role_holder_index.sql must build the baseline's
+# 20261112140000_project_grant_resolver_role_holder_index.sql must build the baseline's
 # definition on an empty table, refuse a populated table without the prebuild, adopt the
 # ops/resolver-role-holder-index/install.sql prebuild by OID with every row unchanged, rerun as
 # a no-op, leave the caller's search_path and quote_all_identifiers as it found them, and refuse
 # every shape CREATE INDEX IF NOT EXISTS would skip. install.sql must build the baseline's
 # definition, rerun as a no-op and refuse every shape its own check names.
-role_holder_migration="$ROOT/migrations/20261112120000_project_grant_resolver_role_holder_index.sql"
+role_holder_migration="$ROOT/migrations/20261112140000_project_grant_resolver_role_holder_index.sql"
 role_holder_install="$ROOT/ops/resolver-role-holder-index/install.sql"
 role_holder_readme=ops/resolver-role-holder-index/README.md
 role_holder_index=project_grant_resolver_role_holder_idx
