@@ -2,8 +2,8 @@
 //! address anchors: for each chain the page can read, one arm with the key's `RecordChanged`
 //! rows and one with the `RecordVersionChanged` rows, each read through its own partial index in
 //! page order and stopped after the page. A `resolver` or `contract_address` scope is the
-//! emitter equality inside both arms. Only page reads reach this file. The read's other
-//! statements keep their source and apply the key in `push_history_filters`.
+//! emitter equality inside both arms. Page reads and the scoped count reach this file. The
+//! read's other statements keep their source and apply the key in `push_history_filters`.
 
 use sqlx::{Postgres, QueryBuilder};
 
@@ -34,6 +34,19 @@ impl RecordArm {
             Self::Reset => "RecordVersionChanged",
         }
     }
+}
+
+/// The chains of a scoped key count's arms: [`record_arm_chains`] for a read scoped by
+/// `contract_address` or `resolver`. Its capped count sums arms of at most the cap plus one row
+/// each, so it reads at most that many index entries per arm for any key and emitter. A bitmap
+/// over the plain statement could not stop at the cap, and the emitter's ordered index would
+/// walk every event of a large emitter looking for a rare key.
+pub(super) fn record_count_chains(
+    filter: &EventHistoryReadFilter,
+    canonical_only: bool,
+) -> Option<Vec<&str>> {
+    record_arm_chains(filter, canonical_only, false)
+        .filter(|_| filter.contract_address.is_some() || filter.resolver.is_some())
 }
 
 /// The chains the arms of a key page read, when the page takes them. Only a canonical,
@@ -75,15 +88,17 @@ pub(super) fn record_arm_chains(
     Some(chains)
 }
 
-/// `FROM (<arms>) ne … WHERE <visibility>` for a key page on `chains`. The arms are disjoint by
+/// `FROM (<arms>) ne … WHERE <visibility>` for a key read on `chains`. The arms are disjoint by
 /// event kind, so `UNION ALL` gives the rows of the key condition with no de-duplication step.
-/// An arm is left out when the read's kinds exclude it.
+/// An arm is left out when the read's kinds exclude it. With `bound` each arm stops after
+/// `bound.limit` rows in page order. Without it each arm reads all of its rows, which an
+/// uncapped count does.
 pub(super) fn push_record_key_source<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
     chains: &[&'a str],
     include_cursor_row: bool,
-    bound: ResolverPageBound,
+    bound: Option<ResolverPageBound>,
 ) {
     builder.push(" FROM (");
     let mut arms = 0;
@@ -121,7 +136,7 @@ fn push_record_arm<'a>(
     filter: &'a EventHistoryReadFilter,
     chain: &'a str,
     arm: RecordArm,
-    bound: ResolverPageBound,
+    bound: Option<ResolverPageBound>,
 ) {
     builder.push(
         "(SELECT candidate.*\n FROM bigname_phase.normalized_events candidate \
@@ -129,7 +144,7 @@ fn push_record_arm<'a>(
          ON candidate_lineage.chain_id = candidate.chain_id \
          AND candidate_lineage.block_hash = candidate.block_hash ",
     );
-    if bound.has_cursor {
+    if bound.is_some_and(|bound| bound.has_cursor) {
         builder.push("CROSS JOIN history_cursor_row cursor_row ");
     }
     builder.push("\nWHERE candidate.chain_id = ");
@@ -164,6 +179,10 @@ fn push_record_arm<'a>(
     builder.push(" AND candidate.consumer_visibility = 'activated'");
     builder.push(CANONICAL_ROW);
     push_record_arm_filters(builder, filter, chain);
+    let Some(bound) = bound else {
+        builder.push(")");
+        return;
+    };
     if let Some(block_number) = bound.cursor_block {
         builder.push(match bound.order {
             HistoryOrder::Desc => " AND candidate.block_number <= ",

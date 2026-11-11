@@ -901,10 +901,10 @@ async fn record_key_pages_without_the_record_indexes_match_and_fail_the_plan_che
     result
 }
 
-/// `include=total_count` on an emitter-scoped read runs the capped count over the plain
-/// source. It counts the scoped read's rows and reads no record arm.
+/// `include=total_count` on an emitter-scoped key read counts through the record arms, capped
+/// and uncapped, and counts the scoped read's rows.
 #[tokio::test]
-async fn record_key_counts_keep_the_plain_source() -> Result<()> {
+async fn record_key_counts_read_the_record_arms() -> Result<()> {
     let database = key_database("history_record_key_count", true).await?;
     let result = async {
         let pool = database.pool();
@@ -919,8 +919,8 @@ async fn record_key_counts_keep_the_plain_source() -> Result<()> {
                 let mut query = QueryBuilder::<Postgres>::new("");
                 push_history_count_query(&mut query, &filter, true, limit);
                 ensure!(
-                    !query.sql().contains(RECORD_ARM_SQL),
-                    "{scope:?}: the count reads a record arm"
+                    query.sql().contains(RECORD_ARM_SQL),
+                    "{scope:?}: the count must read the record arms"
                 );
                 let total: i64 = query.build_query_scalar().fetch_one(pool).await?;
                 ensure!(
@@ -936,9 +936,9 @@ async fn record_key_counts_keep_the_plain_source() -> Result<()> {
     result
 }
 
-/// Only an unanchored, canonical product page with a key reads the record arms. Anchored,
-/// diagnostics and keyless pages, and every statement other than the page, keep their
-/// sources.
+/// Only an unanchored, canonical product page with a key reads the record arms, and of the other
+/// statements only a count scoped by an emitter. Anchored, diagnostics and keyless pages, and
+/// an unscoped count, keep their sources.
 #[test]
 fn record_arms_serve_only_unanchored_canonical_key_pages() {
     let page_sql = |filter: &EventHistoryReadFilter, canonical_only: bool, candidates: bool| {
@@ -1014,7 +1014,11 @@ fn record_arms_serve_only_unanchored_canonical_key_pages() {
         );
         let mut count = QueryBuilder::<Postgres>::new("");
         push_history_count_query(&mut count, filter, true, Some(101));
-        assert!(!count.sql().contains(RECORD_ARM_SQL), "{name}: count");
+        assert_eq!(
+            count.sql().contains(RECORD_ARM_SQL),
+            name != "unscoped",
+            "{name}: count"
+        );
     }
     let mut no_window = unscoped.clone();
     no_window.block_window = None;
@@ -1202,12 +1206,14 @@ async fn k4_keys_of_256_and_257_characters_read_only_their_own_rows() -> Result<
     assert_long_keys("history_record_key_k4", &cases).await
 }
 
-/// The count cells: the key absent (with every kind and with `kind=RecordChanged`), rare and
-/// common, on a small and a large emitter, under
-/// `contract_address` and `resolver`, with and without `include=total_count`. With it, an
-/// emitter-scoped read runs the capped count over the plain source. Each cell's count equals the
-/// old statement's, the plain statement's rows counted, and the cell records its driver and how
-/// many index entries it read against the cap. Without it no count runs.
+/// The count cells: no key (with every kind and with `kind=RecordChanged`), and a key absent
+/// from the emitter, rare and common, on a small and a large emitter, under `contract_address`
+/// and `resolver`, with and without `include=total_count`. Each cell's count equals the old
+/// statement's, the plain statement's rows counted, capped and uncapped. A keyed count reads the
+/// record arms: each an ordered index scan with the chain, the emitter and the key prefix in its
+/// index condition, at most the cap plus one row per arm, and no bitmap. The keyless
+/// `kind=RecordChanged` count reads the emitter-led index in order and stops at the cap. Each
+/// cell records its driver. Without `include=total_count` no count runs.
 #[tokio::test]
 async fn record_key_count_cells_match_the_old_statement_and_record_their_driver() -> Result<()> {
     const CAP: i64 = 100;
@@ -1217,6 +1223,7 @@ async fn record_key_count_cells_match_the_old_statement_and_record_their_driver(
         for (key, writes_only) in [
             (None, false),
             (None, true),
+            (Some("text:url"), false),
             (Some("text:links"), false),
             (Some("text:avatar"), false),
         ] {
@@ -1310,7 +1317,50 @@ async fn record_key_count_cells_match_the_old_statement_and_record_their_driver(
                         entries += read;
                         driver.push(format!("{node_type} {index} ({read})"));
                     }
-                    let stops = entries <= (CAP + 1) as f64 + 16.0;
+                    let arm_ceiling = (CAP + 1) as f64 + 16.0;
+                    if key.is_some() {
+                        ensure!(
+                            nodes.iter().all(|node| !node["Node Type"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .contains("Bitmap")),
+                            "{cell}: a keyed count must read no bitmap: {plan}"
+                        );
+                        let mut scans = Vec::new();
+                        resolver_page_scans(&plan[0]["Plan"], &mut scans);
+                        let mut write_arms = 0;
+                        for scan in &scans {
+                            let condition = scan["Index Cond"].as_str().unwrap_or_default();
+                            let read = scan["Actual Rows"].as_f64().unwrap_or(0.0) * loops(scan);
+                            if arm_of(scan) == RESET_ARM {
+                                ensure!(
+                                    read <= KEY_CHAIN_RESETS,
+                                    "{cell}: the reset arm read {read} rows"
+                                );
+                                continue;
+                            }
+                            write_arms += 1;
+                            ensure!(
+                                scan["Node Type"] == "Index Scan"
+                                    && scan["Index Name"] == EMITTER_KEY_INDEX
+                                    && condition.contains("chain_id")
+                                    && condition.contains("emitting_address")
+                                    && condition.contains("\"left\"("),
+                                "{cell}: the write arm must be an ordered scan of \
+                                 {EMITTER_KEY_INDEX} by chain, emitter and key prefix: {plan}"
+                            );
+                            ensure!(
+                                read <= arm_ceiling,
+                                "{cell}: the write arm read {read} rows, over the cap"
+                            );
+                        }
+                        ensure!(write_arms == 1, "{cell}: one write arm: {plan}");
+                    }
+                    let stops = entries <= 2.0 * arm_ceiling;
+                    ensure!(
+                        stops || (key.is_none() && !writes_only),
+                        "{cell}: the count read {entries} index entries against a cap of {CAP}"
+                    );
                     // Written past the test harness's capture, so the run's log keeps each
                     // cell's driver.
                     writeln!(

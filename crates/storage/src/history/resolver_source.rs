@@ -117,7 +117,7 @@ pub(super) fn push_history_source_for_page<'a>(
     if let Some(bound) = resolver_page_bound
         && let Some(chains) = record_arm_chains(filter, canonical_only, include_candidates)
     {
-        push_record_key_source(builder, filter, &chains, include_cursor_row, bound);
+        push_record_key_source(builder, filter, &chains, include_cursor_row, Some(bound));
         return ResolverSource::Condition;
     }
     let Some(resolver) = resolver_arm_source(filter, canonical_only, include_candidates) else {
