@@ -4781,6 +4781,24 @@ fn registry_order_finding(context: &str, actions: &[registry_orders::Action]) ->
     })
 }
 
+/// Pins how a finding fails today. When its ticket's fix makes the order converge this test fails,
+/// and the fix flips it to `registry_order_finding`.
+fn pinned_registry_order_failure(
+    context: &str,
+    ticket: &str,
+    expected: &str,
+    actions: &[registry_orders::Action],
+) -> Result<()> {
+    let Err(error) = registry_order_finding(context, actions) else {
+        bail!("{context} converges now: {ticket} fixed it, so flip this test to expect that");
+    };
+    let failure = registry_orders::signature(&error);
+    if failure != expected {
+        bail!("{context} fails another way than {ticket} records: {failure}\n{error:#}");
+    }
+    Ok(())
+}
+
 fn in_new_block(atoms: Vec<registry_orders::Atom>) -> registry_orders::Action {
     registry_orders::Action {
         atoms,
@@ -4792,16 +4810,19 @@ fn in_new_block(atoms: Vec<registry_orders::Atom>) -> registry_orders::Action {
 /// Shrunk from seed 18271353455406254376 (and, on the declared registry, 4567838365441019466):
 /// an announced registry registers a label whose expiry has already passed and links its resource
 /// in the same transaction. Live state marks the registration's expiry retirement as emitted; a
-/// restore from the stored rows does not.
+/// restore from the stored rows does not. Pinned until TYR-525 lands.
 #[test]
-fn registry_order_finding_an_expired_registration_linked_in_one_transaction() -> Result<()> {
+fn registry_order_an_expired_registration_linked_in_one_transaction_diverges_until_tyr_525()
+-> Result<()> {
     use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
     let token = Token {
         label: 1,
         version: 0,
     };
-    registry_order_finding(
+    pinned_registry_order_failure(
         "an expired registration linked in one transaction",
+        registry_orders::TYR_525,
+        "live state differs from a restore at expiry_retirement_emitted",
         &[
             in_new_block(vec![Atom::Announce]),
             in_new_block(vec![
@@ -4824,11 +4845,10 @@ fn registry_order_finding_an_expired_registration_linked_in_one_transaction() ->
 
 /// Shrunk from seeds 9135676728762764436 and 6413280996045462611 in the first sweep: a
 /// registration with no `TokenResource`, a role grant on its resource in the same transaction, and
-/// another grant in a later block. The split replay re-emits the token lineage the first grant
-/// anchored, anchored at the later grant, which the writer's upsert guard rejects. The same kind
-/// of refusal as TYR-522, on the token lineage instead of the surface binding.
+/// another grant in a later block. Before TYR-507 the split replay re-emitted the token lineage the
+/// first grant anchored, anchored at the later grant, and the writer's upsert guard refused it.
 #[test]
-fn registry_order_finding_role_grants_on_an_unlinked_registration() -> Result<()> {
+fn registry_order_role_grants_on_an_unlinked_registration_keep_one_lineage_anchor() -> Result<()> {
     use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
     let token = Token {
         label: 0,
@@ -4930,9 +4950,9 @@ fn registry_order_deployed_role_grant_after_a_registration() -> Result<()> {
 
 /// Shrunk from seed 11156509979789779317: an announced registry registers and links a label,
 /// registers the same live token again in a later block, then sets its resolver. The split replay
-/// attributes one event differently from the whole pass.
+/// attributes one event differently from the whole pass. Pinned until TYR-525 lands.
 #[test]
-fn registry_order_finding_a_live_token_registered_again() -> Result<()> {
+fn registry_order_a_live_token_registered_again_diverges_until_tyr_525() -> Result<()> {
     use crate::permutation::registry_orders::{Atom, Expiry, Pointer, Registry, Token};
     let token = Token {
         label: 0,
@@ -4946,8 +4966,10 @@ fn registry_order_finding_a_live_token_registered_again() -> Result<()> {
         owner: 3,
         expiry: Expiry::Far,
     };
-    registry_order_finding(
+    pinned_registry_order_failure(
         "a live token registered again",
+        registry_orders::TYR_525,
+        "batch-boundary artifact {\"rebased_attributions\": 1}",
         &[
             in_new_block(vec![Atom::Announce]),
             in_new_block(vec![
@@ -4980,9 +5002,10 @@ fn registry_order_finding_a_live_token_registered_again() -> Result<()> {
 /// Shrunk from seed 1494661391878574169: the declared registry registers a label whose expiry has
 /// passed and links it, registers the same token again in the same block with an expiry that
 /// lapses before the next block, and a later block sets its resolver. The split replay derives a
-/// different expiry release than the whole pass.
+/// different expiry release than the whole pass. Pinned until TYR-525 lands.
 #[test]
-fn registry_order_finding_an_expired_token_registered_again_until_the_next_block() -> Result<()> {
+fn registry_order_an_expired_token_registered_again_until_the_next_block_diverges_until_tyr_525()
+-> Result<()> {
     use crate::permutation::registry_orders::{Action, Atom, Expiry, Pointer, Registry, Token};
     let token = Token {
         label: 0,
@@ -4996,8 +5019,10 @@ fn registry_order_finding_an_expired_token_registered_again_until_the_next_block
         owner,
         expiry,
     };
-    registry_order_finding(
+    pinned_registry_order_failure(
         "an expired token registered again until the next block",
+        registry_orders::TYR_525,
+        "the split replay derives a different event stream",
         &[
             in_new_block(vec![Atom::RootEth]),
             in_new_block(vec![
@@ -5025,16 +5050,20 @@ fn registry_order_finding_an_expired_token_registered_again_until_the_next_block
 /// Shrunk from seed 14847395240998665607: an announced registry points a token it never
 /// registered at itself, unregisters the token in the next transaction, and transfers it in a
 /// later block. Only the whole pass marks the transfer's registry state as pending hydration.
+/// Pinned until TYR-526 lands.
 #[test]
-fn registry_order_finding_a_transfer_of_an_unregistered_pointer_token() -> Result<()> {
+fn registry_order_a_transfer_of_an_unregistered_pointer_token_diverges_until_tyr_526() -> Result<()>
+{
     use crate::permutation::registry_orders::{Action, Atom, Pointer, Registry, Token};
     let token = Token {
         label: 0,
         version: 0,
     };
     let registry = Registry::Announced;
-    registry_order_finding(
+    pinned_registry_order_failure(
         "a transfer of an unregistered pointer token",
+        registry_orders::TYR_526,
+        "an event's after_state differs between the whole pass and the split replay",
         &[
             in_new_block(vec![Atom::Announce]),
             in_new_block(vec![Atom::Subregistry {
@@ -5052,6 +5081,40 @@ fn registry_order_finding_a_transfer_of_an_unregistered_pointer_token() -> Resul
                 token,
                 from: 2,
                 to: 2,
+            }]),
+        ],
+    )
+}
+
+/// Shrunk from seed 1319270771456002433 by variants of its order: an announced registry reserves a
+/// label with a far expiry, then cuts it with `ExpiryUpdated` to one that has passed. Live state
+/// marks the expiry retirement as emitted; a restore does not. The same order on the declared
+/// registry fails the same way. A lapsed label renewed to an expiry that has still passed, which
+/// a root renewer can emit on the deployed registry, converges. Pinned until TYR-525 lands.
+#[test]
+fn registry_order_a_live_reservation_cut_to_a_passed_expiry_diverges_until_tyr_525() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Registry, Token};
+    let token = Token {
+        label: 1,
+        version: 0,
+    };
+    let registry = Registry::Announced;
+    pinned_registry_order_failure(
+        "a live reservation cut to a passed expiry",
+        registry_orders::TYR_525,
+        "live state differs from a restore at expiry_retirement_emitted",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            in_new_block(vec![Atom::Reserve {
+                registry,
+                token,
+                label: 0,
+                expiry: Expiry::Far,
+            }]),
+            in_new_block(vec![Atom::Renew {
+                registry,
+                token,
+                expiry: Expiry::Past,
             }]),
         ],
     )
@@ -5119,4 +5182,159 @@ fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result
         );
     }
     Ok(())
+}
+
+/// The sweep's known-finding tags fire on their tickets' orders and not on near misses, so a new
+/// divergence of the same kind still fails the sweep: a registration live when emitted that lapses
+/// later, a lapsed label renewed to an expiry that has still passed, a difference other than the
+/// hydration flag, a pointer token that was labelled first, and a single `TokenResource`.
+#[test]
+fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
+    use crate::permutation::registry_orders::{
+        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522, TYR_525, TYR_526, Token,
+        known_failure,
+    };
+    let registry = Registry::Announced;
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let block = |atoms: Vec<Atom>| Action {
+        atoms,
+        new_block: true,
+        same_transaction: false,
+    };
+    let register = |expiry| Atom::Register {
+        registry,
+        token,
+        label: 0,
+        owner: 1,
+        expiry,
+    };
+    let reserve = |expiry| Atom::Reserve {
+        registry,
+        token,
+        label: 0,
+        expiry,
+    };
+    let renew = |expiry| Atom::Renew {
+        registry,
+        token,
+        expiry,
+    };
+    let link = Atom::Link {
+        registry,
+        token,
+        resource: token,
+    };
+    let pointer = Atom::Subregistry {
+        registry,
+        token,
+        to: Pointer::Announced,
+    };
+    let transfer = Atom::Transfer {
+        registry,
+        token,
+        from: 1,
+        to: 2,
+    };
+    let filler = Atom::Resolver {
+        registry,
+        token: Token {
+            label: 1,
+            version: 0,
+        },
+        to: Pointer::Other(0),
+    };
+    let stream = "the split replay derives a different event stream";
+    let bindings = "the writer would reject a repeated surface_bindings row";
+    let after = "an event's after_state differs between the whole pass and the split replay";
+    let pending = "after_state\n      whole={\"registry_hydration_pending\":true}\n   replayed={}";
+    let other = "after_state\n      whole={\"to\":\"0x01\"}\n   replayed={\"to\":\"0x02\"}";
+    let cases = [
+        (
+            "a registration already expired",
+            stream,
+            "",
+            vec![block(vec![register(Expiry::Past)])],
+            Some(TYR_525),
+        ),
+        (
+            "a registration live when emitted that lapses later",
+            stream,
+            "",
+            vec![
+                block(vec![register(Expiry::Lapses(0))]),
+                block(vec![filler]),
+            ],
+            None,
+        ),
+        (
+            "a live reservation cut to a passed expiry",
+            stream,
+            "",
+            vec![
+                block(vec![reserve(Expiry::Far)]),
+                block(vec![renew(Expiry::Past)]),
+            ],
+            Some(TYR_525),
+        ),
+        (
+            "a lapsed reservation renewed to an expiry that has still passed",
+            stream,
+            "",
+            vec![
+                block(vec![reserve(Expiry::Lapses(0))]),
+                block(vec![filler]),
+                block(vec![renew(Expiry::Lapses(1))]),
+            ],
+            None,
+        ),
+        (
+            "a transfer of an unlabelled pointer token, hydration flag on one side",
+            after,
+            pending,
+            vec![block(vec![pointer]), block(vec![transfer])],
+            Some(TYR_526),
+        ),
+        (
+            "a transfer of an unlabelled pointer token, another difference",
+            after,
+            other,
+            vec![block(vec![pointer]), block(vec![transfer])],
+            None,
+        ),
+        (
+            "a transfer of a pointer token labelled first",
+            after,
+            pending,
+            vec![
+                block(vec![register(Expiry::Far)]),
+                block(vec![pointer]),
+                block(vec![transfer]),
+            ],
+            None,
+        ),
+        (
+            "a second TokenResource for a linked token",
+            bindings,
+            "",
+            vec![block(vec![register(Expiry::Far), link]), block(vec![link])],
+            Some(TYR_522),
+        ),
+        (
+            "a single TokenResource",
+            bindings,
+            "",
+            vec![block(vec![register(Expiry::Far), link])],
+            None,
+        ),
+    ];
+    for (name, signature, text, actions, expected) in cases {
+        assert_eq!(
+            known_failure(signature, text, &actions, Layout::BlockPerAction),
+            expected,
+            "{name}"
+        );
+    }
 }

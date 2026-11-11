@@ -89,30 +89,109 @@ pub const LABEL_OVER_RESERVATION: &str =
     "LabelRegistered over a reservation of the same label that holds a resource";
 pub const KNOWN_SHAPES: [&str; 2] = [TOKEN_RESOURCE_BEFORE_LABEL, LABEL_OVER_RESERVATION];
 
-/// Failure kinds tracked by TYR-522 until its fix lands: the writer's upsert guard refuses a
-/// re-emitted identity row whose guarded column changed, and the refusal stops the batch
-/// (`crates/interpret/src/write/identity.rs`). The ticket's own order is a second
-/// `TokenResource(t, R)` for a token that already holds `R`, in a later block or the same one,
-/// whose surface binding comes back with a later `active_from`. Findings of these kinds are shrunk
-/// and reported but do not fail the sweep.
+/// Failure kinds tracked by open tickets. The sweep shrinks one finding of each, reports them and
+/// does not fail on them. Each comes out when its ticket lands.
+///
+/// TYR-522: the writer's upsert guard refuses a re-emitted surface binding whose `active_from`
+/// moved, and the refusal stops the batch (`crates/interpret/src/write/identity.rs`). The order is
+/// a second `TokenResource(t, R)` for a token that already holds `R`, in a later block or the
+/// same one.
 pub const TYR_522: &str = "TYR-522";
 /// A binding closed and then re-linked under the same token id ends in the same refusal. Only
 /// custom bytecode emits that order. It is TYR-522 S-A3, out of TYR-522's PR.
 pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
+/// TYR-525: a `LabelRegistered` that is already expired, or whose token is already registered,
+/// when it is emitted, or an `ExpiryUpdated` that cuts a label's live expiry to one that has
+/// passed. Live state and a restore disagree on the expiry retirement flags, or the split replay
+/// attributes or releases differently. The deployed registry reverts all three orders
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L460 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222-L224 @ ens_v2@a971bd64).
+pub const TYR_525: &str = "TYR-525";
+/// TYR-526: a pointer update or unregister on a token that was never registered, then a transfer
+/// of it. Only the whole pass marks the transfer's registry state as pending hydration.
+pub const TYR_526: &str = "TYR-526";
 
-fn known_failure(signature: &str, actions: &[Action]) -> Option<&'static str> {
-    if !signature.starts_with("the writer would reject a repeated ") {
-        return None;
+const TYR_525_KINDS: [&str; 4] = [
+    "live state differs from a restore at expiry_retirement_emitted",
+    "live state differs from a restore at resource_expiry_retirement_emitted",
+    "batch-boundary artifact {\"rebased_attributions\"",
+    "the split replay derives a different event stream",
+];
+
+/// The open ticket a failure belongs to, judged on its kind, the failure text and the order's
+/// shape in the layout it failed in. A kind alone never tags: each ticket names an order.
+pub fn known_failure(
+    signature: &str,
+    text: &str,
+    actions: &[Action],
+    layout: Layout,
+) -> Option<&'static str> {
+    if signature == "the writer would reject a repeated surface_bindings row"
+        && links_a_linked_token(actions)
+    {
+        return Some(if relinks_a_closed_binding(actions) {
+            TYR_522_S_A3
+        } else {
+            TYR_522
+        });
     }
+    if TYR_525_KINDS.iter().any(|kind| signature.starts_with(kind))
+        && emits_a_passed_or_live_label(actions, layout)
+    {
+        return Some(TYR_525);
+    }
+    if signature.starts_with("an event's after_state differs")
+        && only_one_side_is_pending_hydration(text)
+        && transfers_an_unlabelled_pointer_token(actions)
+    {
+        return Some(TYR_526);
+    }
+    None
+}
+
+fn atoms(actions: &[Action]) -> impl Iterator<Item = Atom> + '_ {
+    actions
+        .iter()
+        .flat_map(|action| action.atoms.iter().copied())
+}
+
+/// Each event with the timestamp of the block `layout` places it in.
+fn timed_atoms(actions: &[Action], layout: Layout) -> Vec<(Atom, i64)> {
+    actions
+        .iter()
+        .zip(place(actions, layout))
+        .flat_map(|(action, (block, _))| {
+            let at = BASE_TIMESTAMP + BLOCK_SECONDS * block as i64;
+            action.atoms.iter().map(move |atom| (*atom, at))
+        })
+        .collect()
+}
+
+fn passed(expiry: Expiry, at: i64) -> bool {
+    i64::try_from(expiry.value()).is_ok_and(|expiry| expiry <= at)
+}
+
+/// A second `TokenResource` for a token the same registry already linked.
+fn links_a_linked_token(actions: &[Action]) -> bool {
+    let mut linked = BTreeSet::new();
+    atoms(actions).any(|atom| match atom {
+        Atom::Link {
+            registry, token, ..
+        } => !linked.insert((registry, token)),
+        _ => false,
+    })
+}
+
+fn relinks_a_closed_binding(actions: &[Action]) -> bool {
     let mut linked = BTreeSet::new();
     let mut closed = BTreeSet::new();
-    for atom in actions.iter().flat_map(|action| &action.atoms) {
-        match *atom {
+    for atom in atoms(actions) {
+        match atom {
             Atom::Link {
                 registry, token, ..
             } => {
                 if closed.contains(&(registry, token)) {
-                    return Some(TYR_522_S_A3);
+                    return true;
                 }
                 linked.insert((registry, token));
             }
@@ -133,7 +212,110 @@ fn known_failure(signature: &str, actions: &[Action]) -> Option<&'static str> {
             _ => {}
         }
     }
-    Some(TYR_522)
+    false
+}
+
+/// A `LabelRegistered` whose expiry has passed at its own block, or over a token a registration
+/// still holds, or an `ExpiryUpdated` that moves a label's expiry from live to passed at its own
+/// block. A lapse later in the sequence, and a renewal of a label that had already lapsed, are
+/// orders the deployed registry emits and are not this ticket's.
+fn emits_a_passed_or_live_label(actions: &[Action], layout: Layout) -> bool {
+    let mut registered = BTreeSet::new();
+    let mut expiries = BTreeMap::new();
+    for (atom, at) in timed_atoms(actions, layout) {
+        match atom {
+            Atom::Register {
+                registry,
+                token,
+                expiry,
+                ..
+            } => {
+                if passed(expiry, at) || !registered.insert((registry, token)) {
+                    return true;
+                }
+                expiries.insert((registry, token), expiry);
+            }
+            Atom::Reserve {
+                registry,
+                token,
+                expiry,
+                ..
+            } => {
+                expiries.insert((registry, token), expiry);
+            }
+            Atom::Renew {
+                registry,
+                token,
+                expiry,
+            } => {
+                if let Some(&before) = expiries.get(&(registry, token))
+                    && !passed(before, at)
+                    && passed(expiry, at)
+                {
+                    return true;
+                }
+                if let Some(current) = expiries.get_mut(&(registry, token)) {
+                    *current = expiry;
+                }
+            }
+            Atom::Unregister { registry, token } => {
+                registered.remove(&(registry, token));
+                expiries.remove(&(registry, token));
+            }
+            Atom::Regenerate { registry, from, to } => {
+                if registered.remove(&(registry, from)) {
+                    registered.insert((registry, to));
+                }
+                if let Some(expiry) = expiries.remove(&(registry, from)) {
+                    expiries.insert((registry, to), expiry);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The whole pass's and the split replay's after states of the diverging event, of which exactly
+/// one marks the registry state as pending hydration.
+fn only_one_side_is_pending_hydration(text: &str) -> bool {
+    let side = |marker: &str| {
+        text.lines()
+            .find(|line| line.trim_start().starts_with(marker))
+            .is_some_and(|line| line.contains("\"registry_hydration_pending\":true"))
+    };
+    side("whole=") != side("replayed=")
+}
+
+/// A transfer of a token whose registry updated a pointer on it, with no label event on it before.
+fn transfers_an_unlabelled_pointer_token(actions: &[Action]) -> bool {
+    let mut labelled = BTreeSet::new();
+    let mut pointed = BTreeSet::new();
+    for atom in atoms(actions) {
+        match atom {
+            Atom::Register {
+                registry, token, ..
+            }
+            | Atom::Reserve {
+                registry, token, ..
+            } => {
+                labelled.insert((registry, token));
+            }
+            Atom::Resolver {
+                registry, token, ..
+            }
+            | Atom::Subregistry {
+                registry, token, ..
+            } if !labelled.contains(&(registry, token)) => {
+                pointed.insert((registry, token));
+            }
+            Atom::Transfer {
+                registry, token, ..
+            } if pointed.contains(&(registry, token)) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1081,6 +1263,18 @@ pub fn signature(error: &anyhow::Error) -> String {
     format!("other: {}", first.chars().take(120).collect::<String>())
 }
 
+/// Whether `to` is simpler than the event's expiry: a lapse or a passed expiry becomes far. No
+/// expiry is ever made shorter, so shrinking cannot add an expired event.
+fn simpler_expiry(atom: Atom, to: Expiry) -> bool {
+    let from = match atom {
+        Atom::Register { expiry, .. }
+        | Atom::Reserve { expiry, .. }
+        | Atom::Renew { expiry, .. } => expiry,
+        _ => return false,
+    };
+    matches!((from, to), (Expiry::Lapses(_) | Expiry::Past, Expiry::Far))
+}
+
 /// The same event with another expiry, for the shrinker.
 fn with_expiry(atom: Atom, to: Expiry) -> Option<Atom> {
     match atom {
@@ -1188,14 +1382,13 @@ pub fn shrink(
     }
     for index in 0..current.len() {
         for atom in 0..current[index].atoms.len() {
-            for to in [Expiry::Far, Expiry::Past] {
-                if let Some(simpler) = with_expiry(current[index].atoms[atom], to) {
-                    let mut candidate = current.clone();
-                    candidate[index].atoms[atom] = simpler;
-                    if try_replace(&mut current, candidate) {
-                        break;
-                    }
-                }
+            let drawn = current[index].atoms[atom];
+            if simpler_expiry(drawn, Expiry::Far)
+                && let Some(simpler) = with_expiry(drawn, Expiry::Far)
+            {
+                let mut candidate = current.clone();
+                candidate[index].atoms[atom] = simpler;
+                try_replace(&mut current, candidate);
             }
         }
         for (new_block, same_transaction) in [(false, false), (true, false)] {
@@ -1293,12 +1486,19 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                         sweep.declared_stops += 1;
                         break;
                     }
+                    let drawn_known =
+                        known_failure(&kept, &format!("{error:#}"), &generated.actions, layout);
+                    let limit = if drawn_known.is_some() {
+                        1
+                    } else {
+                        SHRUNK_PER_KIND
+                    };
                     let shrunk = sweep
                         .findings
                         .iter()
                         .filter(|finding| finding.shrunk && finding.signature == kept)
                         .count()
-                        < SHRUNK_PER_KIND;
+                        < limit;
                     let minimal = if shrunk {
                         shrink(
                             wiring,
@@ -1311,10 +1511,16 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                     } else {
                         generated.actions.clone()
                     };
-                    let error = check(wiring, &minimal, layout, split_kind, generated.seed)
-                        .err()
-                        .unwrap_or(error);
-                    let known = known_failure(&kept, &minimal);
+                    let error = if shrunk {
+                        check(wiring, &minimal, layout, split_kind, generated.seed)
+                            .err()
+                            .unwrap_or(error)
+                    } else {
+                        error
+                    };
+                    let text = format!("{error:#}");
+                    // Tagged only when both the drawn and the shrunk sequence carry the shape.
+                    let known = drawn_known.and(known_failure(&kept, &text, &minimal, layout));
                     sweep.findings.push(Finding {
                         seed: generated.seed,
                         layout,
@@ -1324,7 +1530,7 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                         shrunk,
                         known,
                         minimal,
-                        error: format!("{error:#}"),
+                        error: text,
                     });
                     break;
                 }
