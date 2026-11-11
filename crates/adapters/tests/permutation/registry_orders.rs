@@ -89,17 +89,51 @@ pub const LABEL_OVER_RESERVATION: &str =
     "LabelRegistered over a reservation of the same label that holds a resource";
 pub const KNOWN_SHAPES: [&str; 2] = [TOKEN_RESOURCE_BEFORE_LABEL, LABEL_OVER_RESERVATION];
 
-/// A failure kind tracked by TYR-522 until it lands: the writer's upsert guard refuses a
-/// re-emitted identity row whose guarded column changed, for example a surface binding a second
-/// `TokenResource` for the same token and resource re-emits with a later `active_from`
-/// (`crates/interpret/src/write/identity.rs`). The guard's refusal stops the batch. Findings of
-/// this kind are shrunk and reported but do not fail the sweep.
+/// Failure kinds tracked by TYR-522 until its fix lands: the writer's upsert guard refuses a
+/// re-emitted identity row whose guarded column changed, and the refusal stops the batch
+/// (`crates/interpret/src/write/identity.rs`). The ticket's own order is a second
+/// `TokenResource(t, R)` for a token that already holds `R`, in a later block or the same one,
+/// whose surface binding comes back with a later `active_from`. Findings of these kinds are shrunk
+/// and reported but do not fail the sweep.
 pub const TYR_522: &str = "TYR-522";
+/// A binding closed and then re-linked under the same token id ends in the same refusal. Only
+/// custom bytecode emits that order. It is TYR-522 S-A3, out of TYR-522's PR.
+pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
 
-fn known_failure(signature: &str) -> Option<&'static str> {
-    signature
-        .starts_with("the writer would reject a repeated ")
-        .then_some(TYR_522)
+fn known_failure(signature: &str, actions: &[Action]) -> Option<&'static str> {
+    if !signature.starts_with("the writer would reject a repeated ") {
+        return None;
+    }
+    let mut linked = BTreeSet::new();
+    let mut closed = BTreeSet::new();
+    for atom in actions.iter().flat_map(|action| &action.atoms) {
+        match *atom {
+            Atom::Link {
+                registry, token, ..
+            } => {
+                if closed.contains(&(registry, token)) {
+                    return Some(TYR_522_S_A3);
+                }
+                linked.insert((registry, token));
+            }
+            Atom::Unregister { registry, token }
+            | Atom::Register {
+                registry, token, ..
+            }
+            | Atom::Reserve {
+                registry, token, ..
+            }
+            | Atom::Regenerate {
+                registry,
+                from: token,
+                ..
+            } if linked.contains(&(registry, token)) => {
+                closed.insert((registry, token));
+            }
+            _ => {}
+        }
+    }
+    Some(TYR_522)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1280,6 +1314,7 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                     let error = check(wiring, &minimal, layout, split_kind, generated.seed)
                         .err()
                         .unwrap_or(error);
+                    let known = known_failure(&kept, &minimal);
                     sweep.findings.push(Finding {
                         seed: generated.seed,
                         layout,
@@ -1287,7 +1322,7 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                         signature: kept,
                         drawn: generated.actions.len(),
                         shrunk,
-                        known: known_failure(&kept),
+                        known,
                         minimal,
                         error: format!("{error:#}"),
                     });
