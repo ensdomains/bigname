@@ -1,6 +1,15 @@
-//! Names a log carries as text are chosen by whoever sends the transaction. Any contract can
-//! emit a resolver `NameChanged`, and anyone can set the name of their own reverse record, so
-//! one log can carry a name of millions of dot-separated labels.
+//! Names a log carries as text are the caller's, with no length check. A resolver's `setName`
+//! emits the name it is given unchanged
+//! (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f).
+//! An account names its own reverse record through the reverse registrar's `setName`, which
+//! passes the name to that resolver
+//! (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105-L132 @ ens_v1@91c966f),
+//! or through the default reverse registrar's `setName`, which emits `NameForAddrChanged` with
+//! the name unchanged
+//! (upstream: .refs/ens_v1/contracts/reverseRegistrar/DefaultReverseRegistrar.sol:L26-L28 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L31 @ ens_v1@91c966f).
+//! The collector also reads a resolver `NameChanged` from an address no manifest declares, as
+//! the rows below for any address show. So nothing bounds the labels of a name one log carries.
 //!
 //! The invariant: collecting a batch's dependencies costs time linear in the bytes of its logs.
 //! A dot-separated name of more than `MAX_NAME_SEGMENTS` labels, more than any DNS-encodable
