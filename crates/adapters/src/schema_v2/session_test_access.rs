@@ -1,6 +1,6 @@
 //! Read access to a session's retained state for the adapter tests.
 use super::AdapterSession;
-use crate::schema_v2::state::{V1NameState, V1ResolverLink};
+use crate::schema_v2::state::{V1NameState, V1ResolverLink, V2TokenState};
 
 impl AdapterSession {
     pub(in crate::schema_v2) fn has_v1_registry_authority(
@@ -25,5 +25,13 @@ impl AdapterSession {
         namehash: &str,
     ) -> Option<V1ResolverLink> {
         self.state.v1_resolver_link(namespace, namehash)
+    }
+
+    pub(in crate::schema_v2) fn v2_token(
+        &self,
+        emitter: &str,
+        token_id: &str,
+    ) -> Option<V2TokenState> {
+        self.state.v2_token(emitter, token_id)
     }
 }

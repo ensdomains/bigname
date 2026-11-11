@@ -764,6 +764,45 @@ fn v2_reserved_then_registered_then_linked_is_batch_grid_independent() -> Result
     )
 }
 
+/// The deployed registry registers a reserved label and links it in one call, keeping the
+/// reservation's token id (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455-L472 @ ens_v2@a971bd64).
+/// The link's registration row carries the resource the registration kept, as the registration
+/// row it extends does.
+#[test]
+fn v2_reserved_then_deployed_registration_links_with_the_kept_resource() -> Result<()> {
+    let token = versioned_token("order", 0);
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let blocks = vec![
+        vec![label_order_reserved(token, "order")],
+        vec![
+            label_order_registered(token, "order"),
+            label_order_transfer(token, Address::ZERO, label_order_owner()),
+            label_order_link(token),
+        ],
+    ];
+    let input = v2_label_order_input(&wiring, 20_000_550, blocks)?;
+    let output = interpret_checked(input.clone())?;
+    let linked = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationGranted"
+                && event.after_state["derived_from"] == "registry_state"
+        })
+        .context("the link emits a registration row")?;
+    let resource_id = linked
+        .resource_id
+        .context("the link names its resource")?
+        .to_string();
+    assert_eq!(
+        linked.after_state["resource_id"], resource_id,
+        "{}",
+        linked.after_state
+    );
+    converge_without_artifacts("directed=v2-reserved-then-deployed-registration", input, 2)
+}
+
 #[test]
 fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Result<()> {
     let checked_in = checked_in_manifests()?;

@@ -372,3 +372,151 @@ fn restore_takes_no_lineage_from_a_registration_row_naming_another_resource() ->
     );
     Ok(())
 }
+
+/// The live session's token and the token a restore from the batch's rows installs.
+fn live_and_restored(
+    logs: Vec<RawLogInput>,
+    token: &str,
+) -> anyhow::Result<(V2TokenStateView, V2TokenStateView)> {
+    let input = batch(vec![declared_registry()], Vec::new(), 1, logs);
+    let (output, session) = interpret_test_batch_incremental(input.clone(), None)?;
+    assert!(output.decode_skips.is_empty(), "{:?}", output.decode_skips);
+    let live = session
+        .v2_token(ANNOUNCED_REGISTRY, token)
+        .expect("the live session holds the token");
+    let prior = seam::fold_prior_events(Vec::new(), &output.normalized_events, &input.blocks)?;
+    let restored = restored(&output, prior)?
+        .v2_token(ANNOUNCED_REGISTRY, token)
+        .expect("the restore installs the token");
+    Ok((V2TokenStateView::of(&live), V2TokenStateView::of(&restored)))
+}
+
+/// The parts of a token's state a later event reads its registration and resource from.
+#[derive(Debug, PartialEq)]
+struct V2TokenStateView {
+    registration: Option<serde_json::Value>,
+    upstream_resource: Option<String>,
+    resource_id: Option<Uuid>,
+    token_lineage_id: Option<Uuid>,
+}
+
+impl V2TokenStateView {
+    fn of(token: &crate::schema_v2::state::V2TokenState) -> Self {
+        Self {
+            registration: token.registration.clone(),
+            upstream_resource: token.upstream_resource.clone(),
+            resource_id: token.resource_id,
+            token_lineage_id: token.token_lineage_id,
+        }
+    }
+}
+
+/// A reservation names its resource but is no registration, so the token holds none, live and
+/// restored.
+#[test]
+fn a_reservation_with_its_resource_holds_no_registration_live_or_restored() -> anyhow::Result<()> {
+    let logs = reserve_then_register(1).into_iter().take(2).collect();
+    let (live, restored) = live_and_restored(logs, &token_word())?;
+    assert!(
+        live.resource_id.is_some(),
+        "the reservation attaches its resource"
+    );
+    assert_eq!(live.registration, None, "a reservation is no registration");
+    assert_eq!(live, restored, "a restore installs the same token");
+    Ok(())
+}
+
+fn expiry_updated(block: i64, index: i64) -> RawLogInput {
+    raw_at(
+        v2_registry::ExpiryUpdated {
+            tokenId: versioned_token(LABEL, 0),
+            newExpiry: LIVE_EXPIRY * 2,
+            sender: OWNER.parse().unwrap(),
+        }
+        .encode_log_data(),
+        block,
+        index,
+        ANNOUNCED_REGISTRY,
+    )
+}
+
+fn regenerated(block: i64, index: i64) -> RawLogInput {
+    raw_at(
+        v2_registry::TokenRegenerated {
+            oldTokenId: versioned_token(LABEL, 0),
+            newTokenId: versioned_token(LABEL, 1),
+        }
+        .encode_log_data(),
+        block,
+        index,
+        ANNOUNCED_REGISTRY,
+    )
+}
+
+/// After a label event the live token's registration is the row that event stored, so a restore
+/// installs the same value. Every later event that changes a registration changes it the same way
+/// live and restored: an expiry update, a transfer and a regeneration.
+#[test]
+fn a_registered_reservation_holds_the_stored_registration_live_and_restored() -> anyhow::Result<()>
+{
+    let registered = reserve_then_register(1);
+    let mut transfer = transfer(1);
+    transfer.log_index = 5;
+    let regenerated_word = format!("0x{:064x}", versioned_token(LABEL, 1));
+    let cases = [
+        ("the label event", registered.clone(), token_word()),
+        (
+            "an expiry update",
+            [registered.clone(), vec![expiry_updated(1, 4)]].concat(),
+            token_word(),
+        ),
+        (
+            "a transfer",
+            [
+                registered.clone(),
+                vec![expiry_updated(1, 4), transfer.clone()],
+            ]
+            .concat(),
+            token_word(),
+        ),
+        (
+            "a regeneration",
+            [
+                registered.clone(),
+                vec![expiry_updated(1, 4), transfer.clone(), regenerated(1, 6)],
+            ]
+            .concat(),
+            regenerated_word,
+        ),
+    ];
+    for (after, logs, token) in cases {
+        let (live, restored) = live_and_restored(logs, &token)?;
+        assert!(
+            live.registration.is_some(),
+            "the token is registered after {after}"
+        );
+        assert_eq!(
+            live, restored,
+            "after {after}, a restore installs the live token's registration and resource"
+        );
+    }
+    let (live, _) = live_and_restored(registered, &token_word())?;
+    let (resource_id, lineage) = {
+        let input = batch(
+            vec![declared_registry()],
+            Vec::new(),
+            1,
+            reserve_then_register(1),
+        );
+        let (first, _) = interpret_test_batch_incremental(input, None)?;
+        assert_eq!(
+            live.registration.as_ref(),
+            Some(&event(&first, "RegistrationGranted").after_state),
+            "the live registration is the stored registration row"
+        );
+        reservation_identity(&first)?
+    };
+    assert_eq!(live.resource_id, Some(resource_id));
+    assert_eq!(live.token_lineage_id, Some(lineage));
+    Ok(())
+}
