@@ -493,6 +493,8 @@ include!("tests/v2_history.rs");
 mod v2_address_history_perf;
 #[path = "tests/v2_address_history_walk.rs"]
 mod v2_address_history_walk;
+#[path = "tests/v2_history_mirror_walk.rs"]
+mod v2_history_mirror_walk;
 include!("tests/v2_history_registration_identity.rs");
 include!("tests/v2_history_publication_bounds.rs");
 include!("tests/v2_history_bounded_membership.rs");

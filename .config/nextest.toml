@@ -10,3 +10,9 @@ fail-fast = false
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# The mirror history route test reports its route and statement times. Keep them in a passing
+# run's log.
+[[profile.ci.overrides]]
+filter = "package(bigname-api) & test(history_under_the_ensv1_mirror)"
+success-output = "final"
