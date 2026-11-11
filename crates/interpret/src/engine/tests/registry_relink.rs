@@ -334,7 +334,8 @@ async fn a_bare_announced_registry_repeated_link_binds_nothing() -> TestResult {
     Ok(())
 }
 
-/// The binding `label`'s first link opened: its opening block and whether it is closed.
+/// Every binding of the resource `label`'s first link names: its opening block and whether it is
+/// closed.
 async fn first_binding(pool: &PgPool, label: &str) -> TestResult<Vec<(i64, bool)>> {
     Ok(sqlx::query_as(
         "SELECT binding.block_number, binding.active_to IS NOT NULL FROM surface_bindings binding
@@ -408,10 +409,11 @@ async fn a_repeated_link_after_an_expired_name_is_renewed_is_written() -> TestRe
     .await?;
     insert_block(pool, THIRD, vec![(ETH_REGISTRY, link(LABEL))]).await?;
     run(pool, Run::EachBlock, &[FIRST, SECOND, THIRD]).await?;
-    let bindings = first_binding(pool, LABEL).await?;
-    assert!(
-        bindings.iter().all(|(block, _)| *block < THIRD),
-        "the link after the renewal opens no binding: {bindings:?}"
+    assert_eq!(
+        first_binding(pool, LABEL).await?,
+        vec![(FIRST, true), (SECOND, false)],
+        "the first link's binding closes at the expiry, the renewal opens the one binding left \
+         open, and the link after it opens none"
     );
     database.cleanup().await?;
     Ok(())
