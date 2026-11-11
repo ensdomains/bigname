@@ -737,3 +737,132 @@ async fn redo_progress_is_fenced_to_the_attempt_and_owner() -> Result<()> {
     expect_unchanged(&before, &read(pool, chain, ingest).await?)?;
     scratch.cleanup().await
 }
+
+/// Canonical lineage through `through` and one ingest source from block 10, which an Interpret
+/// redo's raw-data check requires (`redo_presence.rs:88-224`).
+async fn seed_interpret_inputs(pool: &PgPool, chain: &str, through: i64) -> Result<()> {
+    for number in 0..=through {
+        sqlx::query(
+            "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+                                        block_timestamp, canonicality_state)
+             VALUES ($1, $2, $3, $4, to_timestamp($4), 'canonical')",
+        )
+        .bind(chain)
+        .bind(format!("h{number}"))
+        .bind((number > 0).then(|| format!("h{}", number - 1)))
+        .bind(number)
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO ingest_cursors (chain_id, source_key, source_kind, seed_basis,
+                                     start_block_number, next_block_number)
+         VALUES ($1, 'source', 'test', 'ethereum_head', 10, $2)",
+    )
+    .bind(chain)
+    .bind(through + 1)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_interpret_redo_runs_to_its_cursor_and_a_recompute_runs_its_request() -> Result<()> {
+    let scratch = Scratch::create("phase_state_interpret_range").await?;
+    let (pool, store) = (scratch.pool(), scratch.store());
+    let interpret = PhaseName::Interpret;
+    let request = BlockRange { from: 10, to: 90 };
+
+    for (chain, mode, recorded) in [
+        (
+            "interpret-redo-range",
+            RunMode::Redo(request),
+            BlockRange { from: 10, to: 100 },
+        ),
+        (
+            "interpret-recompute-range",
+            RunMode::RecomputeFlags(request),
+            request,
+        ),
+    ] {
+        seed(
+            pool,
+            chain,
+            &[
+                completed(chain, PhaseName::Ingest),
+                completed(chain, interpret),
+                completed(chain, PhaseName::Project),
+            ],
+        )
+        .await?;
+        seed_interpret_inputs(pool, chain, 100).await?;
+        let source = crate::config::SourceConfig::new(
+            chain,
+            "source",
+            "test",
+            crate::config::SeedBasis::EthereumHead,
+            10,
+            "http://source.invalid",
+        )?;
+        let before = read(pool, chain, interpret).await?;
+        store
+            .begin_redo(
+                chain,
+                interpret,
+                &mode,
+                std::slice::from_ref(&source),
+                None,
+                "phase-state-table",
+                false,
+            )
+            .await?;
+        let after = read(pool, chain, interpret).await?;
+        ensure!(
+            range(&after) == (json!(recorded.from), json!(recorded.to)),
+            "{chain}: {after}"
+        );
+        unchanged_except(&before, &after, writes::REDO_BEGIN)?;
+    }
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn an_ingest_redo_finish_restores_the_handoff_from_before_the_redo() -> Result<()> {
+    let scratch = Scratch::create("phase_state_ingest_handoff").await?;
+    let (pool, store) = (scratch.pool(), scratch.store());
+    let ingest = PhaseName::Ingest;
+    let chain = "ingest-handoff";
+    seed(
+        pool,
+        chain,
+        &verify_chain(chain, completed(chain, PhaseName::Verify)),
+    )
+    .await?;
+    let normal = read(pool, chain, ingest).await?;
+    ensure!(normal["live_handoff_block_number"] == json!(100));
+    let session = begin(&store, chain, ingest, RANGE).await?;
+    let begun = read(pool, chain, ingest).await?;
+    let mut connection = pool.acquire().await?;
+    store
+        .finish_redo(
+            &mut connection,
+            chain,
+            ingest,
+            session,
+            RedoOutcome::Completed(&PhaseProgress {
+                current: Some(marker(90)),
+                target: Some(marker(90)),
+                live_handoff: Some(marker(80)),
+                ..PhaseProgress::default()
+            }),
+        )
+        .await?;
+    drop(connection);
+    let after = read(pool, chain, ingest).await?;
+    expect_state(&after, State::Completed)?;
+    ensure!(after["live_handoff_block_number"] == normal["live_handoff_block_number"]);
+    ensure!(after["live_handoff_block_hash"] == normal["live_handoff_block_hash"]);
+    ensure!(after["current_block_number"] == normal["current_block_number"]);
+    unchanged_except(&begun, &after, writes::REDO_FINISH)?;
+    scratch.cleanup().await
+}
