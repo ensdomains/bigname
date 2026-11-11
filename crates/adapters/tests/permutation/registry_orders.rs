@@ -80,7 +80,7 @@ const SUBREGISTRY: &str = "0x00000000000000000000000000000000f0051903";
 /// that fix lands, sequences with either shape are run and counted but do not fail the sweep. A
 /// later `TokenResource` for the same token is where the kept resource shows, in the rows or in
 /// live state, so the shapes cover that later-link drift too.
-pub const EXCLUDE_KNOWN: bool = true;
+pub const EXCLUDE_KNOWN: bool = false;
 pub const TOKEN_RESOURCE_BEFORE_LABEL: &str =
     "LabelRegistered on a labelless token that holds a resource";
 pub const LABEL_OVER_RESERVATION: &str =
