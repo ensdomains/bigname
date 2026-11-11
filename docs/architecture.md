@@ -1381,6 +1381,13 @@ What record space is known to exist. Carries `record_version_boundary`, `enumera
 
 Selectors carry `record_key`, `record_family`, `selector_key`, `cacheable`. `record_key` is the round-trip string `record_family + ":" + selector_key`; `selector_key` is `null` for scalar families and a string otherwise. Numeric selector domains use string `selector_key` so `record_key` stays text.
 
+A stored `record_key` is at most 2,400 bytes (`MAX_RECORD_KEY_BYTES` in `crates/adapters/src/schema_v2/common.rs`). Only text, data and DNS record keys are chosen by whoever writes the record, and at any length (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/DataResolver.sol:L19-L27 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L51 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L188-L195 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L221-L228 @ ens_v2@a971bd64). Every other family's key has a fixed shape well under the limit. The limit counts the UTF-8 bytes of the key as stored, after formatting:
+
+- A text or data key that is not valid UTF-8, holds a NUL byte or is only whitespace is stored as `text_opaque:0x…` or `data_opaque:0x…` with its bytes in hex, which doubles its length.
+- A DNS record key is `dns:<resource>:0x…`, with the record's DNS-encoded owner name in hex.
+
+The [projection](glossary.md#projection) tables keep `record_key` in btree indexes, and PostgreSQL holds at most 2,704 bytes in one btree index row. So Interpret skips a resolver record log whose key would be longer, as it skips a log whose indexed key is not the hash of its key. The log yields no [normalized event](glossary.md#normalized-event), no substitute key and no record, and Interpret logs one warning naming the log and the key's length. The rest of the batch is interpreted as usual. The longest record key set on mainnet is about 2.1 KB, so every key in use keeps updating under its own key. This narrows upstream: see the [record key length limit](upstream.md#record-key-length-limit).
+
 Inventory is not global enumeration. It defines the stable selector space admitted by the route, including explicit gaps and unsupported families. Version changes invalidate inventory and cache for the prior boundary.
 
 ### `record_cache`

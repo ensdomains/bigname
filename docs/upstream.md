@@ -587,6 +587,13 @@ to the applicable entries below.
 > **Why**: bigname's API and lookup path use textual selector keys across route parsing and sort/dedupe. The `u64` boundary keeps that selector identity canonical and fail-closed until a wider coin-type representation is deliberately designed.
 > **Since**: `2026-06-12`
 
+<a id="record-key-length-limit"></a>
+> **Record key length limit** — a text, data or DNS record write whose stored record key would be longer than 2,400 bytes is not indexed. Interpret skips the log, so the write leaves no indexed value, no record inventory entry and no history row. Every shorter key is indexed as before.
+> **Upstream**: the setters store and emit the key they are given, at any length `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/DataResolver.sol:L19-L27 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L51 @ ens_v1@91c966f)` `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L188-L195 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L221-L228 @ ens_v2@a971bd64)`.
+> **Our rule**: `docs/architecture.md` § `record_inventory`.
+> **Why**: the stored key is part of btree indexes, and PostgreSQL holds at most 2,704 bytes in one btree index row. A longer key that does not compress could not be stored. The longest record key set on mainnet is about 2.1 KB.
+> **Since**: `2026-11-10`
+
 <a id="ens-verified-resolution-ccip-read-non-following"></a>
 > **Retired: ENS verified-resolution CCIP-Read non-following** — From `2026-04-18` to `2026-10-29`, bigname did not follow EIP-3668 `OffchainLookup` continuations on ENS record resolution through the records route and resolver-record lookup. It returned the affected selector as `unsupported` with reason `offchain_lookup_required` and made no gateway request. ENS record reads now follow the continuation through the same gateway transport as Basenames and the ENS/60 forward leg, so this is no longer a divergence and `offchain_lookup_required` is no longer issued. The Universal Resolver re-raises the resolver's `OffchainLookup` with itself as sender and its own callback `(upstream: .refs/ens_v1/contracts/ccipRead/CCIPReader.sol:L72-L94 @ ens_v1@91c966f)`, and that callback returns the answer with the resolver that produced it `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L147-L152 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/execution.md` § Resolver-record lookup and § CCIP-Read gateway transport, and `docs/api-v1-routes.md` § `GET /v1/names/{name}/records`.
