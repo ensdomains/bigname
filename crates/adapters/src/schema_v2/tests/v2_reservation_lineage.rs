@@ -378,15 +378,24 @@ fn live_and_restored(
     logs: Vec<RawLogInput>,
     token: &str,
 ) -> anyhow::Result<(V2TokenStateView, V2TokenStateView)> {
+    live_and_restored_at(logs, ANNOUNCED_REGISTRY, token)
+}
+
+/// `live_and_restored` for a token of `emitter`.
+fn live_and_restored_at(
+    logs: Vec<RawLogInput>,
+    emitter: &str,
+    token: &str,
+) -> anyhow::Result<(V2TokenStateView, V2TokenStateView)> {
     let input = batch(vec![declared_registry()], Vec::new(), 1, logs);
     let (output, session) = interpret_test_batch_incremental(input.clone(), None)?;
     assert!(output.decode_skips.is_empty(), "{:?}", output.decode_skips);
     let live = session
-        .v2_token(ANNOUNCED_REGISTRY, token)
+        .v2_token(emitter, token)
         .expect("the live session holds the token");
     let prior = seam::fold_prior_events(Vec::new(), &output.normalized_events, &input.blocks)?;
     let restored = restored(&output, prior)?
-        .v2_token(ANNOUNCED_REGISTRY, token)
+        .v2_token(emitter, token)
         .expect("the restore installs the token");
     Ok((V2TokenStateView::of(&live), V2TokenStateView::of(&restored)))
 }
@@ -518,5 +527,61 @@ fn a_registered_reservation_holds_the_stored_registration_live_and_restored() ->
     };
     assert_eq!(live.resource_id, Some(resource_id));
     assert_eq!(live.token_lineage_id, Some(lineage));
+    Ok(())
+}
+
+/// A named registry's `TokenResource` emits a registration row that extends the token's
+/// registration, and a restore installs that row as the registration. The live token holds the
+/// same row after the link.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L472 @ ens_v2@a971bd64)
+#[test]
+fn a_linked_registration_holds_the_link_row_live_and_restored() -> anyhow::Result<()> {
+    let token = versioned_token(LABEL, 0);
+    let owner: Address = OWNER.parse().unwrap();
+    let logs = [
+        (ANNOUNCED_REGISTRY, RegistryCreated {}.encode_log_data()),
+        (
+            ETH_REGISTRY,
+            v2_registry::LabelRegistered {
+                tokenId: token,
+                labelHash: keccak256(LABEL.as_bytes()),
+                label: LABEL.to_owned(),
+                owner,
+                expiry: LIVE_EXPIRY,
+                sender: owner,
+            }
+            .encode_log_data(),
+        ),
+        (
+            ETH_REGISTRY,
+            v2_registry::TokenResource {
+                tokenId: token,
+                resource: token,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    let logs: Vec<RawLogInput> = logs
+        .into_iter()
+        .enumerate()
+        .map(|(index, (emitter, log))| raw_at(log, 1, index as i64, emitter))
+        .collect();
+    let input = batch(vec![declared_registry()], Vec::new(), 1, logs.clone());
+    let (output, _) = interpret_test_batch_incremental(input, None)?;
+    let linked = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationGranted"
+                && event.after_state["derived_from"] == "registry_state"
+        })
+        .expect("the link emits a registration row for the named token");
+    let (live, restored) = live_and_restored_at(logs, ETH_REGISTRY, &token_word())?;
+    assert_eq!(
+        live.registration.as_ref(),
+        Some(&linked.after_state),
+        "the live registration is the link's registration row"
+    );
+    assert_eq!(live, restored, "a restore installs the live token");
     Ok(())
 }
