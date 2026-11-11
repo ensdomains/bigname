@@ -5627,6 +5627,7 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     let pending_on_replay = "after_state\n      whole={\"a\":1}\n   replayed={\"a\":1,\"registry_hydration_pending\":true}";
     let other = "after_state\n      whole={\"to\":\"0x01\"}\n   replayed={\"to\":\"0x02\"}";
     let rebased_twice = "batch-boundary artifact {\"rebased_attributions\": 2}";
+    let rebased_once = "batch-boundary artifact {\"rebased_attributions\": 1}";
     let third = "live state differs from a restore at token_lineage_id";
     let transfer_lineage = "event x:TokenControlTransferred:0 diverges between the whole-sequence pass and the split replay:\n  after_state\n      whole={\"a\":1,\"token_lineage_id\":null,\"upstream_resource\":null}\n   replayed={\"a\":1,\"token_lineage_id\":\"l\",\"upstream_resource\":\"r\"}";
     let transfer_lineage_and_more = "event x:TokenControlTransferred:0 diverges between the whole-sequence pass and the split replay:\n  after_state\n      whole={\"a\":1,\"token_lineage_id\":null}\n   replayed={\"a\":2,\"token_lineage_id\":\"l\"}";
@@ -5639,6 +5640,11 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     let lapsed_then_again = vec![
         block(vec![register(Expiry::Lapses(0)), link]),
         block(vec![filler]),
+        block(vec![register(Expiry::Far)]),
+    ];
+    let reserved_between = vec![
+        block(vec![register(Expiry::Far), link]),
+        block(vec![reserve(Expiry::Far)]),
         block(vec![register(Expiry::Far)]),
     ];
     let expired = vec![block(vec![register(Expiry::Past)])];
@@ -5740,8 +5746,43 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             "a re-registration after the first lapsed, two events re-attributed",
             rebased_twice,
             "",
+            lapsed_then_again.clone(),
+            None,
+        ),
+        (
+            "a re-registration after the first lapsed, retirement flags",
+            flags,
+            "",
+            lapsed_then_again.clone(),
+            None,
+        ),
+        (
+            "a re-registration after the first lapsed, one event re-attributed",
+            rebased_once,
+            "",
             lapsed_then_again,
             None,
+        ),
+        (
+            "a re-registration after a reservation, one event re-attributed",
+            rebased_once,
+            "",
+            reserved_between,
+            None,
+        ),
+        (
+            "a live re-registration, retirement flags",
+            flags,
+            "",
+            live_again.clone(),
+            Some(TYR_525),
+        ),
+        (
+            "a live re-registration, one event re-attributed",
+            rebased_once,
+            "",
+            live_again.clone(),
+            Some(TYR_525),
         ),
         (
             "a live re-registration, a transfer's lineage",

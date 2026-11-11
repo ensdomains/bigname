@@ -151,45 +151,60 @@ fn only_the_transfer_lineage_differs(text: &str) -> bool {
     whole == replayed
 }
 
-/// A `LabelRegistered` over a token whose registration is still live at the new label's block.
-fn reregisters_a_live_token(actions: &[Action], layout: Layout) -> bool {
-    let mut registered = BTreeMap::new();
-    for (atom, at) in timed_atoms(actions, layout) {
+/// The registrations the model holds, with their expiries, so both TYR-525 shapes judge a label
+/// registered again by the same rule: it counts only while the held registration is live.
+#[derive(Default)]
+struct Registrations(BTreeMap<(Registry, Token), Expiry>);
+
+impl Registrations {
+    /// Applies one event at its block's timestamp. True for a `LabelRegistered` over a
+    /// registration still live at `at`. A reservation or an unregister ends the held registration,
+    /// a renewal moves its expiry and a regeneration moves it to the new token.
+    fn registers_again_while_live(&mut self, atom: Atom, at: i64) -> bool {
         match atom {
             Atom::Register {
                 registry,
                 token,
                 expiry,
                 ..
-            } => {
-                if registered
-                    .insert((registry, token), expiry)
-                    .is_some_and(|before| !passed(before, at))
-                {
-                    return true;
-                }
+            } => self
+                .0
+                .insert((registry, token), expiry)
+                .is_some_and(|before| !passed(before, at)),
+            Atom::Reserve {
+                registry, token, ..
+            }
+            | Atom::Unregister { registry, token } => {
+                self.0.remove(&(registry, token));
+                false
             }
             Atom::Renew {
                 registry,
                 token,
                 expiry,
             } => {
-                if let Some(current) = registered.get_mut(&(registry, token)) {
+                if let Some(current) = self.0.get_mut(&(registry, token)) {
                     *current = expiry;
                 }
-            }
-            Atom::Unregister { registry, token } => {
-                registered.remove(&(registry, token));
+                false
             }
             Atom::Regenerate { registry, from, to } => {
-                if let Some(expiry) = registered.remove(&(registry, from)) {
-                    registered.insert((registry, to), expiry);
+                if let Some(expiry) = self.0.remove(&(registry, from)) {
+                    self.0.insert((registry, to), expiry);
                 }
+                false
             }
-            _ => {}
+            _ => false,
         }
     }
-    false
+}
+
+/// A `LabelRegistered` over a token whose registration is still live at the new label's block.
+fn reregisters_a_live_token(actions: &[Action], layout: Layout) -> bool {
+    let mut registrations = Registrations::default();
+    timed_atoms(actions, layout)
+        .into_iter()
+        .any(|(atom, at)| registrations.registers_again_while_live(atom, at))
 }
 
 /// The open ticket a failure belongs to, judged on its kind, the failure text and the order's
@@ -288,14 +303,18 @@ fn relinks_a_closed_binding(actions: &[Action]) -> bool {
     false
 }
 
-/// A `LabelRegistered` whose expiry has passed at its own block, or over a token a registration
-/// still holds, or an `ExpiryUpdated` that moves a label's expiry from live to passed at its own
-/// block. A lapse later in the sequence, and a renewal of a label that had already lapsed, are
-/// orders the deployed registry emits and are not this ticket's.
+/// A `LabelRegistered` whose expiry has passed at its own block, or over a registration still live
+/// at that block, or an `ExpiryUpdated` that moves a label's expiry from live to passed at its own
+/// block. A lapse later in the sequence, a label registered again after the first lapsed, and a
+/// renewal of a label that had already lapsed are orders the deployed registry emits and are not
+/// this ticket's.
 fn emits_a_passed_or_live_label(actions: &[Action], layout: Layout) -> bool {
-    let mut registered = BTreeSet::new();
+    let mut registrations = Registrations::default();
     let mut expiries = BTreeMap::new();
     for (atom, at) in timed_atoms(actions, layout) {
+        if registrations.registers_again_while_live(atom, at) {
+            return true;
+        }
         match atom {
             Atom::Register {
                 registry,
@@ -303,7 +322,7 @@ fn emits_a_passed_or_live_label(actions: &[Action], layout: Layout) -> bool {
                 expiry,
                 ..
             } => {
-                if passed(expiry, at) || !registered.insert((registry, token)) {
+                if passed(expiry, at) {
                     return true;
                 }
                 expiries.insert((registry, token), expiry);
@@ -332,13 +351,9 @@ fn emits_a_passed_or_live_label(actions: &[Action], layout: Layout) -> bool {
                 }
             }
             Atom::Unregister { registry, token } => {
-                registered.remove(&(registry, token));
                 expiries.remove(&(registry, token));
             }
             Atom::Regenerate { registry, from, to } => {
-                if registered.remove(&(registry, from)) {
-                    registered.insert((registry, to));
-                }
                 if let Some(expiry) = expiries.remove(&(registry, from)) {
                     expiries.insert((registry, to), expiry);
                 }
