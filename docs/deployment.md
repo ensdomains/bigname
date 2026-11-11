@@ -6315,7 +6315,12 @@ composition pass derives every parent's rows in a children stream after the name
   its block.
 - The readers need `SELECT` on the listing and count tables. Before restarting an existing API
   role, apply the grant below on the primary and let it replay on any serving standby. Fresh role
-  setup above already includes it. Startup preflight refuses an API role without it.
+  setup above already includes it. An API role without it still starts, and logs one `WARN` at
+  startup naming the tables and the routes that read them: the subnames and registry labels
+  pages, and `include=counts` on the name, registry and address-name routes. Until the grant is
+  applied those requests answer `internal_error`, each with one `ERROR` line naming the tables,
+  and every other route serves. Each such read checks the grant in its own snapshot, so applying
+  it needs no restart.
 
   ```sql
   GRANT SELECT ON bigname_phase.project_child_listing, bigname_phase.project_child_listing_count

@@ -27,8 +27,24 @@ pub(crate) async fn ensure_verified_lookup_ddl_available(pool: &PgPool) -> Resul
         );
     }
 
+    // The child routes check this grant per read, so the API serves every other route without it.
+    let unreadable = bigname_storage::unreadable_child_listing_tables(pool)
+        .await
+        .context("API verified-lookup DDL preflight could not inspect the child listing grant")?;
+    if !unreadable.is_empty() {
+        tracing::warn!(
+            service = "api",
+            relations = %unreadable.join(","),
+            routes = CHILD_LISTING_ROUTES,
+            "the API role cannot read the stored child listing; these routes answer internal_error until it is granted SELECT (docs/deployment.md, The child listing family and its counts)"
+        );
+    }
+
     Ok(())
 }
+
+/// The routes that read the stored child listing.
+const CHILD_LISTING_ROUTES: &str = "GET /v1/names/{name}/subnames, GET /v1/registries/{chain_id}/{address}/labels, include=counts on /v1/names/{name}, /v1/registries/{chain_id}/{address} and the address name lists";
 
 /// Refuses to serve, unless `check` is `warn`, when an index `ops/walk-index-set/drop.sql` drops is
 /// not a valid, ready index on `normalized_events` in the database the API reads, which on a

@@ -62,7 +62,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
     }
 }
 
-async fn logged<F: Future>(work: F) -> (F::Output, String) {
+pub(super) async fn logged<F: Future>(work: F) -> (F::Output, String) {
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -73,7 +73,7 @@ async fn logged<F: Future>(work: F) -> (F::Output, String) {
     (output, logs.text())
 }
 
-fn line_with<'a>(logs: &'a str, level: &str, text: &str) -> &'a str {
+pub(super) fn line_with<'a>(logs: &'a str, level: &str, text: &str) -> &'a str {
     logs.lines()
         .find(|line| line.contains(level) && line.contains(text))
         .unwrap_or_else(|| panic!("no {level} line with {text:?}: {logs}"))
@@ -81,7 +81,7 @@ fn line_with<'a>(logs: &'a str, level: &str, text: &str) -> &'a str {
 
 /// Serve arguments whose listener address is already taken, so `serve` returns once its
 /// startup checks have passed.
-fn serve_args(
+pub(super) fn serve_args(
     database: &TestDatabase,
     listener: &tokio::net::TcpListener,
     check: WalkIndexSetCheck,
@@ -117,7 +117,7 @@ async fn serve_once(database: &TestDatabase, check: WalkIndexSetCheck) -> Result
     Ok((format!("{error:#}"), logs))
 }
 
-const STARTED: &str = "failed to bind the API listener";
+pub(super) const STARTED: &str = "failed to bind the API listener";
 
 /// The gauge as the metrics endpoint exports it.
 async fn scraped_gauge() -> Result<i64> {

@@ -89,6 +89,18 @@ async fn plan(conn: &mut PgConnection, name: &str, execute: &str) -> Result<Valu
     Ok(plan[0]["Plan"].clone())
 }
 
+/// The first node of `node_type` in the plan, depth first.
+fn find<'a>(node: &'a Value, node_type: &str) -> Option<&'a Value> {
+    if node["Node Type"] == node_type {
+        return Some(node);
+    }
+    node["Plans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|child| find(child, node_type))
+}
+
 fn quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
@@ -301,7 +313,8 @@ async fn a_prefix_reads_a_range_of_the_name_key() -> Result<()> {
 
 // Rows 22 and 26: a filtered total is an `Aggregate` over an index-only scan of the name index
 // with the parent in its condition, no CTE and no composition; the unfiltered total is the
-// stored count.
+// stored count. The capped total the routes run (a `LIMIT` of cap + 1) is the same index-only
+// scan under a `Limit`, and it reads no more rows than the limit.
 #[tokio::test]
 async fn a_filtered_total_counts_the_name_index_only() -> Result<()> {
     let database =
@@ -355,6 +368,41 @@ async fn a_filtered_total_counts_the_name_index_only() -> Result<()> {
                 "{mode}: {plan}"
             );
         }
+        let limit: i64 = 101;
+        let capped = capped_count_query(PARENT, &fenced, None, Some(limit));
+        raw_sql(&format!(
+            "PREPARE capped (text, text, bigint) AS {}",
+            capped.sql()
+        ))
+        .execute(&mut *conn)
+        .await?;
+        for mode in PLAN_MODES {
+            raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await?;
+            let plan = plan(
+                &mut conn,
+                "capped",
+                &format!("('{PARENT}', '{PARENT}', {limit})"),
+            )
+            .await?;
+            let scan = find(&plan, "Index Only Scan").unwrap_or(&Value::Null);
+            ensure!(
+                plan["Node Type"] == "Aggregate"
+                    && has_node(&plan, "Limit")
+                    && scan["Index Name"] == "project_child_listing_name_idx"
+                    && scan["Actual Rows"]
+                        .as_f64()
+                        .is_some_and(|rows| rows <= limit as f64)
+                    && !has_node(&plan, "CTE Scan"),
+                "{mode}: {plan}"
+            );
+        }
+        let total: i64 = capped_count_query(PARENT, &fenced, None, Some(limit))
+            .build_query_scalar()
+            .fetch_one(&mut *conn)
+            .await?;
+        ensure!(total == limit, "capped total {total}");
         raw_sql("RESET enable_seqscan").execute(&mut *conn).await?;
         ensure!(count(&mut conn, PARENT, None).await? == CHILDREN as u64);
         Ok(())

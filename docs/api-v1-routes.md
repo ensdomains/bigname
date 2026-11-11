@@ -5296,7 +5296,7 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- | --- |
 | `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 10,000 events and null above. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 labels under its name, and null otherwise. counts.events is exact up to 10,000 events and null above. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |

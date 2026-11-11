@@ -107,8 +107,6 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.project_address_record_id_index'),
                 ('relation', 'bigname_phase.project_name_history'),
                 ('relation', 'bigname_phase.project_name_summary'),
-                ('relation', 'bigname_phase.project_child_listing'),
-                ('relation', 'bigname_phase.project_child_listing_count'),
                 ('relation', 'bigname_phase.project_lookup_name'),
                 ('relation', 'bigname_phase.project_lookup_relation'),
                 ('relation', 'bigname_phase.project_lookup_inventory'),

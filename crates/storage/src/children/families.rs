@@ -3,7 +3,9 @@
 //! summaries, in the served readers' shapes. Every read runs in one read-only repeatable-read
 //! snapshot that first checks the parents' chains have a servable family marker
 //! ([`require_publication`]): without one the read fails with `FamilyPublicationUnavailable`,
-//! which the API answers with the stale 409.
+//! which the API answers with the stale 409. It then checks the role can read the stored child
+//! listing ([`require_child_listing`]): without that grant the read fails with
+//! [`ChildListingUnreadable`](super::grant::ChildListingUnreadable).
 //!
 //! A family child row carries the wire fields only: the provenance, chain positions,
 //! canonicality summary, manifest version and legacy recompute time are not
@@ -23,6 +25,7 @@ use crate::{ReadDb, read_db::ReadConn};
 
 use super::{
     DECLARED_SURFACE_CLASS,
+    grant::require_child_listing,
     types::{
         ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentPageFilter,
         ChildrenCurrentRow, ChildrenCurrentSummary, RegistryChildrenPage, RegistryLabelOwnerFilter,
@@ -33,6 +36,7 @@ use super::{
 async fn snapshot<'a>(db: ReadDb<'a>, parent_logical_name_ids: &[String]) -> Result<ReadConn<'a>> {
     let mut transaction = db.snapshot().await?;
     require_publication(&mut transaction, parent_logical_name_ids).await?;
+    require_child_listing(&mut *transaction).await?;
     Ok(transaction)
 }
 
@@ -129,6 +133,7 @@ pub(super) async fn registry_count_current(
     let registry = registry_address.to_ascii_lowercase();
     let mut transaction = db.snapshot().await?;
     ensure_published(&mut transaction, &[chain_id.to_owned()]).await?;
+    require_child_listing(&mut *transaction).await?;
     let parent: Option<String> = sqlx::query_scalar(SERVING_PARENT)
         .bind(chain_id)
         .bind(&registry)
