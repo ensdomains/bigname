@@ -41,6 +41,7 @@ use crate::{ProjectError, Result, families::input};
 #[cfg(test)]
 mod plan_tests;
 mod statements;
+pub(crate) use statements::lead_rank;
 use statements::{
     CHANGES, CLEAR_CHANGES, COMPOSED, DELETE, EXTRA, GROUPS, HEALS_ONLY, INSERT, JOURNAL,
     KEY_TARGET, LABEL_TARGET, LEADS, NAME, OBSERVED_LABELS, PREPARE, REGISTRY_CHILD,

@@ -1,6 +1,6 @@
 //! The stored event counts, family F20 (`docs/projections.md`, "Event counts"). After every
 //! publication, block by block, after an undo and its replay, and after a rebuild whose
-//! composition pass counts in several windows over several runs, each stored count equals the
+//! composition pass counts every block span once over several runs, each stored count equals the
 //! `total_count` of the event read it serves at the family marker's block: the
 //! `contract_address` read per namespace and kind for an emitter, the `resolver` read for the sum
 //! of a resolver's three anchor kinds, and the registry overview's read across namespaces. A key
@@ -314,24 +314,107 @@ async fn stored_event_counts_follow_every_publication() -> Result<()> {
     fixture.cleanup().await
 }
 
-/// A rebuild whose ranges stop below the target and whose composition pass counts one or two
-/// blocks a window, over runs of one step each, stores the counts block-by-block publication
-/// stores. The pass counts each window's block range on its own: several windows commit, each
-/// ending below the target.
-#[tokio::test]
-async fn a_pass_over_many_windows_and_runs_counts_every_block_once() -> Result<()> {
-    let fixture = Fixture::new("families_event_counts_pass", 12).await?;
+/// An emitter's event a block from 1 to 12, a pointer moved between the two resolvers every third
+/// block, the first resolver's own event, an orphaned row on a canonical block, a row on block 6's
+/// reorged sibling, a row with no block, and at block 7 a registry-fallback handoff group: two
+/// copies of one pointer change in one block, of which each anchor's read admits one.
+async fn history(fixture: &Fixture) -> Result<()> {
     for block in 1..=12 {
-        emitted(&fixture, &format!("a-{block}"), block, "AliasChanged").await?;
+        emitted(fixture, &format!("a-{block}"), block, "AliasChanged").await?;
         if block % 3 == 0 {
             let (before, after) = if block % 2 == 0 {
                 (Some(RESOLVER_1), RESOLVER_2)
             } else {
                 (Some(RESOLVER_2), RESOLVER_1)
             };
-            pointer(&fixture, block, 1, 1, before, after).await?;
+            pointer(fixture, block, 1, 1, before, after).await?;
         }
     }
+    fixture
+        .event(
+            Event::new("own-2", 2, 1, "AliasChanged", FAMILY)
+                .raw(json!({"emitting_address": RESOLVER_1})),
+        )
+        .await?;
+    emitted(fixture, "orphaned-5", 5, "PermissionScopeChanged").await?;
+    emitted(fixture, "reorged-6", 6, "PermissionScopeChanged").await?;
+    emitted(fixture, "unpositioned-8", 8, "PermissionScopeChanged").await?;
+    let node = format!("0x{:064x}", 2);
+    let logical_name_id = format!("ens:{node}");
+    fixture.surface(&logical_name_id, &node).await?;
+    for copy in ["a", "b"] {
+        fixture
+            .event(
+                Event::new(
+                    &format!("handoff-7:ResolverChanged:registry-fallback-handoff:{copy}"),
+                    7,
+                    if copy == "a" { 2 } else { 3 },
+                    "ResolverChanged",
+                    "ens_v1_registry_l1",
+                )
+                .name(&logical_name_id)
+                .after(json!({"resolver": RESOLVER_1, "node": node})),
+            )
+            .await?;
+    }
+    update(
+        fixture,
+        "UPDATE normalized_events SET canonicality_state = 'orphaned'
+         WHERE event_identity = 'orphaned-5';
+         INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         SELECT chain_id, '0x' || lpad('6a', 64, '0'), parent_hash, block_number,
+                block_timestamp, 'orphaned'
+         FROM chain_lineage WHERE block_number = 6;
+         UPDATE normalized_events SET block_hash = '0x' || lpad('6a', 64, '0')
+         WHERE event_identity = 'reorged-6';
+         UPDATE normalized_events SET block_number = NULL, block_hash = NULL,
+             transaction_hash = NULL, transaction_index = NULL, log_index = NULL
+         WHERE event_identity = 'unpositioned-8'",
+    )
+    .await
+}
+
+async fn work_rows(fixture: &Fixture) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM project_compose_event_count_work WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+/// M2.1, M2.4 and the work table's lifetime. The counts a rebuild's pass builds equal the counts
+/// block-by-block publication and a rebuild block by block store, every anchor kind, the
+/// orphaned row, the reorged block, the row with no block and the handoff group included. The
+/// pass runs one partition a run, 3 spans and 4 key partitions, and its stream walks every span
+/// and then every partition once. The work table holds rows only inside the stream: a row left
+/// before the pass begins is gone once it began, and none is left once the stream ended.
+#[tokio::test]
+async fn the_pass_counts_what_every_block_counts_over_many_runs() -> Result<()> {
+    let fixture = Fixture::new("families_event_counts_pass", 12).await?;
+    history(&fixture).await?;
+    for block in 1..=12 {
+        fixture.apply(block, FamilyMode::Normal).await?;
+    }
+    let incremental = require_reads(&fixture, "block by block").await?;
+    let kinds: std::collections::BTreeSet<i16> = incremental.keys().map(|key| key.0).collect();
+    ensure!(
+        kinds == std::collections::BTreeSet::from([0, 1, 2]),
+        "every anchor kind counts: {incremental:?}"
+    );
+    let count = |key: (i16, &str, &str, &str)| {
+        incremental
+            .get(&(key.0, key.1.to_owned(), key.2.to_owned(), key.3.to_owned()))
+            .copied()
+    };
+    // The four pointer changes, the handoff group's one copy, and nothing of the orphaned row,
+    // the reorged block's row or the row with no block.
+    ensure!(
+        count((0, REGISTRY, "ens", "ResolverChanged")) == Some(5)
+            && count((0, EMITTER, "ens", "PermissionScopeChanged")).is_none(),
+        "{incremental:?}"
+    );
     fixture
         .apply_with(
             12,
@@ -341,49 +424,141 @@ async fn a_pass_over_many_windows_and_runs_counts_every_block_once() -> Result<(
                 .with_rebuild_ranges(RebuildRanges::Off),
         )
         .await?;
-    let block_by_block = require_reads(&fixture, "block by block").await?;
     ensure!(
-        block_by_block.get(&(
-            0,
-            EMITTER.to_owned(),
-            "ens".to_owned(),
-            "AliasChanged".to_owned()
-        )) == Some(&12),
-        "{block_by_block:?}"
+        require_reads(&fixture, "rebuilt block by block").await? == incremental,
+        "a rebuild block by block stored other counts"
     );
+
     let mut budgeted = FamilyOptions::new(CONTENT_HASH)
         .with_rebuild_ranges(RebuildRanges::Through(11))
         .with_compose_chunk_keys(1)
+        .with_compose_builder_partitions(3, 4)
         .with_max_blocks_per_run(1);
     budgeted.max_range_events = 2;
     let mut runs = 0;
     let mut mode = FamilyMode::Rebuild;
-    // The pass counts window by window, never the chain in one statement: each committed window
-    // leaves its end as the stream's cursor.
-    let mut window_ends = std::collections::BTreeSet::new();
+    let mut walk = Vec::new();
+    let mut left_before_the_pass = false;
+    let mut left_once = false;
+    let mut seen_partials = false;
     loop {
         fixture.apply_with(12, mode, &budgeted).await?;
         mode = FamilyMode::Normal;
         runs += 1;
-        if let Some(record) = fixture.repair_record().await?
-            && record["compose_stream"] == 3
-            && let Some(end) = record["compose_cursor"].as_str()
+        let record = fixture.repair_record().await?.unwrap_or_default();
+        let (state, stream) = (record["state"].clone(), record["compose_stream"].clone());
+        let work = work_rows(&fixture).await?;
+        if left_before_the_pass && state == json!("composing") {
+            ensure!(work == 0, "the pass's beginning left {work} work rows");
+            left_before_the_pass = false;
+        }
+        if !left_once
+            && state == json!("rebuilding")
+            && record["composed_block"].is_null()
+            && fixture.marker().await?.0 == Some(11)
         {
-            window_ends.insert(end.parse::<i64>()?);
+            // The ranges are done and the pass has not begun.
+            update(
+                &fixture,
+                "INSERT INTO project_compose_event_count_work (chain_id, part, key_partition,
+                     anchor_kind, anchor, namespace, event_kind, delta)
+                 VALUES ('ethereum-sepolia', 9, 0, 0, '0xleft', 'ens', 'AliasChanged', 1)",
+            )
+            .await?;
+            left_before_the_pass = true;
+            left_once = true;
+        }
+        if stream == json!(6) {
+            if let Some(cursor) = record["compose_cursor"].as_str() {
+                let cursor: serde_json::Value = serde_json::from_str(cursor)?;
+                walk.push((
+                    cursor["step"].as_str().unwrap_or_default().to_owned(),
+                    cursor["part"].as_i64().unwrap_or(-1),
+                ));
+                seen_partials |= cursor["step"] == json!("spans") && work > 0;
+            }
+        } else if state != json!("composing") || stream == json!(3) {
+            ensure!(work == 0, "{work} work rows outside the event count stream");
         }
         if fixture.marker().await?.0 == Some(12) {
             break;
         }
-        ensure!(runs < 500, "the rebuild does not converge");
+        ensure!(runs < 2000, "the rebuild does not converge");
     }
-    ensure!(runs > 3, "the pass ran in {runs} runs");
     ensure!(
-        window_ends.len() >= 3 && window_ends.iter().all(|end| *end <= 11),
-        "the pass counted in windows ending at {window_ends:?}"
+        walk == [
+            ("spans".to_owned(), 0),
+            ("spans".to_owned(), 1),
+            ("spans".to_owned(), 2),
+            ("merge".to_owned(), 0),
+            ("merge".to_owned(), 1),
+            ("merge".to_owned(), 2),
+        ] && seen_partials,
+        "the stream walks each span and partition once: {walk:?}"
     );
     ensure!(
-        require_reads(&fixture, "the resumed pass").await? == block_by_block,
+        left_once && !left_before_the_pass,
+        "a row was left before the pass began and checked once it began"
+    );
+    ensure!(
+        require_reads(&fixture, "the pass over many runs").await? == incremental,
         "the pass stored other counts"
+    );
+    fixture.cleanup().await
+}
+
+/// M2.3. A key the stored counts hold before a rebuild and that no event counts at its pass has
+/// no row after it: the rebuild's reset deletes the chain's counts, no range writes one, and the
+/// stream writes only keys that count.
+#[tokio::test]
+async fn a_key_that_no_longer_counts_has_no_row_after_the_pass() -> Result<()> {
+    let fixture = Fixture::new("families_event_counts_stale", 12).await?;
+    history(&fixture).await?;
+    emitted(&fixture, "stale-4", 4, "PermissionScopeChanged").await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let key = (
+        0,
+        EMITTER.to_owned(),
+        "ens".to_owned(),
+        "PermissionScopeChanged".to_owned(),
+    );
+    ensure!(
+        require_reads(&fixture, "before").await?.get(&key) == Some(&1),
+        "the key counts its one event"
+    );
+    update(
+        &fixture,
+        "UPDATE normalized_events SET canonicality_state = 'orphaned'
+         WHERE event_identity = 'stale-4'",
+    )
+    .await?;
+    fixture
+        .apply_with(
+            12,
+            FamilyMode::Rebuild,
+            &FamilyOptions::new(CONTENT_HASH)
+                .with_max_blocks_per_run(u64::MAX)
+                .with_rebuild_ranges(RebuildRanges::Through(11))
+                .with_compose_builder_partitions(3, 4),
+        )
+        .await?;
+    let after = require_reads(&fixture, "after the pass").await?;
+    ensure!(
+        !after.contains_key(&key),
+        "the stale key kept a row: {after:?}"
+    );
+    fixture
+        .apply_with(
+            12,
+            FamilyMode::Rebuild,
+            &FamilyOptions::new(CONTENT_HASH)
+                .with_max_blocks_per_run(u64::MAX)
+                .with_rebuild_ranges(RebuildRanges::Off),
+        )
+        .await?;
+    ensure!(
+        stored(&fixture).await? == after,
+        "the pass and a rebuild block by block store the same counts"
     );
     fixture.cleanup().await
 }

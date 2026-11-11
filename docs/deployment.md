@@ -400,6 +400,12 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` — optional, 0 (default) to 3; see [Live publication lag](#live-publication-lag)
 - `BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM` — optional `maintenance_work_mem` for the walk index rebuild; see [The phase runner rebuilds the indexes drop.sql drops before Project](#the-phase-runner-rebuilds-the-indexes-dropsql-drops-before-project)
 - `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS` — optional `max_parallel_maintenance_workers` for the same rebuild
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` — most owned key family blocks one Project batch applies or undoes, 256 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` — most interpreted events one [rebuild range](glossary.md#rebuild-range) applies, 4,096 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` — block spans of the [composition pass](glossary.md#composition-pass)'s history catalogue build, 64 by default; see [The composition pass builds the history catalogue once](#the-composition-pass-builds-the-history-catalogue-once)
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` — key partitions of that build, a power of two, 16 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM` — `work_mem` of each build transaction, the server's setting when unset
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORKERS` — workers composing the composition pass's names stream side by side, 1 by default; see [The composition pass composes its names stream on parallel workers](#the-composition-pass-composes-its-names-stream-on-parallel-workers)
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
@@ -498,6 +504,28 @@ values reduce process memory and cause more indexed reads from
 `normalized_events`; zero is valid and forces every required pre-batch value
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
+
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` bounds the work one Project
+batch commits for the [owned key families](glossary.md#owned-key-family): the
+blocks it applies or undoes, where each block of a [rebuild
+range](glossary.md#rebuild-range), each chunk of the [composition
+pass](glossary.md#composition-pass) and each partition of its history catalogue
+build counts as one. The runner records progress and writes its heartbeat
+between batches, so a long rebuild runs as a series of batches within this
+budget. `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` bounds the
+interpreted events one rebuild range folds in its one transaction. The
+composition pass's history catalogue build does not read it: its block spans and
+key partitions split the build's transactions. A range keeps every row it
+loaded, with its pre-range and pre-block images, in memory until it commits. A
+resource-bearing event loads at least its resource pointer row, so the working
+set grows with this value. The default of 4,096 is about twice Sepolia's densest
+block and keeps a range's working set to tens of megabytes. A larger value grows
+the working set and the transaction one failure has to redo. A smaller one gives
+up more of the saving a range makes, about fifteen round trips for each block
+after its first. Live follow applies one block to a transaction and never reads
+the cap. Zero counts as one for the run budget and the range event cap, and
+neither of them changes stored output or the [projection content
+hash](glossary.md#projection-content-hash).
 
 Interpret chooses how it restores prior adapter state for each chain and each
 batch; there is nothing to enable. When every active or deprecated manifest of
@@ -6848,3 +6876,176 @@ depends on planner statistics, which a redo's freshly rebuilt tables may not hav
 - It needs no schema-migration and no new index. `name_surfaces_project_parent_key_idx` stays as
   it is.
 - The release that carries it redoes Project anyway, so it adds no redo of its own.
+## Resolver boundary walks in the rebuild work list
+
+The build that walks the resolver boundaries of a rebuild work list block by block changes one
+Project statement, `project:families.input.work_blocks`
+([table ownership](storage.md#table-ownership)).
+
+- Before, the two sources of contract addresses that start or stop in the requested range
+  asked, address by address, whether any
+  [resolver edge](glossary.md#discovery-graph--discovery-edge) pointed at the address. When a
+  few resolver contracts hold most resolver edges, as on mainnet, PostgreSQL could answer each
+  question with a sequential scan of every resolver edge of the chain. Each address now asks
+  for the lowest resolver edge destination at or above its own contract, one step of
+  `project_families_discovery_edges_resolver_destination_idx`, and is kept when that is its own
+  contract.
+- Before, each of the four resolver boundary sources listed the distinct boundaries of the
+  whole requested range and then took the lowest. PostgreSQL could read and sort every boundary
+  in the range before the limit. Each source now walks its boundary index upward one block at a
+  time and stops once it holds as many blocks as the limit asks for. The blocks it returns are
+  the same.
+- Stored rows do not change. API responses do not change.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash rotates for
+  every chain. The [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next re-derivation release and shares that release's Project
+  redo.
+- It adds no schema-migration, table, index, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## The composition pass builds the history catalogue once
+
+The build whose [composition pass](glossary.md#composition-pass) builds the address history
+catalogue once at its block, from set-based statements in partitions, and whose names stream no
+longer refreshes the catalogue per chunk, changes `crates/project/src` and adds a
+schema-migration. It is an input of the
+[projection content hash](glossary.md#projection-content-hash) only. The served catalogue rows
+are the same, row for row.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain needs
+  one full-range Project redo and no Interpret redo, under matching runner and API binaries.
+  The change rides the next re-derivation release and shares that release's Project redo. A
+  pass in flight under the previous binary does not resume: the rebuild starts again.
+- The schema-migration `20261027120000_project_compose_history_builder.sql` adds the work
+  list's `composed` and `relations` columns with the partial index over the names still to
+  compose, and the build's work table `project_compose_history_work`. It must run before the
+  new runner binary. Without it every family reset and every pass of the new binary fails.
+- Two runner settings split the build and a third sets its memory.
+  `--project-families-compose-block-spans`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`, default 64, from 1 to 16384) is
+  the number of block spans the event scan runs in. `--project-families-compose-key-partitions`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS`, default 16, a power of two)
+  is the number of key partitions of every other step. `--project-families-compose-work-mem`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM`, unset by default) sets `work_mem`
+  inside each build transaction only. None of them changes a served row. Changing the spans or
+  partitions while a build is under way stops the run with an error naming both splits, so
+  change them only between passes or put the old values back. A build continued on another
+  Postgres server version is refused the same way, since key partitions hash by `hashtext`.
+- Each build partition is one transaction and logs "committed a partition of the catalogue
+  build" with its step, partition, rows and time. A partition that runs past the heartbeat
+  threshold fires `BignamePhaseRunnerHeartbeatStale`. Raise the spans or the partitions for
+  the next pass if the log shows long partitions.
+- During the build the [family marker](glossary.md#family-marker) stays on one block while
+  the [repair record](glossary.md#repair-record)'s `compose_stream` is 3 and its
+  `compose_cursor` names the last partition committed
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- Rolling the runner back mid-pass is safe. The previous binary resets the chain under its
+  own projection content hash. Its reset leaves the build's work table, which it never reads,
+  and the new binary clears it at its next reset or pass end. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## The composition pass composes its names stream on parallel workers
+
+The build whose [composition pass](glossary.md#composition-pass) can compose its names stream
+on several workers, and composes the lookup inventories in a stream of their own after the
+record id stream, changes `crates/project/src` and adds a comment-only schema-migration. It is
+an input of the [projection content hash](glossary.md#projection-content-hash) only. The served
+rows are the same, row for row, whatever the worker count.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain needs
+  one full-range Project redo and no Interpret redo, under matching runner and API binaries.
+  The change rides the next re-derivation release and shares that release's Project redo.
+- `--project-families-compose-workers`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORKERS`, default 1, at least 1) is the
+  number of workers composing the names stream side by side. One is the serial pass. Each
+  worker holds a database connection for its chunk. `run` runs every chain at once, and
+  their rebuilds may compose at the same time, so its pool is two connections a chain and at
+  least four, plus one connection per worker per chain. `redo` takes its chains one after
+  another, so its pool is four connections plus one per worker. A pass with more workers
+  than its pool can serve beside its coordinator is refused at its start, naming both
+  numbers. The workers multiply the names stream's database load: each runs the same
+  statements under the server's `work_mem`, so size the count to the database's CPU and
+  memory, not the runner's.
+- The schema-migration `20261027130000_project_compose_stream_comments.sql` changes three
+  column comments only: the repair record's `compose_stream` and `compose_cursor`, and the
+  lookup name's `record_serving_resource_id`. It changes no column, index or row, and the
+  runner works without it.
+- During the names stream the [repair record](glossary.md#repair-record)'s `compose_cursor`
+  stays empty while `compose_chunks` and the work list's `composed` rows move. The lookup
+  inventories stream is `compose_stream` 4, and its cursor names the last lookup name it
+  committed ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- Rolling the runner back mid-pass is safe. The previous binary resets the chain under its
+  own projection content hash. The manifest-authority fingerprint and the compiled watch plan
+  are unchanged, so stamp no Ingest redo.
+
+## Redo finds lost preimage witnesses without reading every surface
+
+An Interpret redo finds the surfaces whose raw labels lost their
+[preimage witness](glossary.md#preimage-witness) twice: once to refresh their search
+documents (`interpret:identity_search.redo_names`) and once to repair the witness
+(`interpret:reanchor.repair_preimage_witnesses`). Both statements read every surface of the
+chain, so a one-block redo after a reorg at the head cost as much as a full scan of
+`name_surfaces`. They now read three small sets: surfaces without a witness, surfaces whose
+witness sits on an orphaned block, and byte-oriented shadows whose witness names no readable
+event ([storage](storage.md#table-ownership)). The repair also looks up each target's earlier
+observations and updates the targets by name, so no plan of it joins every surface.
+
+- No stored row changes. The statements select the same surfaces and write the same rows.
+- It changes `crates/interpret/src/write/search.rs`, `reanchor.rs` and the new `witness.rs`,
+  so it rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every
+  chain although no stored row changes. The
+  [projection content hash](glossary.md#projection-content-hash) covers the interpreter hash,
+  so it rotates too. An existing deployment finishes the full-range Interpret redo and then
+  the stamped Project redo it installs before the matching API serves, as the
+  [handoff](#phase-runner-configuration) describes. The change rides the next release that
+  redoes Interpret and shares that release's redo pair.
+- `20261027140000_name_surfaces_lost_witness_indexes.sql` adds
+  `name_surfaces_released_witness_idx` and `name_surfaces_byte_shadow_idx`, both on
+  `name_surfaces (chain_id, logical_name_id)`. Each is a plain `CREATE INDEX` with a SHARE
+  lock on `name_surfaces` until the schema-migration commits, which blocks Interpret's writes
+  to it. Apply it with the phase runner, redo processes and API stopped, with the
+  `lock_timeout`, `statement_timeout` and retry procedure of [Server Compose](#server-compose)
+  and `--target-version 20261027140000`. On a large initialized database, prebuild both
+  concurrently first, outside a transaction, so the schema-migration finds them and skips the
+  builds:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_released_witness_idx
+    ON bigname_phase.name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name IS NOT NULL AND preimage_event_identity IS NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_byte_shadow_idx
+    ON bigname_phase.name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name = '' AND visibility_state = 'shadow';
+```
+
+  Either way, confirm both indexes are `indisvalid` and `indisready` in `pg_index` and that
+  `pg_get_indexdef` shows those columns and predicates. `IF NOT EXISTS` matches the name only.
+  An interrupted concurrent build leaves an invalid index that must be dropped with
+  `DROP INDEX CONCURRENTLY` before the build is run again.
+- The three sets equal the old scan only while two counts stay zero, which the e2e reorg
+  scenario asserts. On an existing database, both queries below must return 0 before the
+  release redo. They read every surface and every event of the chain, so run them away from
+  the serving path:
+
+```sql
+SELECT count(*) FROM bigname_phase.name_surfaces surface
+WHERE surface.preimage_event_identity IS NOT NULL
+  AND NOT (surface.raw_name = '' AND surface.visibility_state = 'shadow')
+  AND NOT EXISTS (
+      SELECT 1 FROM bigname_phase.normalized_events event
+      WHERE event.event_identity = surface.preimage_event_identity);
+SELECT count(*) FROM bigname_phase.normalized_events
+WHERE canonicality_state NOT IN ('canonical', 'safe', 'finalized');
+```
+
+  If either count is not 0, stop and do not start the redo. The three sets would miss those
+  surfaces, so their raw labels would keep a witness that names no readable event. Such a
+  database needs the statements bounded by an anti-join on `preimage_event_identity` instead,
+  which this release does not ship.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.

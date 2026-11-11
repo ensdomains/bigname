@@ -135,8 +135,8 @@ impl Fixture {
     /// Whether `chain`'s marker (in `state`) belongs to a rebuild whose composition pass has not
     /// finished the children stream: the marker is `bootstrap_pending` and the repair record is
     /// still applying ranges before its pass (`rebuilding` with no composed block) or composing
-    /// the names stream (0) or the children stream (4), which run first and second
-    /// (`families/compose.rs`, `Stream`).
+    /// the names stream (0), the leads stream (7) or the children stream (5), which run first,
+    /// second and third (`families/compose.rs`, `Stream`).
     async fn before_children_stream(&self, chain: &str, state: &str) -> Result<bool> {
         if state != "bootstrap_pending" {
             return Ok(false);
@@ -151,7 +151,7 @@ impl Fixture {
         Ok(match record {
             Some((record, _, composed)) if record == "rebuilding" => composed.is_none(),
             Some((record, stream, _)) if record == "composing" => {
-                matches!(stream, None | Some(0) | Some(4))
+                matches!(stream, None | Some(0) | Some(7) | Some(5))
             }
             _ => false,
         })

@@ -14,12 +14,18 @@ use sqlx::{PgPool, raw_sql};
 
 pub mod address_listing;
 mod child_listing;
+pub mod compose;
 pub mod ens_v2_path;
 mod expiry_policy;
 pub mod listing_cases;
+pub mod workers;
 pub use expiry_policy::expected_registration_expiry;
 
 pub const CHAIN: &str = "ethereum-sepolia";
+/// The application name of the fixture's sessions: the pool the family runs use, and every pool
+/// opened from its options that keeps its name, the one the fixture checks the expiry selector on
+/// among them.
+pub const FIXTURE_APPLICATION: &str = "families_fixture";
 /// The projection content hash of this build: the composed name reader serves only a marker
 /// written by it, as the publication fence does.
 pub const CONTENT_HASH: &str = bigname_test_support::PROJECTION_CONTENT_HASH;
@@ -127,8 +133,15 @@ pub struct Fixture {
 impl Fixture {
     /// A phase schema with canonical blocks `0..=blocks`.
     pub async fn new(prefix: &str, blocks: i64) -> Result<Self> {
+        Self::with_connections(prefix, blocks, 1).await
+    }
+
+    /// The same, with a pool of `connections`: a composition pass on several workers needs one
+    /// more than its workers.
+    pub async fn with_connections(prefix: &str, blocks: i64, connections: u32) -> Result<Self> {
         let database =
-            TestDatabase::create(TestDatabaseConfig::new(prefix).pool_max_connections(1)).await?;
+            TestDatabase::create(TestDatabaseConfig::new(prefix).pool_max_connections(connections))
+                .await?;
         let pool = database.pool().clone();
         let name: String = sqlx::query_scalar("SELECT current_database()")
             .fetch_one(&pool)
@@ -165,13 +178,26 @@ impl Fixture {
             pool.connect_options()
                 .as_ref()
                 .clone()
-                .options([("search_path", "bigname_phase,public")]),
+                .options([("search_path", "bigname_phase,public")])
+                .application_name(FIXTURE_APPLICATION),
         );
-        let mut connection = pool.acquire().await?;
-        sqlx::query("SET search_path TO bigname_phase, public")
-            .execute(&mut *connection)
-            .await?;
-        drop(connection);
+        // Connections opened before the ALTER DATABASE committed keep the old search path and
+        // have no application name, and a pool of several can hold more than one. Holding
+        // `connections` at once takes every connection the pool has, so each is set before any
+        // is returned.
+        let mut held = Vec::new();
+        for _ in 0..connections {
+            let mut connection = pool.acquire().await?;
+            sqlx::query("SET search_path TO bigname_phase, public")
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query("SELECT set_config('application_name', $1, false)")
+                .bind(FIXTURE_APPLICATION)
+                .execute(&mut *connection)
+                .await?;
+            held.push(connection);
+        }
+        drop(held);
         let fixture = Self {
             database,
             pool,
@@ -291,23 +317,29 @@ impl Fixture {
     /// listable names as (name, expiry, authority), in name order; none when no chain is
     /// published for this build.
     pub async fn assert_expiry_selector(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        // A session of its own: tests that measure a statement's plan depend on what the
+        // fixture's one pooled session has already run. It is closed before this returns, so
+        // none of its sessions is checked out or in a transaction once the check is done.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(self.pool.connect_options().as_ref().clone())
+            .await?;
+        let checked = Self::expiry_selector_on(&pool).await;
+        pool.close().await;
+        checked
+    }
+
+    async fn expiry_selector_on(pool: &PgPool) -> Result<Vec<(String, String, Option<String>)>> {
         use bigname_storage::{
             NameCurrentExpiringFilter, NameCurrentListOrder, UnixSeconds,
             families::name::{
                 is_publication_unavailable, load_family_expiring_page,
-                load_family_names_by_logical_name_ids,
+                load_family_names_by_logical_name_ids, load_family_publication,
             },
             name_current_public_authority,
         };
         use std::collections::{BTreeMap, BTreeSet};
 
-        // A session of its own: tests that measure a statement's plan depend on what the
-        // fixture's one pooled session has already run.
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(self.pool.connect_options().as_ref().clone())
-            .await?;
-        let pool = &pool;
         let surfaces: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT surface.logical_name_id, surface.namespace, surface.chain_id
              FROM name_surfaces surface
@@ -316,6 +348,16 @@ impl Fixture {
         )
         .fetch_all(pool)
         .await?;
+        // The composed read drops its snapshot open when a chain is not published, which leaves
+        // the session in a transaction until sqlx flushes the queued rollback. The publications
+        // are read first, outside a transaction, so that read runs only when it can close. These
+        // chains are a superset of the ones the read checks.
+        let chains: BTreeSet<&str> = surfaces.iter().map(|(.., chain)| chain.as_str()).collect();
+        for chain in chains {
+            if load_family_publication(pool, chain).await?.is_none() {
+                return Ok(Vec::new());
+            }
+        }
         let names: Vec<String> = surfaces.iter().map(|(name, ..)| name.clone()).collect();
         let composed = match load_family_names_by_logical_name_ids(pool, &names).await {
             Ok(composed) => composed,

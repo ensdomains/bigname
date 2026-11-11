@@ -393,7 +393,7 @@ async fn the_resolver_edge_sources_return_distinct_readable_boundaries_up_to_the
 /// collected both boundaries of every resolver edge, and of every address of a resolver edge's
 /// destination, and filtered them afterwards. A frozen copy, never edited to follow
 /// `input::work_blocks`.
-const WORK_BLOCKS_BEFORE: &str = "
+pub(super) const WORK_BLOCKS_BEFORE: &str = "
      SELECT DISTINCT work.block_number FROM (
          (SELECT DISTINCT event.block_number
           FROM normalized_events event

@@ -482,7 +482,9 @@ field requires no schema migration or replay.
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
 | `project_family_marker`, `project_family_undo`, `project_repair_record` and [owned key family tables](glossary.md#per-block-publication) | Project | Permanent current serving state, publication generation, undo journal and repair progress. Readers compose names, records, control, permissions, resolver collections, reverse claims and address relations from one family snapshot. Child lists and counts use `project_child_edge_candidate`, `project_parent_subregistry` and `project_name_summary`; the `GET /v1/names` expiry walk reads `project_name_summary.authority_arm` to skip names an `authority` filter cannot list. An unavailable marker or overlapping redo refuses composed reads. Family data is rebuildable from canonical interpreted input; hash-pinned hydration overlays follow the documented replay policy. |
-| `project_compose_name_work` | Project | The work list of a rebuild's [composition pass](glossary.md#composition-pass): every name id the pass composes or indexes, with what it composes for each, numbered in `COLLATE "C"` order once when the pass begins. The names stream pages through it by number. It holds rows only during a pass: the pass end and a family reset clear the chain's rows. Not journalled, not served. |
+| `project_compose_name_work` | Project | The work list of a rebuild's [composition pass](glossary.md#composition-pass): every name id the pass composes or indexes, with what it composes for each, numbered in `COLLATE "C"` order once when the pass begins. The names stream's workers claim the rows not yet composed, in number order, skipping those another worker's open chunk holds, and mark each row composed in the chunk that composed it, with a composed name's current address relations, which the catalogue build reads. It holds rows only during a pass: the pass end and a family reset clear the chain's rows. Not journalled, not served. |
+| `project_compose_history_work` | Project | The work table of the pass's history catalogue build: every catalogue source key the pass reaches, with its partial aggregates per block span, its key partition and whether a resource also gets edges and memberships. The build merges it into the catalogue. It holds rows only during a pass: the pass end and a family reset clear the chain's rows. Not journalled, not served. |
+| `project_compose_event_count_work` | Project | The work table of the pass's event count stream: the per-key event counts of each block span at or below the pass block, with the key partition of the anchor. The stream sums them into `project_event_count`. It holds rows only during the stream: the pass's beginning, the stream's last partition, the pass end and a family reset clear the chain's rows. Not journalled, not served. |
 | `project_text_hydration_work`, `project_reverse_hydration_work` | Project | Derived indexes of pending text hydration and continuously refreshed reverse tuples. Keyed like their source rows, with indexed attempt order. The order is scheduling state only: `project_reverse_tuple.attempt_ordinal` can advance while the tuple's name and the block it was observed at (`hydrated_name`, `attempt_block`, `attempt_hash`, `baseline`) stay. The source rows also carry the largest Multicall3 aggregate a selector may next be sent in after its aggregate failed (`attempt_limit`, `hydration_limit`) and the count of reads in a row that observed nothing (`attempt_failures`, `hydration_failures`, copied into the work indexes). Selection uses a positive failure count, a null aggregate limit and the attempt height to delay an individually failed child's retry by 7,200 blocks; outer failures retain their split scheduling. Fresh selector evidence clears obsolete limits and counts. They are journalled and undone with their row. Publication and undo refresh affected keys transactionally; reset clears them and rebuild repopulates them. No provider payloads or separate history. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `resolution_divergences` | guarded non-API lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
@@ -690,16 +692,10 @@ Family indexes serve these concrete readers:
   condition and no sort. The planner chooses it on cost. Its predicate leaves out names longer
   than 2000 bytes, because a btree entry larger than about 2.7 KB fails the insert, and the
   walk carries the same bound, so those names are never listed there. A `LIKE` prefix becomes an index range only on a database whose collation PostgreSQL
-  recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan. The
-  reverse lookup candidates (`storage:families.records.reverse_candidates`) keep long names and
-  start from `project_address_name_index`. They order and continue by name, namespace and
-  namehash under `COLLATE "C"`, on any database: the reverse page then drops the names at or
-  before its cursor by comparing the same keys as bytes, and the route builds its cursor the
-  same way, so a database collation that orders names differently from their bytes would
-  otherwise skip names between pages. Search orders, filters and continues in SQL alone, under
-  the database collation throughout.
-- Each of those two walks runs its statement for the surfaces with raw bytes as the first arm
-  of a `UNION ALL`. For search that statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
+  recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan.
+  Search orders, filters and continues in SQL alone, under the database collation throughout.
+- The search walk runs its statement for the surfaces with raw bytes as the first arm of a
+  `UNION ALL`. That statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
   computes each one's [rendered name](glossary.md#rendered-name) before its `LIMIT`, applies
   the same filters and keyset cursor to that name, and has no length bound. The two arms are
   merged in served-name order. The second arm is guarded by a test that any surface without
@@ -805,11 +801,11 @@ The owned key families add six, named for their reader:
 
 | Index | Serves |
 | --- | --- |
-| `project_families_discovery_edges_resolver_from_block_idx` | `project:families.classification.activated`: resolver edges that start at the block. `project:families.input.work_blocks`: the source of resolver edges that start in the requested range |
-| `project_families_discovery_edges_resolver_to_block_idx` | `project:families.classification.activated`: resolver edges that stop at the block. `project:families.input.work_blocks`: the source of resolver edges that stop in the requested range |
-| `project_families_contract_instance_addresses_from_block_idx` | `project:families.classification.activated`: contract addresses that start at the block. `project:families.input.work_blocks`: the source of addresses that start in the requested range |
-| `project_families_contract_instance_addresses_to_block_idx` | `project:families.classification.activated`: contract addresses that stop at the block. `project:families.input.work_blocks`: the source of addresses that stop in the requested range |
-| `project_families_discovery_edges_resolver_destination_idx` | `project:families.classification.activated`: whether an address that starts or stops at the block is any resolver edge's destination, deactivated edges included. `project:families.input.work_blocks`: the same test, one probe for each address that starts or stops in the requested range |
+| `project_families_discovery_edges_resolver_from_block_idx` | `project:families.classification.activated`: resolver edges that start at the block. `project:families.input.work_blocks`: the walk of resolver edges that start in the requested range, one ordered step to each next start block |
+| `project_families_discovery_edges_resolver_to_block_idx` | `project:families.classification.activated`: resolver edges that stop at the block. `project:families.input.work_blocks`: the walk of resolver edges that stop in the requested range, one ordered step to each next stop block |
+| `project_families_contract_instance_addresses_from_block_idx` | `project:families.classification.activated`: contract addresses that start at the block. `project:families.input.work_blocks`: the walk of addresses that start in the requested range, one ordered step to each next start block, and the addresses that start at each block it reaches |
+| `project_families_contract_instance_addresses_to_block_idx` | `project:families.classification.activated`: contract addresses that stop at the block. `project:families.input.work_blocks`: the walk of addresses that stop in the requested range, one ordered step to each next stop block, and the addresses that stop at each block it reaches |
+| `project_families_discovery_edges_resolver_destination_idx` | `project:families.classification.activated`: whether an address that starts or stops at the block is any resolver edge's destination, deactivated edges included. `project:families.input.work_blocks`: the same test for each address at a block an address walk reaches, as one ordered step per address to the lowest resolver edge destination at or above its instance |
 | `project_families_discovery_edges_resolver_admission_idx` | `project:families.classification.classify`: one active resolver edge per active manifest to each touched resolver's contract instance |
 
 Interpret also writes `name_surfaces`. The API's name-ordered readers add two read-only
@@ -856,7 +852,7 @@ and `20261029120000_search_prefix_bucket_indexes.sql` and changing no row:
 | `name_search_documents_prefix2_idx` | `storage:families.name.search_candidates.prefix2`: the same for a two-character prefix |
 | `name_search_documents_prefix3_idx` | `storage:families.name.search_candidates.prefix3`: the same for a prefix of three or more characters, filtered by the whole prefix |
 
-The same reader, `storage:families.records.reverse_candidates` and Project's raw-name sweep
+The same reader and Project's raw-name sweep
 (`project:families.derived.summary_raw_name_sweep`) also read
 `name_surfaces_project_suffix_hash_idx`, which the identity baseline and
 `20260923140000_project_name_surfaces_label_indexes.sql` install on
@@ -864,6 +860,20 @@ The same reader, `storage:families.records.reverse_candidates` and Project's raw
 store no raw bytes, whose indexed expression is NULL, and to learn that none exists. The sweep
 runs on the first family block after a completed Interpret redo attempt and reads every such
 surface of the chain once.
+
+An Interpret redo finds the surfaces whose raw labels lost their
+[preimage witness](glossary.md#preimage-witness) through two partial indexes of Interpret's
+own, installed by the identity baseline and
+`20261027140000_name_surfaces_lost_witness_indexes.sql`. They change no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_surfaces_released_witness_idx` | `interpret:identity_search.redo_names` and `interpret:reanchor.repair_preimage_witnesses`: surfaces that keep raw labels without a witness |
+| `name_surfaces_byte_shadow_idx` | the same two statements: byte-oriented shadows, each probed for a readable witness, because a redo keeps their witness when it deletes the event |
+
+The same statements find the witnesses on orphaned blocks from the orphaned `chain_lineage`
+rows, through `chain_lineage_state_idx` and `normalized_events_block_idx`. No statement reads
+every surface of the chain.
 
 Project's selection of the names under a changed ENSv2 path
 (`project:families.resolution_paths.prepare`, see
@@ -927,7 +937,10 @@ or address/resource relations; current name rows retain their selected resource 
 Project validates the cited relation position. `project_history_source` holds shared source bounds and conservative
 event-kind/record-key summaries. `project_history_source_edge` records resource-to-resolver
 source reachability and pointer/link provenance. Project journals these facts and writes
-`project_history_catalogue_marker` in the same transaction as its family publication.
+`project_history_catalogue_marker` in the same transaction as its family publication. A
+rebuild's composition pass builds the three tables once at its block instead, from set-based
+statements in key partitions, and journals nothing
+([projections](projections.md#owned-key-families)).
 The reader requires the catalogue version, content hash, publication sequence and block/hash
 to match the captured family publication. Missing or incomplete catalogue state is stale.
 An ordinary publication between API admission and the read snapshot retains the original
