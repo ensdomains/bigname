@@ -195,10 +195,9 @@ fn registers_expired_or_live(actions: &[Action]) -> bool {
             Atom::Unregister { registry, token } => {
                 registered.remove(&(registry, token));
             }
-            Atom::Regenerate { registry, from, to } => {
-                if registered.remove(&(registry, from)) {
-                    registered.insert((registry, to));
-                }
+            Atom::Regenerate { registry, from, to } if registered.contains(&(registry, from)) => {
+                registered.remove(&(registry, from));
+                registered.insert((registry, to));
             }
             _ => {}
         }
