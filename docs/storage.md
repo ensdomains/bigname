@@ -1410,6 +1410,9 @@ the observation block and the greatest preceding address range's close plus
 one. Retired ranges remain unchanged. This preservation does not change raw
 facts, normalized-event identity, or projection ownership.
 
+[Phase state](phase-state.md) names each state a `chain_phase_state` row can
+be in and lists every statement that moves a row, with the code line of each.
+
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing
 the retained range markers, source provenance, verification level, or content
