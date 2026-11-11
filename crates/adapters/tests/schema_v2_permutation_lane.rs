@@ -14,6 +14,8 @@
 //! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (144 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
 //! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
+//! - `BIGNAME_REGISTRY_ORDER_CASES` and `BIGNAME_REGISTRY_ORDER_SEED` drive the generated ENSv2
+//!   registry orders instead; see `permutation/registry_orders.rs`.
 //!
 //! The knobs drop some of the assertions about what the corpus reaches, because those are
 //! properties of the default corpus rather than of any seed: a reduced or reseeded run drops the
@@ -49,7 +51,7 @@ use permutation::{
     },
     invariants::{Converged, IdentityReferences, assert_upsert_guards_agree, converge, split},
     names::{labelhash, namehash},
-    pool_v2,
+    pool_v2, registry_orders,
     scenario::{self, BurstPhase},
     world::{
         BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_MAINNET, ENS_V2_SEPOLIA, GeneratedLog,
@@ -4626,4 +4628,135 @@ fn matching_release_except_binding(
             ))
             .then_some((exempt, opening))
     })
+}
+
+/// Generated ENSv2 registry orders, with no ordering repair, hold `converge` in every block
+/// layout and batch split. See `permutation/registry_orders.rs` for the alphabet, the knobs and the
+/// soak invocation.
+#[test]
+fn generated_registry_orders_converge_in_every_layout_and_split() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let cases = knob(
+        "BIGNAME_REGISTRY_ORDER_CASES",
+        registry_orders::DEFAULT_CASES,
+    )?;
+    let base = knob("BIGNAME_REGISTRY_ORDER_SEED", registry_orders::DEFAULT_SEED)?;
+    if cases == 0 {
+        bail!("BIGNAME_REGISTRY_ORDER_CASES must be at least 1");
+    }
+    let sweep = registry_orders::sweep(&wiring, base, cases);
+    eprintln!("{sweep}");
+    sweep.verdict(cases == registry_orders::DEFAULT_CASES && base == registry_orders::DEFAULT_SEED)
+}
+
+#[test]
+fn generated_registry_orders_are_reproducible_from_their_seed() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let seed = registry_orders::case_seed(registry_orders::DEFAULT_SEED, 1);
+    let first = registry_orders::generate(seed);
+    let again = registry_orders::generate(seed);
+    assert_eq!(first.actions, again.actions);
+    assert!(registry_orders::well_formed(&first.actions));
+    for (layout, _) in registry_orders::RUNS {
+        let (left, _) = registry_orders::input(&wiring, &first.actions, layout)?;
+        let (right, _) = registry_orders::input(&wiring, &again.actions, layout)?;
+        assert_eq!(
+            format!("{:?}", left.raw_logs),
+            format!("{:?}", right.raw_logs)
+        );
+    }
+    let other =
+        registry_orders::generate(registry_orders::case_seed(registry_orders::DEFAULT_SEED, 2));
+    assert_ne!(first.actions, other.actions);
+    Ok(())
+}
+
+/// The shapes the generated sweep counts but does not fail on, against the orders the open fix
+/// for TYR-510 lists: a label after `TokenResource`, with or without a pointer first, and a label
+/// over its own reservation. A label under another label's reservation, a label after pointers
+/// only, a second link of a registered token and a label after a released link keep no resource.
+#[test]
+fn registry_order_known_shapes_are_the_open_fix_orders() {
+    use crate::permutation::registry_orders::{
+        Action, Atom, Expiry, LABEL_OVER_RESERVATION, Pointer, Registry,
+        TOKEN_RESOURCE_BEFORE_LABEL, Token, known_shapes,
+    };
+    let registry = Registry::Declared;
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let block = |atoms: Vec<Atom>| Action {
+        atoms,
+        new_block: true,
+        same_transaction: false,
+    };
+    let register = |label| Atom::Register {
+        registry,
+        token,
+        label,
+        owner: 1,
+        expiry: Expiry::Far,
+    };
+    let reserve = |label| Atom::Reserve {
+        registry,
+        token,
+        label,
+        expiry: Expiry::Far,
+    };
+    let link = Atom::Link {
+        registry,
+        token,
+        resource: token,
+    };
+    let resolver = Atom::Resolver {
+        registry,
+        token,
+        to: Pointer::Other(0),
+    };
+    let unregister = Atom::Unregister { registry, token };
+    let cases = [
+        (
+            vec![block(vec![link]), block(vec![register(0)])],
+            Some(TOKEN_RESOURCE_BEFORE_LABEL),
+        ),
+        (
+            vec![
+                block(vec![resolver]),
+                block(vec![link]),
+                block(vec![register(0)]),
+            ],
+            Some(TOKEN_RESOURCE_BEFORE_LABEL),
+        ),
+        (
+            vec![block(vec![reserve(0), register(0)]), block(vec![link])],
+            Some(LABEL_OVER_RESERVATION),
+        ),
+        (
+            vec![block(vec![reserve(0)]), block(vec![register(1)])],
+            None,
+        ),
+        (vec![block(vec![resolver]), block(vec![register(0)])], None),
+        (
+            vec![block(vec![register(0), link]), block(vec![link])],
+            None,
+        ),
+        (
+            vec![
+                block(vec![link]),
+                block(vec![unregister]),
+                block(vec![register(0)]),
+            ],
+            None,
+        ),
+    ];
+    for (actions, expected) in cases {
+        assert_eq!(
+            known_shapes(&actions).into_iter().collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>(),
+            "{actions:?}"
+        );
+    }
 }

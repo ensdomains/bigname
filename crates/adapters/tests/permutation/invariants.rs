@@ -574,7 +574,10 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         input.blocks.last().map(|block| block.block_timestamp),
     )?;
     if live != restored {
-        bail!("{context}: live adapter state differs from a compacted restore");
+        bail!(
+            "{context}: live adapter state differs from a compacted restore:{}",
+            session_difference(&live, &restored)
+        );
     }
 
     let mut session = None;
@@ -655,7 +658,10 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
             blocks.last().map(|block| block.block_timestamp),
         )?;
         if next != restored_session {
-            bail!("{context}: split batch {index} live state differs from a compacted restore");
+            bail!(
+                "{context}: split batch {index} live state differs from a compacted restore:{}",
+                session_difference(&next, &restored_session)
+            );
         }
         session = Some(next);
         absorb_rows(&mut replayed, resumed_output.clone());
@@ -687,6 +693,38 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         artifacts,
         tiny_cache_misses,
     })
+}
+
+/// The lines where two sessions' debug renderings differ, with a little context on each side.
+fn session_difference(live: &AdapterSession, restored: &AdapterSession) -> String {
+    let live = format!("{live:#?}");
+    let restored = format!("{restored:#?}");
+    let live = live.lines().collect::<Vec<_>>();
+    let restored = restored.lines().collect::<Vec<_>>();
+    let prefix = live
+        .iter()
+        .zip(&restored)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = live[prefix..]
+        .iter()
+        .rev()
+        .zip(restored[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let window = |lines: &[&str]| {
+        lines[prefix.saturating_sub(4)..(lines.len() - suffix + 4).min(lines.len())]
+            .iter()
+            .take(120)
+            .map(|line| format!("      {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "\n    live:\n{}\n    restored:\n{}",
+        window(&live),
+        window(&restored)
+    )
 }
 
 fn restore_adapter_session(
