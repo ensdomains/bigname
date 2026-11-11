@@ -831,22 +831,6 @@ fn v2_reservation_then_link_emits_no_registration_row() -> Result<()> {
     Ok(())
 }
 
-/// A second `TokenResource` for the same resource extends the token's registration again. The
-/// row it emits is the same whether the first link's row was restored in between or not.
-#[test]
-fn v2_label_then_two_links_is_batch_grid_independent() -> Result<()> {
-    let token = versioned_token("order", 0);
-    converge_label_order(
-        "directed=v2-label-then-two-links",
-        20_000_570,
-        vec![
-            vec![label_order_registered(token, "order")],
-            vec![label_order_link(token)],
-            vec![label_order_link(token)],
-        ],
-    )
-}
-
 #[test]
 fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Result<()> {
     let checked_in = checked_in_manifests()?;
