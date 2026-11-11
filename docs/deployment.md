@@ -1455,6 +1455,7 @@ GRANT SELECT ON TABLE
     bigname_phase.project_address_name_fold,
     bigname_phase.project_address_controller_candidate,
     bigname_phase.project_address_name_index,
+    bigname_phase.project_address_listing,
     bigname_phase.project_address_history_anchor,
     bigname_phase.project_history_source,
     bigname_phase.project_history_source_edge,
@@ -6320,8 +6321,9 @@ families. The composition pass derives every row in the names stream.
   and its indexes empty, after taking the family marker table in `EXCLUSIVE` mode. It resets
   nothing and builds no index on a populated table. Apply it before starting the release: the
   family writer writes the table, so without it the first family block fails.
-- The API role needs `SELECT` on the new table before a later build reads it. This build's
-  readers do not read it.
+- The API role needs `SELECT` on the new table, which the address-names readers read. An API
+  on this build refuses to boot until its role has it: startup preflight
+  (`crates/storage/src/api_preflight.rs`) lists the table.
 - A block derives again the rows of every name its summary and lookup refreshes composed, the
   surface-less ENSv1 registry children the child listing's work list names, and the registry
   children of each parent that work list derives whole.
@@ -6331,8 +6333,18 @@ families. The composition pass derives every row in the names stream.
   (`project_child_preimage_watermark`), from another chain. An undo keeps a healed name, as a
   rebuild at the restored block spells it. An imported label reaches the stored name only when
   its row is derived again for another reason (TYR-373/374).
-- The readers do not change in this build. The address-names route still composes every
-  candidate name at read.
+- The address-names route reads the stored listing for the ownership relations and
+  `relation=former_owner`, and the address events read takes its current anchors from it. A page
+  reads about as many names as it returns. The total counts stored rows, so a name a reorg has
+  taken off readable lineage, or one Interpret has shadowed, leaves the page at once and stays
+  counted until the next publication. Names with equal sort values list in name id order, and
+  `order=desc` is exactly the reverse of `order=asc`, which changes the descending order inside
+  tie groups. A descending cursor issued before this release is refused with 400. Restart the
+  walk. The `q`, `match` and `parent` filters and `sort=name` use the spelling bigname had from
+  chain data at the latest publication. A label or name the chain reveals later is shown at
+  once, and is matched and ordered from the next publication. A label known only from an
+  imported preimage is shown, and is not matched or ordered by. The reader files are outside
+  every content hash root and add no rotation.
 - The relation fold's storage files move from the reader sources to the composition sources, and
   the family step is in `crates/project/src`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The
@@ -6559,6 +6571,40 @@ describes, at a planned [re-derivation boundary](glossary.md#re-derivation-bound
 matching runner and API binaries. The change rides the next re-derivation release and shares
 that release's one Interpret and Project redo pair with its other hash-rotating changes. Do not
 mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.
+
+## Token resource kept when a label follows its link
+
+The build that keeps an ENSv2 token's resource when its label is registered after
+`TokenResource` changes `crates/adapters/src/schema_v2/state_v2.rs` and
+`crates/adapters/src/schema_v2/protocol/v2_registry.rs`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain, and the
+projection content hash follows through it.
+
+What changes:
+
+- A registry with its own bytecode can link a token to its resource with `TokenResource` before
+  it registers the token's label. The registration now keeps that resource and its
+  [token lineage](glossary.md#token-lineage), as a restore of the same rows already did. Before,
+  a transfer in the same batch named no resource, while the same transfer after a restore named
+  it. A token registered under a label other than the one it holds still drops the resource.
+- The token's registration state is now the `RegistrationGranted` row the label event stored,
+  which a restore installs. A `TokenResource` in a later batch therefore emits the same linked
+  `RegistrationGranted` whether or not a restore came between.
+- On a registration over a live reservation, the linked RegistrationGranted after_state now
+  carries resource_id, matching what a restore installs.
+- The deployed PermissionedRegistry emits `TokenResource` after `LabelRegistered`, in the same
+  call, so a registration with no reservation emits the same rows as before
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L479 @ ens_v2@a971bd64).
+- `/v1/diagnostics/events` shows the changed `after_state`. What the API serves for names and
+  registrations is otherwise unchanged.
+
+Rows written by an older build keep their old shape. They are rewritten by re-derivation, not in
+place, under the same Interpret and Project redo pair as the section above, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. Do not mark old rows ready under the new hash.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
 redo. It adds no schema-migration, table or setting.

@@ -13,7 +13,10 @@ fn bulk_owner_below(index: usize, first_held: usize) -> &'static str {
 }
 
 async fn bulk_response(database: &TestDatabase, uri: &str) -> Result<(StatusCode, Value)> {
-    let response = v2_address_names_response_for_database(database, uri).await?;
+    let response = bigname_storage::families::records::seams::with_composed_address_names(
+        v2_address_names_response_for_database(database, uri),
+    )
+    .await?;
     let status = response.status();
     Ok((status, read_json::<Value>(response).await?))
 }
