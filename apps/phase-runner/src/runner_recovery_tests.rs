@@ -147,3 +147,123 @@ async fn recovery_settles_stopped_runs_and_returns_active_ingest_work_to_pending
     }
     scratch.cleanup().await
 }
+
+/// TYR-511's row after its normal run died on it: a required Verify redo stamped while Verify ran
+/// normally. Pinned: the completion is refused as a data-integrity error, which is not retryable,
+/// so `supervise_chain` (`supervisor.rs:83-118`) stops the chain rather than run it again. The
+/// next start recovers the row with no operator step: recovery leaves it, the required Verify
+/// redo runs over it (`runner_chain.rs:182-200`) and restores it as failed, and the normal start
+/// that follows resumes and completes it.
+#[tokio::test]
+async fn a_run_stamped_while_running_stops_its_chain_and_the_next_start_recovers_it() -> Result<()>
+{
+    use crate::{
+        error::ErrorKind,
+        phase::{PhaseProgress, RunMode, VerificationLevel},
+        phase_state_table_tests::marker,
+        redo_state::RedoOutcome,
+        state::StartDisposition,
+    };
+
+    let scratch = Scratch::create("phase_state_stamped_restart").await?;
+    let (pool, store) = (scratch.pool(), scratch.store());
+    let verify = PhaseName::Verify;
+    let chain = "stamped-restart";
+    seed(
+        pool,
+        chain,
+        &[
+            completed(chain, PhaseName::Ingest),
+            completed(chain, PhaseName::Interpret),
+            completed(chain, PhaseName::Project),
+            running(chain, verify),
+        ],
+    )
+    .await?;
+    let mut transaction = pool.begin().await?;
+    ensure!(
+        crate::redo_stamp::stamp_required_in_transaction(
+            &mut transaction,
+            chain,
+            verify,
+            crate::phase::BlockRange {
+                from: 20,
+                to: i64::MAX,
+            },
+            "canonical head publication orphaned previously readable blocks",
+        )
+        .await?
+    );
+    transaction.commit().await?;
+    let stamped = read(pool, chain, verify).await?;
+    expect_state(&stamped, State::RequiredPending)?;
+    let completion = |number| PhaseProgress {
+        current: Some(marker(number)),
+        target: Some(marker(number)),
+        verification_level: Some(VerificationLevel::QuickSynced),
+        ..PhaseProgress::default()
+    };
+
+    // The normal writer's completion.
+    let mut connection = pool.acquire().await?;
+    let refused = store
+        .complete_phase_on_connection(&mut connection, chain, verify, &completion(100))
+        .await;
+    drop(connection);
+    let Err(error) = refused else {
+        anyhow::bail!("the stamped row's completion was accepted");
+    };
+    ensure!(error.kind() == ErrorKind::DataIntegrity, "{error}");
+    ensure!(!error.is_retryable(), "{error}");
+    expect_unchanged(&stamped, &read(pool, chain, verify).await?)?;
+
+    // The next start: recovery, the required Verify redo, then the normal run.
+    let (before, after) = resolve(&scratch, chain, verify).await?;
+    expect_unchanged(&before, &after)?;
+    let range = crate::redo_stamp::required_range(pool, chain, verify)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the stamp left no required range"))?;
+    ensure!(range.from == 20 && range.to == 60, "{range:?}");
+    let session = store
+        .begin_redo(
+            chain,
+            verify,
+            &RunMode::Redo(range),
+            &[],
+            None,
+            "phase-state-table",
+            false,
+        )
+        .await?;
+    let active = read(pool, chain, verify).await?;
+    expect_state(&active, State::RequiredActive)?;
+    ensure!(active["redo_previous_phase_status"] == json!("running"));
+    let mut connection = pool.acquire().await?;
+    store
+        .finish_redo(
+            &mut connection,
+            chain,
+            verify,
+            session,
+            RedoOutcome::Completed(&completion(60)),
+        )
+        .await?;
+    drop(connection);
+    let restored = read(pool, chain, verify).await?;
+    expect_state(&restored, State::Failed)?;
+    ensure!(
+        restored["last_error"]
+            == json!("phase was interrupted before redo; resume the normal phase")
+    );
+    ensure!(store.start_phase(chain, verify, &RunMode::Normal).await? == StartDisposition::Started);
+    let resumed = read(pool, chain, verify).await?;
+    expect_state(&resumed, State::Running)?;
+    ensure!(resumed["current_block_number"] == json!(60));
+    let mut connection = pool.acquire().await?;
+    store
+        .complete_phase_on_connection(&mut connection, chain, verify, &completion(100))
+        .await?;
+    drop(connection);
+    expect_state(&read(pool, chain, verify).await?, State::Completed)?;
+    scratch.cleanup().await
+}
