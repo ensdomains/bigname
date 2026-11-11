@@ -100,7 +100,7 @@ async fn v2_records_of_a_non_admitted_resolver_are_not_authoritative() -> Result
         for answer in payload["data"]["records"].as_object().unwrap().values() {
             assert_eq!(
                 answer,
-                &json!({"status": "unsupported", "unsupported_reason": "resolver_implementation_unknown"}),
+                &json!({"status": "unsupported", "unsupported_reason": "resolver_not_declared"}),
                 "{uri}"
             );
         }
