@@ -1,0 +1,36 @@
+name: TYR-521 fingerprint probe
+
+on:
+  push:
+    branches:
+      - fingerprint/tyr521
+
+permissions:
+  contents: read
+
+jobs:
+  fingerprint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: fingerprint_report base 5c4d0956a against the TYR-521 delta
+        run: |
+          python3 - <<'PY'
+          import importlib.machinery, importlib.util, sys
+          loader = importlib.machinery.SourceFileLoader("rotation", "scripts/check-upstream-rotation")
+          spec = importlib.util.spec_from_loader("rotation", loader)
+          module = importlib.util.module_from_spec(spec)
+          sys.modules["rotation"] = module
+          loader.exec_module(module)
+          print(module.fingerprint_report(
+              "5c4d0956a9a6869d543b47eb760efe5232d89213",
+              "20c1f883b664fdb453c67802b5ffbdc07d03270d",
+              [],
+          ))
+          PY
