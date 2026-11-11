@@ -158,3 +158,7 @@ async fn resolve_stopped_phase(
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "runner_recovery_tests.rs"]
+mod tests;
