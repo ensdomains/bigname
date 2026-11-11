@@ -1419,3 +1419,6 @@ mod resolver_arm_equivalence_tests;
 
 #[path = "resolver_cost_tests.rs"]
 mod resolver_cost_tests;
+
+#[path = "record_key_plan_tests.rs"]
+mod record_key_plan_tests;

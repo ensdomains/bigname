@@ -1000,6 +1000,66 @@ drops every row that is not a role change.
 `apps/api/src/tests/v2_registry_role_counts_index.rs` checks that both statements read the
 index under custom and generic plans and return what the unindexed read returns.
 
+History pages filtered by one record key (`/v1/events`, name history and address history with
+`record_key`) that no name, registration or address anchors read two arms per chain of their
+window (`crates/storage/src/history/record_key_source.rs`): the key's `RecordChanged` rows and
+the chain's `RecordVersionChanged` rows, each in page order and each stopped after one page.
+A `resolver` or `contract_address` scope is the emitter equality inside both arms. Two indexes
+on `normalized_events` serve the `RecordChanged` arm. The normalized-events baseline and
+`20261111120000_normalized_events_record_history_indexes.sql` install them:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_record_key_history_idx` | the `RecordChanged` arm of an unscoped page: activated, canonical `RecordChanged` rows by chain and the first 256 characters of `after_state ->> 'record_key'`, newest block first |
+| `normalized_events_record_emitter_key_history_idx` | the `RecordChanged` arm of a page scoped by an emitter: the same rows by chain, lowercased emitting address and key prefix, newest block first |
+
+Both indexes key on `left(after_state ->> 'record_key', 256)`, at most 1,024 bytes, because a
+whole key could pass the largest entry a btree index holds and the chain permits such keys:
+`setText` takes the key as a `string` with no length check and emits it whole in `TextChanged`
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f).
+Stored keys longer than the indexed prefix exist. The arm matches the prefix in its index
+condition and the whole key on the row, so two keys that share their first 256 characters are
+told apart. The arm has every equality the read carries
+in its index condition, so it reads at most one page of entries, and one probe for a key with
+no write on the chain. The lineage, namespace, window and duplicate conditions still drop some
+rows inside the arm, before its limit. A scoped read needs the emitter-led index. The key index
+would walk every write of a common key looking for one emitter, and
+`normalized_events_emitter_history_idx` would walk every event of a large resolver looking for
+one key.
+
+The `RecordVersionChanged` arm reads `normalized_events_projection_idx` with the kind, the
+canonical states and the chain in its index condition, and sorts the chain's record-version
+resets. It reads at most the chain's `RecordVersionChanged` events and no `RecordChanged` row,
+scoped or not, so its cost grows with the chain's record-version resets.
+
+Pages on the record arms are sent unprepared, scoped or not, so each is planned with its own
+values, and anchored pages keep their prepared statements. The planner's choice of the
+emitter-led index for a scoped arm does not rest on the values: PostgreSQL uses no statistics
+from the expressions of a partial index, so each expression equality gets the same default
+selectivity whatever the key or emitter, and the emitter-led index matches three equalities
+where the key index matches two. Extended statistics on either expression, or a change to the
+indexes' predicates, would change that estimate. Either one means reading the scoped plans
+again. On a table with no statistics at all the two can tie, which the tests record.
+
+The `include=total_count` count of a `record_key` read scoped by an emitter reads the same
+arms. Each arm is an ordered scan of its index that returns at most the count's cap plus one
+row, and the count is the capped sum. The arm's limit applies after its own namespace, lineage
+and duplicate conditions, so the scan also reads the rows those conditions drop. Rows read per
+arm are bounded by the cap plus one plus those dropped rows, for any key and any emitter, and
+`history/record_key_plan_tests.rs` pins the cap plus 17 on its fixture. A bitmap over the
+plain statement could not stop at the cap, and the emitter's own index read in order walks
+every event of a large emitter looking for a rare key. Without
+a key the count keeps the plain statement, which for `kind=RecordChanged` can read the
+emitter's `RecordChanged` rows through the emitter-led index in order and stop at the cap.
+
+Without the indexes the arms return the same rows and walk the chain's events in page order.
+`history/record_key_plan_tests.rs` checks each arm's driver and bound in unprepared and custom
+plans, and the rows against the plain statement with and without the indexes. It records the
+generic plans and the plans before `ANALYZE` as evidence only, since these pages are never
+prepared and served tables are analyzed. The
+indexes are advisory ([walk index set](#walk-index-set)). The prebuild is in
+[`ops/record-history-indexes/README.md`](../ops/record-history-indexes/README.md).
+
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
@@ -3144,12 +3204,24 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_project_node_history_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 
+Two indexes on `normalized_events` are advisory, outside both sets:
+`normalized_events_record_key_history_idx` and
+`normalized_events_record_emitter_key_history_idx`, which serve history pages filtered by one
+record key ([table ownership](#table-ownership)). `drop.sql` leaves them, so Interpret keeps
+them current through a walk. An operator builds them with
+[`ops/record-history-indexes/install.sql`](../ops/record-history-indexes/README.md) before the
+schema-migration that adopts them. The phase runner never builds them. The API starts and
+serves without them, whatever `BIGNAME_API_WALK_INDEX_SET_CHECK` says, with a WARN at startup
+naming each one that is not in place. The reads they serve return the same rows without them,
+more slowly.
+
 A new index on `normalized_events` joins one list in the change that adds it: the drop list
-when Interpret does not read it, the kept set when Interpret does. The phase runner carries
-both lists, with `install.sql`'s statements and reviewed definitions, in
+when Interpret does not read it, the kept set when Interpret does, or the advisory list when it
+is an API read path that the runner must not build and whose absence must not stop the API.
+The phase runner carries the lists, with the statements and reviewed definitions, in
 `crates/storage/src/walk_index_set/constants.rs`, and
 `crates/storage/src/walk_index_set/tests.rs` fails until they match the scripts.
-`crates/interpret/src/load/walk_index_set_tests.rs` fails until the two lists together are
+`crates/interpret/src/load/walk_index_set_tests.rs` fails until the three lists together are
 every index the baseline defines on the table, and proves that Interpret, over ENSv1,
 Basenames and ENSv2 histories through either loader, scans `normalized_events` sequentially
 nowhere without the drop list and stores the same rows. That test shows each statement keeps
@@ -3348,6 +3420,14 @@ instead of sorting every matching event; the remaining sort keys only order the
 events of one block. Anchored reads start from their anchor's own indexes. The
 older ascending `(chain_id, block_number)` index read backward puts events
 without a block first, so it cannot serve this order.
+
+A page with a `record_key` filter that no name, registration, or address
+anchors, scoped by `resolver` or `contract_address` or not, reads the key's
+writes through their own partial indexes instead, and the record-version resets
+through the kind index, one arm of each per chain of the window, each in the
+page order ([table ownership](#table-ownership)). So a rare or unknown key costs
+one index probe for its writes, and a window over several chains merges at most
+one page of writes per chain.
 
 A continued page built by the ordinary history page builder also bounds the
 scan at the cursor event's block, read in the same transaction that validates

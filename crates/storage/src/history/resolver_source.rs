@@ -11,11 +11,12 @@ use super::{
     duplicates::push_product_history_duplicate_filter_for_alias,
     filters::push_string_filter,
     keyset::push_history_cursor_after_for_alias,
+    record_key_source::{push_record_key_source, record_arm_chains},
     registration_source::push_registration_history_source,
     source::{self, push_history_lineage_join},
 };
 
-const CANONICAL_ROW: &str = " AND candidate.canonicality_state IN (\n\
+pub(super) const CANONICAL_ROW: &str = " AND candidate.canonicality_state IN (\n\
      'canonical'::bigname_phase.canonicality_state,\n\
      'safe'::bigname_phase.canonicality_state,\n\
      'finalized'::bigname_phase.canonicality_state\n\
@@ -102,7 +103,9 @@ pub(super) fn push_history_source_for_filter<'a>(
 }
 
 /// The same source for one page read, with each resolver arm bounded by
-/// `resolver_page_bound`. See [`ResolverPageBound`].
+/// `resolver_page_bound`. See [`ResolverPageBound`]. A page with a record key that
+/// [`record_arm_chains`] admits reads the record arms instead, bounded the same way, and keeps
+/// the resolver condition in `push_history_filters`.
 pub(super) fn push_history_source_for_page<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
@@ -111,6 +114,12 @@ pub(super) fn push_history_source_for_page<'a>(
     include_candidates: bool,
     resolver_page_bound: Option<ResolverPageBound>,
 ) -> ResolverSource {
+    if let Some(bound) = resolver_page_bound
+        && let Some(chains) = record_arm_chains(filter, canonical_only, include_candidates)
+    {
+        push_record_key_source(builder, filter, &chains, include_cursor_row, Some(bound));
+        return ResolverSource::Condition;
+    }
     let Some(resolver) = resolver_arm_source(filter, canonical_only, include_candidates) else {
         if let Some((logical_name_ids, resource_ids)) = filter.product_registration() {
             push_registration_history_source(

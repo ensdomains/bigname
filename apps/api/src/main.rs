@@ -75,6 +75,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     )
     .await?;
     startup_preflight::ensure_verified_lookup_ddl_available(&pool).await?;
+    startup_preflight::warn_on_advisory_indexes(&pool).await;
     let walk_index_set_unusable =
         startup_preflight::ensure_walk_index_set(&pool, args.walk_index_set_check).await?;
     let health_pool = bigname_storage::connect_phase_reserved_readiness_pool(
