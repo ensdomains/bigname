@@ -3220,7 +3220,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows. Project also reads `normalized_events_v2_key_probe_idx`, in the `slots` and `chains` steps of `project:families.resolution_paths.prepare` ([table ownership](#table-ownership)) |
 
-The other 35 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 38 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
@@ -3241,6 +3241,8 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
+`normalized_events_address_to_idx`, `normalized_events_address_registrant_idx`,
+`normalized_events_address_owner_idx`,
 `normalized_events_address_root_permission_idx`, `normalized_events_registry_roles_idx`,
 `normalized_events_project_node_history_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
