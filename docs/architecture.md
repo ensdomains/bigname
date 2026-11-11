@@ -1415,8 +1415,10 @@ ENS class is followed through the CCIP-Read gateway transport
 Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified [path classes](glossary.md) return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
 V2 verified name and record routes execute through the schema-v2 lookup engine
-without a durable trace or reusable outcome. Every API request is read-only,
-including verified and diagnostics routes. It revalidates captured state after
+without a durable trace or reusable outcome. Every API request reads only,
+including verified and diagnostics routes, except that a name request stages
+the labels it proves for the preimage import
+([name inputs](api-v1.md#name-inputs)). It revalidates captured state after
 provider calls without creating, refreshing, or clearing diagnostic observations.
 
 ## Permissions

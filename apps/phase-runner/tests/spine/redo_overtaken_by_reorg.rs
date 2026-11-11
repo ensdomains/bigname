@@ -19,6 +19,7 @@
 //! | 6 | Verify-only redo beside a supervisor running Live, fork published after its last progress write | Completion refused, repair kept, rerun completes after the Interpret and Project repairs | `a_verify_redo_beside_live_overtaken_at_completion_keeps_the_repair` |
 //! | 7 | All-phase redo overtaken in Interpret | Refused, one first command in both instructions | `an_all_phase_redo_overtaken_in_interpret_names_one_first_command` |
 //! | 8 | Supervisor's own required redo overtaken at completion | That chain stops, the next supervisor start reruns the redo | `a_supervised_required_redo_overtaken_at_completion_stops_the_chain_and_heals_on_restart` |
+//! | 9 | Stop during the supervisor's own required redo | The chain reports a stop-time failure, so the stop exits nonzero | `a_stop_during_a_supervised_required_redo_is_a_stop_time_failure` |
 
 use super::*;
 
@@ -918,6 +919,68 @@ async fn an_all_phase_redo_overtaken_in_interpret_names_one_first_command() -> R
     );
 
     interpret_redo(&scratch, chain_id, Publish::Never).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_stop_during_a_supervised_required_redo_is_a_stop_time_failure() -> Result<()> {
+    let chain_id = "redo-stopped-supervised";
+    let scratch = chain_settled_by_supervisor_start(chain_id).await?;
+    publish_heads(
+        scratch.pool(),
+        chain_id,
+        &HeadMarkers {
+            latest: BlockMarker::new(TIP, fork_hash(chain_id, TIP))?,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    let entered = Arc::new(Notify::new());
+    let phase_entered = Arc::clone(&entered);
+    let phases = PhaseName::ALL.map(|name| {
+        let phase_entered = Arc::clone(&phase_entered);
+        if name == PhaseName::Interpret {
+            Arc::new(FunctionPhase {
+                name,
+                handler: Arc::new(move |_| {
+                    phase_entered.notify_one();
+                    Err(RunnerError::transient("the redo is still working"))
+                }),
+            }) as Arc<dyn Phase>
+        } else {
+            Arc::new(LoopbackPhase::new(name)) as Arc<dyn Phase>
+        }
+    });
+    let supervisor = Arc::new(runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "redo-stopped-supervisor",
+    )?);
+    let runtime = RuntimeConfig::new(
+        "redo-stopped-supervisor",
+        vec![chain(chain_id)?],
+        CapacityConfig::default(),
+        test_timing(),
+    )?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move { supervisor.run(&runtime, run_cancellation).await });
+
+    entered.notified().await;
+    cancellation.cancel();
+    let report = tokio::time::timeout(Duration::from_secs(10), task).await???;
+
+    let failures = report.stop_time_failures();
+    assert_eq!(failures.len(), 1, "{:?}", report.stopped_chains);
+    assert_eq!(failures[0].0, chain_id);
+    assert_eq!(failures[0].1.kind(), ErrorKind::InvalidTransition);
+    assert!(
+        failures[0].1.to_string().contains("is incomplete"),
+        "{}",
+        failures[0].1
+    );
     scratch.cleanup().await
 }
 

@@ -559,6 +559,37 @@ async fn r8_a_registry_pointer_to_an_undeclared_resolver_serves_it() -> Result<(
     Ok(())
 }
 
+/// An offchain resolver is an address no resolver manifest declares, so its inventory row is
+/// `unsupported` with `resolver_not_declared`, and an indexed read reports that no inventory
+/// speaks for it.
+#[tokio::test]
+async fn an_undeclared_resolver_has_no_authoritative_inventory() -> Result<()> {
+    let database = published(vec![pointer(lease_node(), UNDECLARED)?], &[]).await?;
+    let body = ok(
+        &database,
+        &format!("/v1/names/{NAME}/records?namespace=ens&keys=text:name"),
+    )
+    .await?;
+    database.cleanup().await?;
+    assert_eq!(
+        body["data"]["records"]["text:name"],
+        json!({"status": "unsupported", "unsupported_reason": "resolver_not_declared"}),
+        "{body:#}"
+    );
+    assert_eq!(body["meta"]["source"], "indexed", "{body:#}");
+    assert_eq!(body["meta"]["completeness"], "unsupported", "{body:#}");
+    assert_eq!(
+        body["meta"]["unsupported_fields"],
+        json!(["records"]),
+        "{body:#}"
+    );
+    assert_eq!(
+        body["meta"]["unsupported_reason"], "inventory_not_authoritative",
+        "{body:#}"
+    );
+    Ok(())
+}
+
 /// Row 6, Sepolia pinned: a registry child below the reserved `.eth` name with its own pointer,
 /// which no label-bearing event names, so bigname knows it only by its label hash. bigname's
 /// composed row withholds it with `ens_v2_path_no_resolver`. This pins bigname's served answer,
@@ -652,6 +683,7 @@ async fn r2_the_default_read_answers_an_unretained_text_through_the_verified_rea
         "{payload:#}"
     );
     assert_eq!(payload["meta"]["source"], "verified", "{payload:#}");
+    assert!(payload["meta"].get("completeness").is_none(), "{payload:#}");
     let requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
     assert_eq!(requests.len(), 1, "{requests:#?}");
 
