@@ -8,7 +8,8 @@
 //! `LabelReserved`, mint, transfer and burn, `LabelUnregistered`, `TokenResource`,
 //! `ResolverUpdated`, `SubregistryUpdated`, `ExpiryUpdated`, `EACRolesChanged` and
 //! `TokenRegenerated`. It also draws the deployed registry's one-call registration and
-//! regeneration as single actions, so those orders mix with the rest.
+//! regeneration as single actions, so those orders mix with the rest. A third of the sequences
+//! open with the deployed re-registration of a name that has lapsed.
 //!
 //! Each sequence draws events from the declared Sepolia ETH registry and from an announced
 //! registry, and from two labels and three token versions. So one token can carry two labels and
@@ -61,6 +62,8 @@ pub const DEFAULT_CASES: u64 = 64;
 pub const DEFAULT_SEED: u64 = 0x7e51_9000;
 const CASE_STRIDE: u64 = 0x9fb2_1c65_1e98_df25;
 const SPLIT_SALT: u64 = 0x2545_f491_4f6c_dd1d;
+/// Side stream for the deployed re-registration opening, so the main draws stay as they were.
+const REREGISTER_SALT: u64 = 0x7f4a_7c15_9e37_79b9;
 const MAX_ACTIONS: usize = 10;
 const SHRINK_BUDGET: usize = 250;
 /// Findings shrunk per failure kind. Later ones are reported as drawn.
@@ -204,6 +207,8 @@ pub const PASSED_WHEN_EMITTED: &str = "TYR-525: a registration already passed wh
 pub const CUT_TO_PASSED: &str = "TYR-525: a live expiry cut to a passed one";
 pub const AGAIN_WHILE_LIVE: &str = "TYR-525: a registration again while the first is live";
 pub const AGAIN_AFTER_LAPSE: &str = "a registration again after the first lapsed (not a ticket's)";
+pub const DEPLOYED_REREGISTRATION: &str =
+    "the deployed re-registration: the next token version over a lapsed registration";
 
 /// Which expiry and re-registration shapes an order reaches in `layout`, in one walk, so the
 /// TYR-525 tag and the sweep's shape counts read the same model.
@@ -212,6 +217,23 @@ fn expiry_shapes(actions: &[Action], layout: Layout) -> BTreeSet<&'static str> {
     let mut expiries = BTreeMap::new();
     let mut shapes = BTreeSet::new();
     for (atom, at) in timed_atoms(actions, layout) {
+        if let Atom::Register {
+            registry, token, ..
+        } = atom
+            && token.version > 0
+            && registrations
+                .0
+                .get(&(
+                    registry,
+                    Token {
+                        version: token.version - 1,
+                        ..token
+                    },
+                ))
+                .is_some_and(|before| passed(*before, at))
+        {
+            shapes.insert(DEPLOYED_REREGISTRATION);
+        }
         match registrations.registers_again(atom, at) {
             Some(true) => {
                 shapes.insert(AGAIN_WHILE_LIVE);
@@ -274,13 +296,15 @@ pub const RELEASED_POINTER_TRANSFER: &str =
     "TYR-526: a transfer after a pointer update and an unregister";
 pub const RELINK_AFTER_CLOSE: &str = "TYR-522 S-A3: a binding closed and linked again";
 
-/// Every shape the sweep counts sequences for: each known tag's order, the two TYR-510 orders,
-/// and a registration again after the first lapsed. The default corpus must reach each.
-pub const NAMED_SHAPES: [&str; 8] = [
+/// Every shape the sweep counts sequences for: each known tag's order, the two TYR-510 orders, a
+/// registration again after the first lapsed, and the deployed re-registration. The default corpus
+/// must reach each.
+pub const NAMED_SHAPES: [&str; 9] = [
     PASSED_WHEN_EMITTED,
     CUT_TO_PASSED,
     AGAIN_WHILE_LIVE,
     AGAIN_AFTER_LAPSE,
+    DEPLOYED_REREGISTRATION,
     RELEASED_POINTER_TRANSFER,
     RELINK_AFTER_CLOSE,
     TOKEN_RESOURCE_BEFORE_LABEL,
@@ -406,8 +430,10 @@ fn relinks_a_closed_binding(actions: &[Action]) -> bool {
 /// A `LabelRegistered` whose expiry has passed at its own block, or over a registration still live
 /// at that block, or an `ExpiryUpdated` that moves a label's expiry from live to passed at its own
 /// block. A lapse later in the sequence, a label registered again after the first lapsed, and a
-/// renewal of a label that had already lapsed are orders the deployed registry emits and are not
-/// this ticket's.
+/// renewal of a label that had already lapsed are not this ticket's. The deployed registry emits
+/// the first and third. It re-registers a lapsed owned label under a new token version
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455-L460 @ ens_v2@a971bd64),
+/// so the model never sees that as a label registered again.
 fn emits_a_passed_or_live_label(actions: &[Action], layout: Layout) -> bool {
     let shapes = expiry_shapes(actions, layout);
     [PASSED_WHEN_EMITTED, CUT_TO_PASSED, AGAIN_WHILE_LIVE]
@@ -927,8 +953,52 @@ pub fn generate(seed: u64) -> Case {
         let same_transaction = rng.chance(1, 4);
         actions.push(action(atoms, new_block, same_transaction));
     }
+    let mut side = Rng::new(seed ^ REREGISTER_SALT);
+    if side.chance(1, 3) {
+        let mut opening = deployed_reregistration_opening(&mut side);
+        opening.append(&mut actions);
+        actions = opening;
+    }
     announce_before_use(&mut rng, &mut actions);
     Case { seed, actions }
+}
+
+/// The deployed registry registering a lapsed, owned name again, as an opening: a one-call
+/// registration in the first block that lapses before the next, any drawn action in its own
+/// block, then the re-registration in a block after that. Opening the sequence keeps the lapse
+/// between the two registrations in every layout but the one-block layout.
+fn deployed_reregistration_opening(rng: &mut Rng) -> Vec<Action> {
+    let registry = if rng.chance(1, 2) {
+        Registry::Declared
+    } else {
+        Registry::Announced
+    };
+    let token = Token {
+        label: rng.below(LABELS.len()),
+        version: 0,
+    };
+    let (first, second) = (draw_actor(rng), draw_actor(rng));
+    // The announcement comes first so no later insertion can move the first registration out of
+    // the first block.
+    let mut registration = vec![Atom::Announce];
+    registration.extend(deployed_register(
+        registry,
+        token,
+        token.label,
+        first,
+        Expiry::Lapses(0),
+        None,
+    ));
+    let between = draw(rng);
+    vec![
+        action(registration, false, false),
+        action(between, true, false),
+        action(
+            deployed_reregister(registry, token, token.label, first, second, Expiry::Far),
+            true,
+            false,
+        ),
+    ]
 }
 
 fn action(atoms: Vec<Atom>, new_block: bool, same_transaction: bool) -> Action {
@@ -1101,6 +1171,52 @@ fn deployed_register(
         });
     }
     atoms
+}
+
+/// `register` over a lapsed, owned label: burn the previous owner's token, bump the token and
+/// resource versions, then the one-call registration under the new token id with its mint,
+/// `TokenResource` for the new resource and the owner's roles. No `TokenRegenerated`
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455-L472 @ ens_v2@a971bd64).
+fn deployed_reregister(
+    registry: Registry,
+    token: Token,
+    label: usize,
+    from: u8,
+    owner: u8,
+    expiry: Expiry,
+) -> Vec<Atom> {
+    let next = token.next();
+    vec![
+        Atom::Burn {
+            registry,
+            token,
+            from,
+        },
+        Atom::Register {
+            registry,
+            token: next,
+            label,
+            owner,
+            expiry,
+        },
+        Atom::Mint {
+            registry,
+            token: next,
+            to: owner,
+        },
+        Atom::Link {
+            registry,
+            token: next,
+            resource: next,
+        },
+        Atom::Roles {
+            registry,
+            resource: Some(next),
+            account: owner,
+            old: 0,
+            new: 3,
+        },
+    ]
 }
 
 /// `_regenerate`: burn, `TokenRegenerated`, mint of the next version
