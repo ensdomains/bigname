@@ -51,7 +51,6 @@ WHERE grant_row.subject COLLATE "C" = $1 COLLATE "C"
   AND grant_row.scope COLLATE "C" < $3 COLLATE "C"
   AND grant_row.scope_kind = 'resolver'
   AND NOT grant_row.revoked
-  AND grant_row.grant_source ->> 'source_event' = 'EACRolesChanged'
   AND grant_row.chain_id = ANY($5::text[])
 GROUP BY 1
 ORDER BY 1
