@@ -89,8 +89,8 @@ pub const LABEL_OVER_RESERVATION: &str =
     "LabelRegistered over a reservation of the same label that holds a resource";
 pub const KNOWN_SHAPES: [&str; 2] = [TOKEN_RESOURCE_BEFORE_LABEL, LABEL_OVER_RESERVATION];
 
-/// Failure kinds tracked by open tickets. The sweep reports them without shrinking them and does
-/// not fail on them. Each comes out when its ticket lands.
+/// Failure kinds tracked by open tickets. The sweep shrinks one finding of each, reports them and
+/// does not fail on them. Each comes out when its ticket lands.
 ///
 /// TYR-522: the writer's upsert guard refuses a re-emitted surface binding whose `active_from`
 /// moved, and the refusal stops the batch (`crates/interpret/src/write/identity.rs`). The order is
@@ -1179,6 +1179,21 @@ pub fn signature(error: &anyhow::Error) -> String {
     format!("other: {}", first.chars().take(120).collect::<String>())
 }
 
+/// Whether `to` is simpler than the event's expiry: a lapse becomes passed or far, a passed expiry
+/// becomes far. A far expiry is never made shorter, so shrinking cannot add an expired event.
+fn simpler_expiry(atom: Atom, to: Expiry) -> bool {
+    let from = match atom {
+        Atom::Register { expiry, .. }
+        | Atom::Reserve { expiry, .. }
+        | Atom::Renew { expiry, .. } => expiry,
+        _ => return false,
+    };
+    matches!(
+        (from, to),
+        (Expiry::Lapses(_), Expiry::Far | Expiry::Past) | (Expiry::Past, Expiry::Far)
+    )
+}
+
 /// The same event with another expiry, for the shrinker.
 fn with_expiry(atom: Atom, to: Expiry) -> Option<Atom> {
     match atom {
@@ -1287,7 +1302,11 @@ pub fn shrink(
     for index in 0..current.len() {
         for atom in 0..current[index].atoms.len() {
             for to in [Expiry::Far, Expiry::Past] {
-                if let Some(simpler) = with_expiry(current[index].atoms[atom], to) {
+                let drawn = current[index].atoms[atom];
+                if !simpler_expiry(drawn, to) {
+                    continue;
+                }
+                if let Some(simpler) = with_expiry(drawn, to) {
                     let mut candidate = current.clone();
                     candidate[index].atoms[atom] = simpler;
                     if try_replace(&mut current, candidate) {
@@ -1391,14 +1410,17 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                         sweep.declared_stops += 1;
                         break;
                     }
-                    let known = known_failure(&kept, &generated.actions);
-                    let shrunk = known.is_none()
-                        && sweep
-                            .findings
-                            .iter()
-                            .filter(|finding| finding.shrunk && finding.signature == kept)
-                            .count()
-                            < SHRUNK_PER_KIND;
+                    let limit = if known_failure(&kept, &generated.actions).is_some() {
+                        1
+                    } else {
+                        SHRUNK_PER_KIND
+                    };
+                    let shrunk = sweep
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.shrunk && finding.signature == kept)
+                        .count()
+                        < limit;
                     let minimal = if shrunk {
                         shrink(
                             wiring,
@@ -1418,6 +1440,7 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                     } else {
                         error
                     };
+                    let known = known_failure(&kept, &minimal);
                     sweep.findings.push(Finding {
                         seed: generated.seed,
                         layout,
