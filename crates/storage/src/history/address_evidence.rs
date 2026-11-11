@@ -67,9 +67,25 @@ fn push_evidence_eligibility(
     }
 }
 
+/// The columns the eligibility filter, the arms and the joins read from a probed row.
+const PROBE_COLUMNS: &str = "ne.namespace, ne.logical_name_id, ne.resource_id, ne.event_kind, \
+    ne.source_family, ne.chain_id, ne.block_number, ne.block_hash, ne.transaction_index, \
+    ne.log_index, ne.derivation_kind, ne.canonicality_state, ne.consumer_visibility, \
+    ne.after_state";
+
 /// The names and resources an address held in history: registration grants, token transfers
-/// and registry ownership transfers whose new holder is `address`. Each arm matches one partial
-/// expression index on `normalized_events` (`normalized_events_address_*_match_idx`).
+/// and registry ownership transfers whose new holder is `address`.
+///
+/// The rows come from one subquery per address key the arms compare (`registrant`, `to`,
+/// `owner`). Each holds only that key's match and the key's presence, which is the predicate of
+/// the key's partial expression index (`normalized_events_address_<key>_idx`), and ends in
+/// `OFFSET 0`, so the planner neither merges it into the outer query nor pushes the eligibility,
+/// namespace, bound or arm filters into it. PostgreSQL keeps no statistics on a partial index's
+/// expression, so it estimates every address at the default selectivity. Merged, it combined
+/// the address probes with `normalized_events_projection_idx` over every grant and transfer of
+/// the chain. A row holding the address under two keys comes from two subqueries, and
+/// `DISTINCT` keeps one anchor. With no arm, as for `RoleHolder` alone, the filter is `FALSE`
+/// and the statement reads nothing.
 pub(super) fn push_historical_address_matches_query<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     address: &'a str,
@@ -84,7 +100,28 @@ pub(super) fn push_historical_address_matches_query<'a>(
         SELECT DISTINCT
             ne.logical_name_id,
             ne.resource_id
-        FROM normalized_events ne
+        FROM "#,
+    );
+    let keys = probed_address_keys(relations);
+    if keys.is_empty() {
+        builder.push("normalized_events ne");
+    } else {
+        builder.push("(");
+        for (index, key) in keys.iter().enumerate() {
+            if index > 0 {
+                builder.push(" UNION ALL ");
+            }
+            builder.push(format!(
+                "(SELECT {PROBE_COLUMNS} FROM normalized_events ne \
+                 WHERE lower(COALESCE(ne.after_state ->> '{key}', '')) = "
+            ));
+            builder.push_bind(address);
+            builder.push(format!(" AND ne.after_state ? '{key}' OFFSET 0)"));
+        }
+        builder.push(") ne");
+    }
+    builder.push(
+        r#"
         LEFT JOIN resources r
           ON r.resource_id = ne.resource_id
         LEFT JOIN bigname_phase.chain_lineage resource_lineage
@@ -121,15 +158,39 @@ pub(super) fn push_historical_address_matches_query<'a>(
     push_address_match_filter(builder, Address::Bound(address), relations);
 }
 
+/// Whether the token holder arms and the controller arms apply. The probes and the arms both
+/// read this, so a probe exists for every key an arm compares.
+fn relation_arms(relations: Option<&[AddressNameRelation]>) -> (bool, bool) {
+    let include_token_holder =
+        relations.is_none_or(|relations| relations.contains(&AddressNameRelation::TokenHolder));
+    let include_controller = relations
+        .is_none_or(|relations| relations.contains(&AddressNameRelation::EffectiveController));
+    (include_token_holder, include_controller)
+}
+
+/// The `after_state` keys the arms compare to the address: `registrant` and `to` for the token
+/// holder arms, `owner` for the registry owner arm, and `to` for the ENSv2 controller arm.
+fn probed_address_keys(relations: Option<&[AddressNameRelation]>) -> Vec<&'static str> {
+    let (include_token_holder, include_controller) = relation_arms(relations);
+    let mut keys = Vec::new();
+    if include_token_holder {
+        keys.extend(["registrant", "to"]);
+    }
+    if include_token_holder || include_controller {
+        keys.push("owner");
+    }
+    if include_controller && !include_token_holder {
+        keys.push("to");
+    }
+    keys
+}
+
 fn push_address_match_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     address: Address<'a>,
     relations: Option<&'a [AddressNameRelation]>,
 ) {
-    let include_token_holder =
-        relations.is_none_or(|relations| relations.contains(&AddressNameRelation::TokenHolder));
-    let include_controller = relations
-        .is_none_or(|relations| relations.contains(&AddressNameRelation::EffectiveController));
+    let (include_token_holder, include_controller) = relation_arms(relations);
 
     builder.push("(");
     let mut needs_or = false;

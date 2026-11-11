@@ -34,10 +34,12 @@ const UNRELATED_NAMES: i64 = 300;
 /// write that pointer attributes to its resource. A root role change of another account that
 /// carries the target's name and resource (`stray:root`) is not one of them.
 const TARGET_ROWS: i64 = 5;
+/// The address key indexes the anchor lookup's probes read, in the order of the keys
+/// `registrant`, `to` and `owner`.
 const ANCHOR_INDEXES: [&str; 3] = [
-    "normalized_events_address_registrant_match_idx",
-    "normalized_events_address_token_holder_match_idx",
-    "normalized_events_address_registry_owner_match_idx",
+    "normalized_events_address_registrant_idx",
+    "normalized_events_address_to_idx",
+    "normalized_events_address_owner_idx",
 ];
 const SELECTOR_INDEXES: [&str; 3] = [
     "normalized_events_name_history_idx",
@@ -301,11 +303,11 @@ type AnchorCase<'a> = (
     BTreeSet<(Option<String>, Option<Uuid>)>,
 );
 
-/// The anchor lookup must reach the target's rows through the three address-match indexes,
-/// not by reading every grant and transfer, and must find the target's name and resource. The
-/// `manager` lookup alone reads the registry owner index for the owner transfer and the token
-/// holder index for the ENSv2 registry transfer, and finds only the owner transfer's anchor: the
-/// ENSv2 transfer carries no name, so it moves no `manager`.
+/// The anchor lookup must reach the target's rows through the three address key indexes, not
+/// by reading every grant and transfer, and must find the target's name and resource. The
+/// `manager` lookup alone reads the `to` and `owner` indexes, for the ENSv2 registry transfer and
+/// the owner transfer, and finds only the owner transfer's anchor: the ENSv2 transfer carries no
+/// name, so it moves no `manager`.
 async fn check_anchor_plan(connection: &mut PgConnection) -> Result<()> {
     let manager = [AddressNameRelation::EffectiveController];
     let cases: [AnchorCase<'_>; 2] = [
