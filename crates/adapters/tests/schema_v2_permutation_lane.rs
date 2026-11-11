@@ -5286,3 +5286,116 @@ fn probe_seed_1319270771456002433_variants() -> Result<()> {
     }
     bail!("probe report:\n{}", report.join("\n"))
 }
+
+/// Probe only, not for merge: an expired label renewed to an expiry that has still passed, the
+/// order a root renewer can emit on the deployed registry.
+#[test]
+fn probe_renewal_of_a_lapsed_label_to_a_passed_expiry() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, RUNS, Registry, Token};
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let t0 = Token {
+        label: 0,
+        version: 0,
+    };
+    let t1 = Token {
+        label: 1,
+        version: 0,
+    };
+    let mut variants: Vec<(String, Vec<registry_orders::Action>)> = Vec::new();
+    for registry in [Registry::Declared, Registry::Announced] {
+        let filler = vec![
+            Atom::Register {
+                registry,
+                token: t1,
+                label: 1,
+                owner: 1,
+                expiry: Expiry::Far,
+            },
+            Atom::Mint {
+                registry,
+                token: t1,
+                to: 1,
+            },
+            Atom::Link {
+                registry,
+                token: t1,
+                resource: t1,
+            },
+        ];
+        let reserve = Atom::Reserve {
+            registry,
+            token: t0,
+            label: 0,
+            expiry: Expiry::Lapses(0),
+        };
+        let register = vec![
+            Atom::Register {
+                registry,
+                token: t0,
+                label: 0,
+                owner: 2,
+                expiry: Expiry::Lapses(0),
+            },
+            Atom::Mint {
+                registry,
+                token: t0,
+                to: 2,
+            },
+            Atom::Link {
+                registry,
+                token: t0,
+                resource: t0,
+            },
+        ];
+        let announce = (registry == Registry::Announced).then_some(Atom::Announce);
+        for (name, first, renewal) in [
+            (
+                "reservation renewed still passed",
+                vec![reserve],
+                Expiry::Lapses(1),
+            ),
+            (
+                "registration renewed still passed",
+                register.clone(),
+                Expiry::Lapses(1),
+            ),
+            ("reservation renewed live", vec![reserve], Expiry::Far),
+            ("registration renewed live", register.clone(), Expiry::Far),
+        ] {
+            let mut first = first;
+            if let Some(atom) = announce {
+                first.insert(0, atom);
+            }
+            variants.push((
+                format!("{registry:?} {name}"),
+                vec![
+                    in_new_block(first),
+                    in_new_block(filler.clone()),
+                    in_new_block(vec![Atom::Renew {
+                        registry,
+                        token: t0,
+                        expiry: renewal,
+                    }]),
+                    in_new_block(vec![Atom::Transfer {
+                        registry,
+                        token: t1,
+                        from: 1,
+                        to: 3,
+                    }]),
+                ],
+            ));
+        }
+    }
+    let mut report = Vec::new();
+    for (name, actions) in &variants {
+        for (layout, split_kind) in RUNS {
+            let outcome = match registry_orders::check(&wiring, actions, layout, split_kind, 0) {
+                Ok(_) => "converges".to_owned(),
+                Err(error) => registry_orders::signature(&error),
+            };
+            report.push(format!("{name} {layout:?} {split_kind:?}: {outcome}"));
+        }
+    }
+    bail!("probe report:\n{}", report.join("\n"))
+}
