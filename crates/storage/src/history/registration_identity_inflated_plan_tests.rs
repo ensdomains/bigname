@@ -117,7 +117,8 @@ async fn check_plans(connection: &mut PgConnection, cells: &[PlanCell]) -> Resul
                 }
                 let name = format!("plan_{cell_index}_{statement_index}");
                 let before_name = format!("{name}_before");
-                prepare(connection, &name, &bound.sql).await?;
+                // Red: the probe text's checks run on the previous text.
+                prepare(connection, &name, &joins.previous_text(&bound.sql)).await?;
                 prepare(connection, &before_name, &joins.previous_text(&bound.sql)).await?;
                 for mode in PLAN_MODES {
                     let cell_label = format!("{label}, {mode}");
