@@ -454,7 +454,8 @@ async fn a_group_in_two_workers_chunks_has_one_lead() -> Result<()> {
     let side = side(&fixture).await?;
     let first = format!("NEW.logical_name_id = '{claimed_first}'");
     let held_chunk = hold(&fixture, &side, 91, &first, false).await?;
-    let pass = fixture.apply_with(8, FamilyMode::Rebuild, &ranged(2));
+    let two = ranged(2);
+    let pass = fixture.apply_with(8, FamilyMode::Rebuild, &two);
     let control = async {
         let observed = async {
             let formed = until(60, || held(&side)).await?;
