@@ -366,7 +366,16 @@ jobs:
       - name: cargo test
         if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/')
         timeout-minutes: 20
-        run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
+        run: cargo test --no-fail-fast ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
+
+      # Probe only: the generated registry orders' report and timing.
+      - name: Generated registry orders report (probe)
+        if: always() && matrix.name == 'core' && (github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/'))
+        run: |
+          bin="$(ls -t target/debug/deps/schema_v2_permutation_lane-* | grep -v '\.d$' | head -1)"
+          echo "binary: $bin"
+          cd crates/adapters
+          time "$GITHUB_WORKSPACE/$bin" registry_order --nocapture --test-threads=1
 
       - name: Report stalled test databases
         if: always() && (github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/'))
@@ -381,6 +390,38 @@ jobs:
       - name: Warm core test dependencies
         if: github.event_name == 'push' && !startsWith(github.ref, 'refs/heads/ci/') && steps.cargo_cache.outputs.cache-hit != 'true'
         run: cargo test --no-run ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
+
+  fingerprint_probe:
+    # Probe only: fingerprint_report from scripts/check-upstream-rotation, base against head.
+    name: fingerprint (probe)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: fingerprint_report
+        env:
+          BASE_SHA: 58f108d1bc41e6e4ed6ab591bd817a7596019f25
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 - <<'PY'
+          import importlib.machinery, importlib.util, os, sys
+          loader = importlib.machinery.SourceFileLoader("check_upstream_rotation", "scripts/check-upstream-rotation")
+          spec = importlib.util.spec_from_loader(loader.name, loader)
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[loader.name] = module
+          loader.exec_module(module)
+          print(f"base {os.environ['BASE_SHA']} head {os.environ['HEAD_SHA']}")
+          print(module.fingerprint_report(os.environ["BASE_SHA"], os.environ["HEAD_SHA"], []))
+          PY
 
   api_shard:
     if: github.event_name != 'merge_group'
