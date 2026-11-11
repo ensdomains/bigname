@@ -831,6 +831,30 @@ fn v2_reservation_then_link_emits_no_registration_row() -> Result<()> {
     Ok(())
 }
 
+/// A second `TokenResource` for a named token that already holds the resource changes nothing:
+/// the whole pass and every split agree, and the writer accepts both.
+#[test]
+fn v2_label_then_two_links_is_batch_grid_independent() -> Result<()> {
+    let token = versioned_token("order", 0);
+    converge_label_order(
+        "directed=v2-label-then-two-links",
+        20_000_570,
+        vec![
+            vec![
+                label_order_registered(token, "order"),
+                label_order_transfer(token, Address::ZERO, label_order_owner()),
+                label_order_link(token),
+            ],
+            vec![label_order_link(token)],
+            vec![label_order_transfer(
+                token,
+                label_order_owner(),
+                Address::with_last_byte(0xd1),
+            )],
+        ],
+    )
+}
+
 #[test]
 fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Result<()> {
     let checked_in = checked_in_manifests()?;
