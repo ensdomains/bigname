@@ -116,12 +116,10 @@ impl State {
             if let Some(subregistry) = previous.subregistry.as_deref() {
                 self.mark_v2_registry_dirty(subregistry);
             }
-        }
-        if let Some(previous) = previous.as_ref()
-            && let Some(previous_label) = previous.raw_label.as_ref()
-        {
-            self.v2_entry_by_parent_label
-                .remove(&(emitter.clone(), previous_label.clone()));
+            if let Some(previous_label) = previous.raw_label.as_ref() {
+                self.v2_entry_by_parent_label
+                    .remove(&(emitter.clone(), previous_label.clone()));
+            }
         }
         if let Some(previous) = previous {
             replaced.push((token_id.to_owned(), previous));
@@ -301,6 +299,8 @@ impl State {
         self.replace_v2_expiry_index(&key, previous_expiry, Some(expiry));
         self.mark_v2_token_component_dirty(&key);
     }
+    /// Replaces a registered token's registration. A reservation, which has none, keeps none.
+    #[rustfmt::skip]    pub(in crate::schema_v2) fn set_v2_registration(&mut self, emitter: &str, token_id: &str, registration: Value) { if let Some(entry) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) && entry.registration.is_some() { entry.registration = Some(registration); } }
     #[rustfmt::skip]    pub(in crate::schema_v2) fn clear_v2_expiry_retirement(&mut self, emitter: &str, token_id: &str, preserve_ancestor_expiry: bool) { if let Some(entry) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) && (!preserve_ancestor_expiry || entry.resource_expiry_retirement_emitted) { entry.expiry_retirement_emitted = false; entry.resource_expiry_retirement_emitted = false; } }
     pub(in crate::schema_v2) fn transfer_v2_registrant(
         &mut self,
