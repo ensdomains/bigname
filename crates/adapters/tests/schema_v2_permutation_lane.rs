@@ -5367,6 +5367,53 @@ fn registry_order_a_live_token_registered_again_then_transferred_diverges_until_
     )
 }
 
+/// Shrunk from seed 1143880151033430697: an announced registry registers and links a label on one
+/// token version, registers it on the other version in the next block, then back on the first.
+/// Live state drops the first token's resource and a restore keeps it. Pinned until TYR-525
+/// lands.
+#[test]
+fn registry_order_a_label_back_on_its_linked_token_diverges_until_tyr_525() -> Result<()> {
+    use crate::permutation::registry_orders::{Action, Atom, Expiry, Registry, Token};
+    let registry = Registry::Announced;
+    let linked = Token {
+        label: 1,
+        version: 1,
+    };
+    let other = Token {
+        label: 1,
+        version: 0,
+    };
+    let register = |token| Atom::Register {
+        registry,
+        token,
+        label: 1,
+        owner: 3,
+        expiry: Expiry::Far,
+    };
+    pinned_registry_order_failure(
+        "a label back on its linked token",
+        registry_orders::TYR_525,
+        "live state differs from a restore at upstream_resource",
+        &[
+            in_new_block(vec![Atom::Announce]),
+            Action {
+                atoms: vec![
+                    register(linked),
+                    Atom::Link {
+                        registry,
+                        token: linked,
+                        resource: linked,
+                    },
+                ],
+                new_block: false,
+                same_transaction: false,
+            },
+            in_new_block(vec![register(other)]),
+            in_new_block(vec![register(linked)]),
+        ],
+    )
+}
+
 /// Shrunk from seed 1494661391878574169: the declared registry registers a label whose expiry has
 /// passed and links it, registers the same token again in the same block with an expiry that
 /// lapses before the next block, and a later block sets its resolver. The split replay derives a
@@ -5642,6 +5689,24 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
         block(vec![filler]),
         block(vec![register(Expiry::Far)]),
     ];
+    let dropped = "live state differs from a restore at upstream_resource";
+    let dropped_text = "x\n    first difference:\n      live     upstream_resource: None,\n      restored upstream_resource: Some(\n";
+    let resolver_differs = "live state differs from a restore at resolver";
+    let other_version = Token {
+        label: 0,
+        version: 1,
+    };
+    let flipped = vec![
+        block(vec![register(Expiry::Far), link]),
+        block(vec![Atom::Register {
+            registry,
+            token: other_version,
+            label: 0,
+            owner: 1,
+            expiry: Expiry::Far,
+        }]),
+        block(vec![register(Expiry::Far)]),
+    ];
     let reserved_between = vec![
         block(vec![register(Expiry::Far), link]),
         block(vec![reserve(Expiry::Far)]),
@@ -5817,6 +5882,28 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             third,
             "",
             live_again,
+            None,
+        ),
+        // TYR-525, a label registered back on a token id it left.
+        (
+            "a label back on its linked token, the resource dropped live",
+            dropped,
+            dropped_text,
+            flipped.clone(),
+            Some(TYR_525),
+        ),
+        (
+            "a label back on its linked token, another field",
+            resolver_differs,
+            "",
+            flipped,
+            None,
+        ),
+        (
+            "the resource dropped live, no label moved",
+            dropped,
+            dropped_text,
+            live_again.clone(),
             None,
         ),
         // TYR-526.
