@@ -803,6 +803,50 @@ fn v2_reserved_then_deployed_registration_links_with_the_kept_resource() -> Resu
     converge_without_artifacts("directed=v2-reserved-then-deployed-registration", input, 2)
 }
 
+/// A reservation is no registration, so a `TokenResource` after it emits no registration row,
+/// in one batch or after a restore.
+#[test]
+fn v2_reservation_then_link_emits_no_registration_row() -> Result<()> {
+    let token = versioned_token("order", 0);
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let blocks = vec![
+        vec![label_order_reserved(token, "order")],
+        vec![label_order_link(token)],
+    ];
+    let input = v2_label_order_input(&wiring, 20_000_560, blocks)?;
+    let converged = converge("directed=v2-reservation-then-link", input, vec![0..1, 1..2])?;
+    assert!(converged.artifacts.counts().is_empty());
+    let granted = |output: &BatchOutput| {
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "RegistrationGranted")
+            .count()
+    };
+    assert_eq!(granted(&converged.whole.output), 0);
+    for batch in &converged.batches {
+        assert_eq!(granted(&batch.output), 0);
+    }
+    Ok(())
+}
+
+/// A second `TokenResource` for the same resource extends the token's registration again. The
+/// row it emits is the same whether the first link's row was restored in between or not.
+#[test]
+fn v2_label_then_two_links_is_batch_grid_independent() -> Result<()> {
+    let token = versioned_token("order", 0);
+    converge_label_order(
+        "directed=v2-label-then-two-links",
+        20_000_570,
+        vec![
+            vec![label_order_registered(token, "order")],
+            vec![label_order_link(token)],
+            vec![label_order_link(token)],
+        ],
+    )
+}
+
 #[test]
 fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Result<()> {
     let checked_in = checked_in_manifests()?;

@@ -145,10 +145,9 @@ pub(super) fn token_resource(
                 resource_id: Some(resource_id),
                 identity_suffix: format!("RegistrationGranted:linked:{token_id}"),
                 explicit_before: None,
-                after_state: linked_registration.clone(),
+                after_state: linked_registration,
                 state_scope: String::new(),
             });
-            state.set_v2_registration(&raw.emitting_address, &token_id, linked_registration);
             if let Some(owner) = registration
                 .get("registrant")
                 .or_else(|| registration.get("owner"))
