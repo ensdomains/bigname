@@ -712,21 +712,22 @@ CREATE INDEX IF NOT EXISTS normalized_events_address_registry_owner_match_idx
 
 -- The historical address membership statement (crates/storage/src/history/address_evidence.rs)
 -- probes each address key in its own fenced subquery, which holds only the key's match and
--- the key's presence. The predicates name no event kind, visibility or canonicality state,
--- which the statement applies after the subqueries. Keep them identical to the subqueries,
+-- the address length of its value. The predicates name no event kind, visibility or
+-- canonicality state, which the statement applies after the subqueries. The length bounds the
+-- key, so a long string under one of these keys is left out instead of failing the insert. Keep them identical to the subqueries,
 -- ops/address-key-indexes/install.sql and
 -- migrations/20261112120000_normalized_events_address_key_indexes.sql.
 CREATE INDEX IF NOT EXISTS normalized_events_address_to_idx
     ON normalized_events (lower(COALESCE(after_state ->> 'to', '')))
-    WHERE after_state ? 'to';
+    WHERE length(after_state ->> 'to') = 42;
 
 CREATE INDEX IF NOT EXISTS normalized_events_address_registrant_idx
     ON normalized_events (lower(COALESCE(after_state ->> 'registrant', '')))
-    WHERE after_state ? 'registrant';
+    WHERE length(after_state ->> 'registrant') = 42;
 
 CREATE INDEX IF NOT EXISTS normalized_events_address_owner_idx
     ON normalized_events (lower(COALESCE(after_state ->> 'owner', '')))
-    WHERE after_state ? 'owner';
+    WHERE length(after_state ->> 'owner') = 42;
 
 -- Address history also lists the registry root role changes made to the address: the
 -- RootPermissionChanged rows whose subject is the address, which name no name or per-address

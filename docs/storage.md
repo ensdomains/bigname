@@ -983,9 +983,9 @@ require the [concurrent prebuild](../ops/address-key-indexes/README.md):
 
 | Index | Serves |
 | --- | --- |
-| `normalized_events_address_registrant_idx` | the `registrant` probe: rows whose `after_state` has a `registrant` key, by the lowercased value |
-| `normalized_events_address_to_idx` | the `to` probe, which the token holder and ENSv2 controller arms share: rows with a `to` key, by the lowercased value |
-| `normalized_events_address_owner_idx` | the `owner` probe of the registry owner arm: rows with an `owner` key, by the lowercased value |
+| `normalized_events_address_registrant_idx` | the `registrant` probe: rows whose `registrant` value is 42 characters long, by the lowercased value |
+| `normalized_events_address_to_idx` | the `to` probe, which the token holder and ENSv2 controller arms share: rows whose `to` value is 42 characters long, by the lowercased value |
+| `normalized_events_address_owner_idx` | the `owner` probe of the registry owner arm: rows whose `owner` value is 42 characters long, by the lowercased value |
 
 Their predicates name no event kind, visibility or canonicality state, so one probe text serves
 every flag combination, diagnostics included, and the statement applies those filters after the
@@ -1164,8 +1164,8 @@ kinds of historical events are: a `RegistrationGranted` whose `registrant` is th
 is the address, each compared lowercased. The membership statement
 (`push_historical_address_matches_query` in `crates/storage/src/history/address_evidence.rs`)
 reads them through one subquery per key, `registrant`, `to` and `owner`. Each subquery holds only
-the key's lowercased match and the key's presence, ends in `OFFSET 0`, and reads one partial
-expression index over every row that carries the key: `normalized_events_address_registrant_idx`,
+the key's lowercased match and the address length of its value, ends in `OFFSET 0`, and reads
+one partial expression index over every row whose value under the key is 42 characters long: `normalized_events_address_registrant_idx`,
 `normalized_events_address_to_idx`, and `normalized_events_address_owner_idx`. The event kind,
 visibility, canonicality, namespace, publication bound and arm filters all apply after the
 subqueries. PostgreSQL keeps no statistics on a partial index's expression and estimates every

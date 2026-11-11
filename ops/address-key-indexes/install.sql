@@ -39,11 +39,11 @@ BEGIN
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
             ('normalized_events_address_to_idx',
-             $def$CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (after_state ? 'to'::text)$def$),
+             $def$CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (length((after_state ->> 'to'::text)) = 42)$def$),
             ('normalized_events_address_registrant_idx',
-             $def$CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (after_state ? 'registrant'::text)$def$),
+             $def$CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (length((after_state ->> 'registrant'::text)) = 42)$def$),
             ('normalized_events_address_owner_idx',
-             $def$CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (after_state ? 'owner'::text)$def$)
+             $def$CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (length((after_state ->> 'owner'::text)) = 42)$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -117,7 +117,7 @@ DO $$ BEGIN PERFORM pg_temp.check_address_key_indexes(false); END $$;
 SELECT clock_timestamp() AS address_key_build_started \gset
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_to_idx
     ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'to', '')))
-    WHERE after_state ? 'to';
+    WHERE length(after_state ->> 'to') = 42;
 SELECT 'normalized_events_address_to_idx' AS index_name,
        pg_size_pretty(pg_relation_size(to_regclass('bigname_phase.normalized_events_address_to_idx'))) AS index_size,
        clock_timestamp() - :'address_key_build_started'::timestamptz AS build_time;
@@ -125,7 +125,7 @@ SELECT 'normalized_events_address_to_idx' AS index_name,
 SELECT clock_timestamp() AS address_key_build_started \gset
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_registrant_idx
     ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'registrant', '')))
-    WHERE after_state ? 'registrant';
+    WHERE length(after_state ->> 'registrant') = 42;
 SELECT 'normalized_events_address_registrant_idx' AS index_name,
        pg_size_pretty(pg_relation_size(to_regclass('bigname_phase.normalized_events_address_registrant_idx'))) AS index_size,
        clock_timestamp() - :'address_key_build_started'::timestamptz AS build_time;
@@ -133,7 +133,7 @@ SELECT 'normalized_events_address_registrant_idx' AS index_name,
 SELECT clock_timestamp() AS address_key_build_started \gset
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_owner_idx
     ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'owner', '')))
-    WHERE after_state ? 'owner';
+    WHERE length(after_state ->> 'owner') = 42;
 SELECT 'normalized_events_address_owner_idx' AS index_name,
        pg_size_pretty(pg_relation_size(to_regclass('bigname_phase.normalized_events_address_owner_idx'))) AS index_size,
        clock_timestamp() - :'address_key_build_started'::timestamptz AS build_time;

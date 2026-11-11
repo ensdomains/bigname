@@ -77,8 +77,8 @@ const PROBE_COLUMNS: &str = "ne.namespace, ne.logical_name_id, ne.resource_id, n
 /// and registry ownership transfers whose new holder is `address`.
 ///
 /// The rows come from one subquery per address key the arms compare (`registrant`, `to`,
-/// `owner`). Each holds only that key's match and the key's presence, which is the predicate of
-/// the key's partial expression index (`normalized_events_address_<key>_idx`), and ends in
+/// `owner`). Each holds only that key's match and the address length of its value, which is the
+/// predicate of the key's partial expression index (`normalized_events_address_<key>_idx`), and ends in
 /// `OFFSET 0`, so the planner neither merges it into the outer query nor pushes the eligibility,
 /// namespace, bound or arm filters into it. PostgreSQL keeps no statistics on a partial index's
 /// expression, so it estimates every address at the default selectivity. Merged, it combined
@@ -116,7 +116,9 @@ pub(super) fn push_historical_address_matches_query<'a>(
                  WHERE lower(COALESCE(ne.after_state ->> '{key}', '')) = "
             ));
             builder.push_bind(address);
-            builder.push(format!(" AND ne.after_state ? '{key}' OFFSET 0)"));
+            builder.push(format!(
+                " AND length(ne.after_state ->> '{key}') = 42 OFFSET 0)"
+            ));
         }
         builder.push(") ne");
     }

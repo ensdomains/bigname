@@ -3,11 +3,13 @@
 -- `/v1/diagnostics/events?address=` and address history read. The statement probes each of
 -- the three address keys of after_state in its own fenced subquery, and each subquery reads
 -- one of these partial expression indexes:
--- - normalized_events_address_to_idx: rows with a `to` key, by the lowercased value.
--- - normalized_events_address_registrant_idx: rows with a `registrant` key, likewise.
--- - normalized_events_address_owner_idx: rows with an `owner` key, likewise.
+-- - normalized_events_address_to_idx: rows whose `to` value is 42 characters long, an
+--   address's length, by the lowercased value.
+-- - normalized_events_address_registrant_idx: the same for `registrant`.
+-- - normalized_events_address_owner_idx: the same for `owner`.
 -- The predicates name no event kind, visibility or canonicality state, which the statement
--- applies outside the subqueries. No rows, phase markers, catalogue version or content-hash
+-- applies outside the subqueries. The length bounds every key, so a long string under one of
+-- these keys in any event kind is left out of the index instead of failing its insert. No rows, phase markers, catalogue version or content-hash
 -- inputs change, and no redo is required.
 --
 -- Populated tables require valid prebuilds with the reviewed definitions, built concurrently
@@ -58,13 +60,13 @@ BEGIN
         END IF;
         CREATE INDEX IF NOT EXISTS normalized_events_address_to_idx
             ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'to', '')))
-            WHERE after_state ? 'to';
+            WHERE length(after_state ->> 'to') = 42;
         CREATE INDEX IF NOT EXISTS normalized_events_address_registrant_idx
             ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'registrant', '')))
-            WHERE after_state ? 'registrant';
+            WHERE length(after_state ->> 'registrant') = 42;
         CREATE INDEX IF NOT EXISTS normalized_events_address_owner_idx
             ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'owner', '')))
-            WHERE after_state ? 'owner';
+            WHERE length(after_state ->> 'owner') = 42;
     END IF;
 
     -- Every name below is schema-qualified or lives in pg_catalog.
@@ -77,11 +79,11 @@ BEGIN
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
             ('normalized_events_address_to_idx',
-             $def$CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (after_state ? 'to'::text)$def$),
+             $def$CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (length((after_state ->> 'to'::text)) = 42)$def$),
             ('normalized_events_address_registrant_idx',
-             $def$CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (after_state ? 'registrant'::text)$def$),
+             $def$CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (length((after_state ->> 'registrant'::text)) = 42)$def$),
             ('normalized_events_address_owner_idx',
-             $def$CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (after_state ? 'owner'::text)$def$)
+             $def$CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (length((after_state ->> 'owner'::text)) = 42)$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind

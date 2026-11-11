@@ -141,8 +141,8 @@ address_key_printed_definition() {
             "SELECT pg_get_indexdef('$scratch_schema.$1'::regclass);" 'ROLLBACK;'
     } | run_psql
 }
-# For each index: other keys, the reviewed key on every row, and the reviewed key under a
-# predicate the probe does not state. Each is a valid, ready index under the name.
+# For each index: other keys, the reviewed key on every row, and the reviewed key under the
+# unbounded key-presence predicate. Each is a valid, ready index under the name.
 address_key_wrong_definitions=()
 for address_key_key in to registrant owner; do
     address_key_index="normalized_events_address_${address_key_key}_idx"
@@ -150,7 +150,7 @@ for address_key_key in to registrant owner; do
     address_key_wrong_definitions+=(
         "$address_key_index|(chain_id, block_number)"
         "$address_key_index|$address_key_expression"
-        "$address_key_index|$address_key_expression WHERE (after_state ->> '$address_key_key') IS NOT NULL"
+        "$address_key_index|$address_key_expression WHERE after_state ? '$address_key_key'"
     )
 done
 for address_key_entry in "${address_key_wrong_definitions[@]}"; do

@@ -411,22 +411,22 @@ WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistryCreated'
         name: "normalized_events_address_to_idx",
         create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_to_idx
     ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'to', '')))
-    WHERE after_state ? 'to'"#,
-        definition: r#"CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (after_state ? 'to'::text)"#,
+    WHERE length(after_state ->> 'to') = 42"#,
+        definition: r#"CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (length((after_state ->> 'to'::text)) = 42)"#,
     },
     DroppedIndex {
         name: "normalized_events_address_registrant_idx",
         create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_registrant_idx
     ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'registrant', '')))
-    WHERE after_state ? 'registrant'"#,
-        definition: r#"CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (after_state ? 'registrant'::text)"#,
+    WHERE length(after_state ->> 'registrant') = 42"#,
+        definition: r#"CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (length((after_state ->> 'registrant'::text)) = 42)"#,
     },
     DroppedIndex {
         name: "normalized_events_address_owner_idx",
         create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_owner_idx
     ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'owner', '')))
-    WHERE after_state ? 'owner'"#,
-        definition: r#"CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (after_state ? 'owner'::text)"#,
+    WHERE length(after_state ->> 'owner') = 42"#,
+        definition: r#"CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (length((after_state ->> 'owner'::text)) = 42)"#,
     },
     DroppedIndex {
         name: "normalized_events_address_root_permission_idx",

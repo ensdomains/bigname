@@ -5,16 +5,20 @@
 in the past: registrations granted to it, tokens transferred to it and registry ownership
 transfers to it (`crates/storage/src/history/address_evidence.rs`). The statement reads each
 of the three address keys of `after_state` through its own subquery, which holds only that
-key's match and nothing the statement filters on afterwards. Three partial expression indexes
+key's match and the address length of its value, and nothing the statement filters on
+afterwards. Three partial expression indexes
 on `bigname_phase.normalized_events` serve those subqueries:
 
 | Index | Key | Rows |
 | --- | --- | --- |
-| `normalized_events_address_to_idx` | `lower(COALESCE(after_state ->> 'to', ''))` | every row whose `after_state` has a `to` key |
-| `normalized_events_address_registrant_idx` | `lower(COALESCE(after_state ->> 'registrant', ''))` | every row whose `after_state` has a `registrant` key |
-| `normalized_events_address_owner_idx` | `lower(COALESCE(after_state ->> 'owner', ''))` | every row whose `after_state` has an `owner` key |
+| `normalized_events_address_to_idx` | `lower(COALESCE(after_state ->> 'to', ''))` | every row whose `to` value is 42 characters long |
+| `normalized_events_address_registrant_idx` | `lower(COALESCE(after_state ->> 'registrant', ''))` | every row whose `registrant` value is 42 characters long |
+| `normalized_events_address_owner_idx` | `lower(COALESCE(after_state ->> 'owner', ''))` | every row whose `owner` value is 42 characters long |
 
-The predicates name no event kind, visibility or canonicality state. The statement applies
+The predicates name no event kind, visibility or canonicality state. A 42-character value is
+an address's length, the only value a probe can match, and the length bounds the key: a long
+string under one of these keys in any event kind is left out of the index, where an unbounded
+key would make its insert fail. The statement applies
 those after the subqueries, so the planner cannot combine an address probe with an index
 keyed by event kind or block, whatever it estimates for the address. PostgreSQL keeps no
 statistics on the expressions of a partial index, so it estimates every address alike. The
@@ -80,9 +84,9 @@ and `indisvalid` and `indisready` true. The definitions must be exactly these li
 the texts the schema-migration and the script compare:
 
 ```text
-CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (after_state ? 'owner'::text)
-CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (after_state ? 'registrant'::text)
-CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (after_state ? 'to'::text)
+CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (length((after_state ->> 'owner'::text)) = 42)
+CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (length((after_state ->> 'registrant'::text)) = 42)
+CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (length((after_state ->> 'to'::text)) = 42)
 ```
 
 ## Recovery

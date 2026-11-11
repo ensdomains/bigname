@@ -6858,7 +6858,8 @@ address at PostgreSQL's default selectivity, because the planner keeps no statis
 index's expression. Against that estimate it combined the address probes with
 `normalized_events_projection_idx` over every grant and transfer of the chain on each call. The
 statement now reads each address key, `registrant`, `to` and `owner`, through its own subquery that
-holds only the key's match and presence, and applies every other filter afterwards. Three new
+holds only the key's match and the address length of its value, and applies every other filter
+afterwards. Three new
 partial indexes, one per key, serve those subqueries.
 
 - The rows are the same for every route and flag combination. No response changes.
