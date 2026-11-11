@@ -5693,9 +5693,10 @@ address history read a page with `record_key`
   reset arm reads at most the chain's resets. A `resolver` or `contract_address` scope is the
   emitter equality inside both arms. The rows, their order and the cursors do not change for a
   key sent as stored.
-- `include=total_count` on such a read scoped by an emitter counts through the same arms, each
-  stopped at the count's cap, so the count reads at most the cap per arm for any key. The
-  count does not change.
+- `include=total_count` on such a read scoped by an emitter counts through the same arms. Each
+  arm returns at most the count's cap plus one row. Its scan also reads the rows the arm's own
+  namespace, lineage and duplicate conditions drop, so rows read per arm are bounded by the cap
+  plus one plus those, for any key. The count does not change.
 - A `record_key` with no colon is now read as the text record `text:<key>`, so
   `record_key=avatar` returns the `text:avatar` writes. The keys producers store without a
   prefix, `content`, `contenthash` and `name`, stay exact. A history cursor issued before this
