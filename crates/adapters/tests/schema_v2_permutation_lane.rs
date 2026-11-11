@@ -5183,3 +5183,158 @@ fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result
     }
     Ok(())
 }
+
+/// The sweep's known-finding tags fire on their tickets' orders and not on near misses, so a new
+/// divergence of the same kind still fails the sweep: a registration live when emitted that lapses
+/// later, a lapsed label renewed to an expiry that has still passed, a difference other than the
+/// hydration flag, a pointer token that was labelled first, and a single `TokenResource`.
+#[test]
+fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
+    use crate::permutation::registry_orders::{
+        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522, TYR_525, TYR_526, Token,
+        known_failure,
+    };
+    let registry = Registry::Announced;
+    let token = Token {
+        label: 0,
+        version: 0,
+    };
+    let block = |atoms: Vec<Atom>| Action {
+        atoms,
+        new_block: true,
+        same_transaction: false,
+    };
+    let register = |expiry| Atom::Register {
+        registry,
+        token,
+        label: 0,
+        owner: 1,
+        expiry,
+    };
+    let reserve = |expiry| Atom::Reserve {
+        registry,
+        token,
+        label: 0,
+        expiry,
+    };
+    let renew = |expiry| Atom::Renew {
+        registry,
+        token,
+        expiry,
+    };
+    let link = Atom::Link {
+        registry,
+        token,
+        resource: token,
+    };
+    let pointer = Atom::Subregistry {
+        registry,
+        token,
+        to: Pointer::Announced,
+    };
+    let transfer = Atom::Transfer {
+        registry,
+        token,
+        from: 1,
+        to: 2,
+    };
+    let filler = Atom::Resolver {
+        registry,
+        token: Token {
+            label: 1,
+            version: 0,
+        },
+        to: Pointer::Other(0),
+    };
+    let stream = "the split replay derives a different event stream";
+    let bindings = "the writer would reject a repeated surface_bindings row";
+    let after = "an event's after_state differs between the whole pass and the split replay";
+    let pending = "after_state\n      whole={\"registry_hydration_pending\":true}\n   replayed={}";
+    let other = "after_state\n      whole={\"to\":\"0x01\"}\n   replayed={\"to\":\"0x02\"}";
+    let cases = [
+        (
+            "a registration already expired",
+            stream,
+            "",
+            vec![block(vec![register(Expiry::Past)])],
+            Some(TYR_525),
+        ),
+        (
+            "a registration live when emitted that lapses later",
+            stream,
+            "",
+            vec![
+                block(vec![register(Expiry::Lapses(0))]),
+                block(vec![filler]),
+            ],
+            None,
+        ),
+        (
+            "a live reservation cut to a passed expiry",
+            stream,
+            "",
+            vec![
+                block(vec![reserve(Expiry::Far)]),
+                block(vec![renew(Expiry::Past)]),
+            ],
+            Some(TYR_525),
+        ),
+        (
+            "a lapsed reservation renewed to an expiry that has still passed",
+            stream,
+            "",
+            vec![
+                block(vec![reserve(Expiry::Lapses(0))]),
+                block(vec![filler]),
+                block(vec![renew(Expiry::Lapses(1))]),
+            ],
+            None,
+        ),
+        (
+            "a transfer of an unlabelled pointer token, hydration flag on one side",
+            after,
+            pending,
+            vec![block(vec![pointer]), block(vec![transfer])],
+            Some(TYR_526),
+        ),
+        (
+            "a transfer of an unlabelled pointer token, another difference",
+            after,
+            other,
+            vec![block(vec![pointer]), block(vec![transfer])],
+            None,
+        ),
+        (
+            "a transfer of a pointer token labelled first",
+            after,
+            pending,
+            vec![
+                block(vec![register(Expiry::Far)]),
+                block(vec![pointer]),
+                block(vec![transfer]),
+            ],
+            None,
+        ),
+        (
+            "a second TokenResource for a linked token",
+            bindings,
+            "",
+            vec![block(vec![register(Expiry::Far), link]), block(vec![link])],
+            Some(TYR_522),
+        ),
+        (
+            "a single TokenResource",
+            bindings,
+            "",
+            vec![block(vec![register(Expiry::Far), link])],
+            None,
+        ),
+    ];
+    for (name, signature, text, actions, expected) in cases {
+        assert_eq!(
+            known_failure(signature, text, &actions, Layout::BlockPerAction),
+            expected,
+            "{name}"
+        );
+    }
+}
