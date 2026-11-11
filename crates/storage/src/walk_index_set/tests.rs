@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::{ADVISORY, DROP_LIST, KEPT};
+use super::{ADVISORY, DROP_LIST, KEPT, PROJECT_GRANT_ADVISORY, PROJECT_GRANT_TABLE};
 
 const DROP_SQL: &str = include_str!("../../../../ops/walk-index-set/drop.sql");
 const INSTALL_SQL: &str = include_str!("../../../../ops/walk-index-set/install.sql");
@@ -9,6 +9,11 @@ const STORAGE_MD: &str = include_str!("../../../../docs/storage.md");
 const DEPLOYMENT_MD: &str = include_str!("../../../../docs/deployment.md");
 const RECORD_HISTORY_INSTALL_SQL: &str =
     include_str!("../../../../ops/record-history-indexes/install.sql");
+const ROLE_HOLDER_INSTALL_SQL: &str =
+    include_str!("../../../../ops/resolver-role-holder-index/install.sql");
+const ROLE_HOLDER_MIGRATION: &str = include_str!(
+    "../../../../migrations/20261112120000_project_grant_resolver_role_holder_index.sql"
+);
 
 /// The index names of every line of `script` that starts with `statement`, in script order.
 fn listed(script: &str, statement: &str) -> Vec<String> {
@@ -259,6 +264,45 @@ fn advisory_indexes_are_outside_the_walk_index_set() {
         assert!(
             walk_section.contains(&format!("`{}`", index.name)),
             "docs/storage.md's walk index set section must name {}",
+            index.name
+        );
+    }
+}
+
+/// The `project_grant` advisory indexes are on that table, outside the walk index set, and each
+/// one's statement and definition are those of its install script and its schema-migration.
+/// `docs/storage.md` names each one.
+#[test]
+fn project_grant_advisory_indexes_match_their_scripts() {
+    let walk_scripts = format!("{DROP_SQL}{INSTALL_SQL}");
+    assert!(!PROJECT_GRANT_ADVISORY.is_empty());
+    for index in PROJECT_GRANT_ADVISORY {
+        assert!(!walk_scripts.contains(index.name), "{}", index.name);
+        assert!(
+            index
+                .definition
+                .contains(&format!(" ON {PROJECT_GRANT_TABLE} USING ")),
+            "{}",
+            index.name
+        );
+        assert!(
+            ROLE_HOLDER_INSTALL_SQL.contains(&format!("{};", index.create)),
+            "{}: install.sql's statement",
+            index.name
+        );
+        for (file, text) in [
+            ("install.sql", ROLE_HOLDER_INSTALL_SQL),
+            ("the schema-migration", ROLE_HOLDER_MIGRATION),
+        ] {
+            assert!(
+                text.contains(&format!("$def${}$def$", index.definition)),
+                "{}: {file}'s reviewed definition",
+                index.name
+            );
+        }
+        assert!(
+            STORAGE_MD.contains(&format!("`{}`", index.name)),
+            "docs/storage.md must name {}",
             index.name
         );
     }
