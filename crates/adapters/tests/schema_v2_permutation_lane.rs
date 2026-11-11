@@ -5149,3 +5149,140 @@ fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result
     }
     Ok(())
 }
+
+/// Probe only, not for merge: which parts of seed 1319270771456002433's shrunk order fail.
+#[test]
+fn probe_seed_1319270771456002433_variants() -> Result<()> {
+    use crate::permutation::registry_orders::{Atom, Expiry, Pointer, RUNS, Registry, Token};
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let t = |label, version| Token { label, version };
+    let x = Registry::Announced;
+    let d = Registry::Declared;
+    let full = vec![
+        Atom::Resolver {
+            registry: d,
+            token: t(1, 0),
+            to: Pointer::Other(0),
+        },
+        Atom::Announce,
+        Atom::Register {
+            registry: x,
+            token: t(1, 0),
+            label: 1,
+            owner: 2,
+            expiry: Expiry::Far,
+        },
+        Atom::Link {
+            registry: d,
+            token: t(0, 0),
+            resource: t(1, 1),
+        },
+        Atom::Renew {
+            registry: d,
+            token: t(0, 0),
+            expiry: Expiry::Far,
+        },
+        Atom::Mint {
+            registry: x,
+            token: t(1, 1),
+            to: 1,
+        },
+        Atom::Register {
+            registry: d,
+            token: t(1, 0),
+            label: 1,
+            owner: 1,
+            expiry: Expiry::Far,
+        },
+        Atom::Reserve {
+            registry: x,
+            token: t(1, 0),
+            label: 0,
+            expiry: Expiry::Far,
+        },
+        Atom::Renew {
+            registry: x,
+            token: t(1, 0),
+            expiry: Expiry::Past,
+        },
+    ];
+    let pick = |keep: &[usize]| {
+        keep.iter()
+            .map(|&index| in_new_block(vec![full[index]]))
+            .collect::<Vec<_>>()
+    };
+    let variants: Vec<(&str, Vec<registry_orders::Action>)> = vec![
+        ("full", pick(&[0, 1, 2, 3, 4, 5, 6, 7, 8])),
+        ("announced only", pick(&[1, 2, 5, 7, 8])),
+        ("register reserve renew", pick(&[1, 2, 7, 8])),
+        ("register renew", pick(&[1, 2, 8])),
+        ("reserve renew", pick(&[1, 7, 8])),
+        ("register reserve", pick(&[1, 2, 7])),
+        (
+            "register reserve renew in one block",
+            vec![
+                in_new_block(vec![full[1]]),
+                in_new_block(vec![full[2], full[7], full[8]]),
+            ],
+        ),
+        (
+            "register renew in one block",
+            vec![
+                in_new_block(vec![full[1]]),
+                in_new_block(vec![full[2], full[8]]),
+            ],
+        ),
+        (
+            "declared register reserve renew",
+            vec![
+                in_new_block(vec![Atom::Register {
+                    registry: d,
+                    token: t(1, 0),
+                    label: 1,
+                    owner: 2,
+                    expiry: Expiry::Far,
+                }]),
+                in_new_block(vec![Atom::Reserve {
+                    registry: d,
+                    token: t(1, 0),
+                    label: 0,
+                    expiry: Expiry::Far,
+                }]),
+                in_new_block(vec![Atom::Renew {
+                    registry: d,
+                    token: t(1, 0),
+                    expiry: Expiry::Past,
+                }]),
+            ],
+        ),
+        (
+            "declared register renew",
+            vec![
+                in_new_block(vec![Atom::Register {
+                    registry: d,
+                    token: t(1, 0),
+                    label: 1,
+                    owner: 2,
+                    expiry: Expiry::Far,
+                }]),
+                in_new_block(vec![Atom::Renew {
+                    registry: d,
+                    token: t(1, 0),
+                    expiry: Expiry::Past,
+                }]),
+            ],
+        ),
+    ];
+    let mut report = Vec::new();
+    for (name, actions) in &variants {
+        for (layout, split_kind) in RUNS {
+            let outcome = match registry_orders::check(&wiring, actions, layout, split_kind, 0) {
+                Ok(_) => "converges".to_owned(),
+                Err(error) => registry_orders::signature(&error),
+            };
+            report.push(format!("{name} {layout:?} {split_kind:?}: {outcome}"));
+        }
+    }
+    bail!("probe report:\n{}", report.join("\n"))
+}
