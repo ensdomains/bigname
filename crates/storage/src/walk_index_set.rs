@@ -1,18 +1,21 @@
 //! The `normalized_events` indexes `ops/walk-index-set/drop.sql` drops for a from-zero walk or
 //! a full-history Interpret redo (`docs/storage.md` § Walk index set), and one catalog read of
-//! their state. The phase runner rebuilds them before Project runs.
+//! their state. The phase runner rebuilds them before Project runs. The advisory indexes are
+//! outside that set: an operator builds them by hand, the runner never builds them, and the API
+//! serves without them.
 use sqlx::{Connection, PgConnection};
 
 mod constants;
-pub use constants::{DROP_LIST, KEPT};
+pub use constants::{ADVISORY, DROP_LIST, KEPT};
 
 pub const TABLE: &str = "bigname_phase.normalized_events";
 
-/// One index `drop.sql` drops.
+/// One index `drop.sql` drops, or one advisory index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DroppedIndex {
     pub name: &'static str,
-    /// The statement `ops/walk-index-set/install.sql` builds the index with.
+    /// The statement `ops/walk-index-set/install.sql` builds the index with, or for an advisory
+    /// index the statement of its own install script.
     pub create: &'static str,
     /// The definition `install.sql` checks, as `pg_get_indexdef` prints it with `search_path`
     /// set to `pg_catalog` and `quote_all_identifiers` off.
@@ -81,6 +84,21 @@ type StateRow = (
 pub async fn load_drop_list_state(
     connection: &mut PgConnection,
 ) -> Result<Option<Vec<IndexStatus>>, sqlx::Error> {
+    load_state(connection, DROP_LIST).await
+}
+
+/// The state of every index in [`ADVISORY`], read as [`load_drop_list_state`] reads the drop
+/// list.
+pub async fn load_advisory_state(
+    connection: &mut PgConnection,
+) -> Result<Option<Vec<IndexStatus>>, sqlx::Error> {
+    load_state(connection, ADVISORY).await
+}
+
+async fn load_state(
+    connection: &mut PgConnection,
+    listed: &'static [DroppedIndex],
+) -> Result<Option<Vec<IndexStatus>>, sqlx::Error> {
     let mut transaction = connection.begin().await?;
     sqlx::query(
         "SELECT set_config('search_path', 'pg_catalog', true),
@@ -96,14 +114,14 @@ pub async fn load_drop_list_state(
         transaction.commit().await?;
         return Ok(None);
     }
-    let names: Vec<&str> = DROP_LIST.iter().map(|index| index.name).collect();
+    let names: Vec<&str> = listed.iter().map(|index| index.name).collect();
     let rows: Vec<StateRow> = sqlx::query_as(STATE)
         .bind(names)
         .fetch_all(&mut *transaction)
         .await?;
     transaction.commit().await?;
     Ok(Some(
-        DROP_LIST
+        listed
             .iter()
             .zip(rows)
             .map(|(index, row)| IndexStatus {

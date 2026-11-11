@@ -38,11 +38,9 @@ BEGIN
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
             ('normalized_events_record_key_history_idx',
-             $def$CREATE INDEX normalized_events_record_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, ((after_state ->> 'record_key'::text)), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+             $def$CREATE INDEX normalized_events_record_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, "left"((after_state ->> 'record_key'::text), 256), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_record_emitter_key_history_idx',
-             $def$CREATE INDEX normalized_events_record_emitter_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), ((after_state ->> 'record_key'::text)), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
-            ('normalized_events_record_reset_history_idx',
-             $def$CREATE INDEX normalized_events_record_reset_history_idx ON bigname_phase.normalized_events USING btree (chain_id, block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordVersionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
+             $def$CREATE INDEX normalized_events_record_emitter_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), "left"((after_state ->> 'record_key'::text), 256), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -113,7 +111,7 @@ DO $$ BEGIN PERFORM pg_temp.check_record_history_indexes(false); END $$;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_key_history_idx
     ON bigname_phase.normalized_events (
         chain_id,
-        (after_state ->> 'record_key'),
+        left(after_state ->> 'record_key', 256),
         block_number DESC NULLS LAST
     )
     WHERE event_kind = 'RecordChanged'
@@ -124,19 +122,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_emitter_key_his
     ON bigname_phase.normalized_events (
         chain_id,
         lower(raw_fact_ref ->> 'emitting_address'),
-        (after_state ->> 'record_key'),
+        left(after_state ->> 'record_key', 256),
         block_number DESC NULLS LAST
     )
     WHERE event_kind = 'RecordChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized');
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_reset_history_idx
-    ON bigname_phase.normalized_events (
-        chain_id,
-        block_number DESC NULLS LAST
-    )
-    WHERE event_kind = 'RecordVersionChanged'
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
@@ -147,8 +136,7 @@ SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
 FROM pg_index
 WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_record_key_history_idx'),
-    to_regclass('bigname_phase.normalized_events_record_emitter_key_history_idx'),
-    to_regclass('bigname_phase.normalized_events_record_reset_history_idx')
+    to_regclass('bigname_phase.normalized_events_record_emitter_key_history_idx')
 ) ORDER BY index_name;
 
 -- Every index must now exist, belong to bigname_phase.normalized_events, be valid and ready,

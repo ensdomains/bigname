@@ -13,8 +13,12 @@ use super::*;
 
 const KEY_INDEX: &str = "normalized_events_record_key_history_idx";
 const EMITTER_KEY_INDEX: &str = "normalized_events_record_emitter_key_history_idx";
-const RESET_INDEX: &str = "normalized_events_record_reset_history_idx";
-const RECORD_INDEXES: [&str; 3] = [KEY_INDEX, EMITTER_KEY_INDEX, RESET_INDEX];
+/// The reset arm, pinned by what it reads rather than by an index: only `RecordVersionChanged`
+/// entries of its chain, at most the chain's resets.
+const RESET_ARM: &str = "reset arm";
+const RECORD_INDEXES: [&str; 2] = [KEY_INDEX, EMITTER_KEY_INDEX];
+/// The fixture's resets on the key chain, the most any reset arm may read.
+const KEY_CHAIN_RESETS: f64 = 9.0;
 /// The key equality only a `RecordChanged` arm carries.
 const RECORD_ARM_SQL: &str = "(candidate.after_state ->> 'record_key') = ";
 
@@ -222,7 +226,7 @@ fn kinds(filter: &mut EventHistoryReadFilter, kinds: &[&str]) {
 /// one.
 fn plan_shapes() -> Vec<KeyShape> {
     let mut shapes = Vec::new();
-    let both = [KEY_INDEX, RESET_INDEX];
+    let both = [KEY_INDEX, RESET_ARM];
     for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
         let mut add =
             |name: &str, filter: EventHistoryReadFilter, cursor, arms: &[&'static str]| {
@@ -264,7 +268,7 @@ fn plan_shapes() -> Vec<KeyShape> {
         );
         let mut resets = unscoped("text:avatar");
         kinds(&mut resets, &["RecordVersionChanged"]);
-        add("row 11 resets only", resets, None, &[RESET_INDEX]);
+        add("row 11 resets only", resets, None, &[RESET_ARM]);
         let mut nothing = unscoped("text:avatar");
         nothing.match_no_events = true;
         add("row 12 empty kind intersection", nothing, None, &[]);
@@ -272,7 +276,7 @@ fn plan_shapes() -> Vec<KeyShape> {
             "row 18 two chains",
             key_filter("text:avatar", order, KeyScope::Unscoped, two_chain_window()),
             None,
-            &[KEY_INDEX, RESET_INDEX, KEY_INDEX, RESET_INDEX],
+            &[KEY_INDEX, RESET_ARM, KEY_INDEX, RESET_ARM],
         );
         add(
             "row 24 block range",
@@ -285,7 +289,7 @@ fn plan_shapes() -> Vec<KeyShape> {
             None,
             &both,
         );
-        let scoped = [EMITTER_KEY_INDEX, RESET_INDEX];
+        let scoped = [EMITTER_KEY_INDEX, RESET_ARM];
         for scope in [
             KeyScope::Contract(LARGE),
             KeyScope::Resolver(KEY_CHAIN, LARGE),
@@ -373,7 +377,7 @@ fn plan_shapes() -> Vec<KeyShape> {
                 None,
             ),
             None,
-            &[EMITTER_KEY_INDEX, RESET_INDEX],
+            &[EMITTER_KEY_INDEX, RESET_ARM],
         );
         add(
             "G-13 resolver outside the window",
@@ -397,7 +401,7 @@ fn plan_shapes() -> Vec<KeyShape> {
         ),
         cursor: None,
         limit: 2,
-        arms: vec![KEY_INDEX, RESET_INDEX],
+        arms: vec![KEY_INDEX, RESET_ARM],
     });
     shapes
 }
@@ -415,6 +419,22 @@ fn page_nodes<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
         for child in children {
             page_nodes(child, output);
         }
+    }
+}
+
+/// The arm a scan serves: its index for a write arm, or [`RESET_ARM`] for a scan whose index
+/// condition holds the reset kind and the chain, so it reads no `RecordChanged` entry.
+fn arm_of(scan: &Value) -> String {
+    let condition = scan["Index Cond"].as_str().unwrap_or_default();
+    let index = scan["Index Name"].as_str().unwrap_or("none");
+    if index != KEY_INDEX
+        && index != EMITTER_KEY_INDEX
+        && condition.contains("(event_kind = 'RecordVersionChanged'::text)")
+        && condition.contains("chain_id")
+    {
+        RESET_ARM.to_owned()
+    } else {
+        index.to_owned()
     }
 }
 
@@ -454,10 +474,7 @@ async fn record_key_plan_failures(
         let plan = explain_page(connection, query, mode).await?;
         let mut scans = Vec::new();
         resolver_page_scans(&plan[0]["Plan"], &mut scans);
-        let mut read: Vec<String> = scans
-            .iter()
-            .map(|scan| scan["Index Name"].as_str().unwrap_or("none").to_owned())
-            .collect();
+        let mut read: Vec<String> = scans.iter().map(|scan| arm_of(scan)).collect();
         read.sort();
         let mut expected: Vec<String> = shape.arms.iter().map(|arm| (*arm).to_owned()).collect();
         expected.sort();
@@ -500,22 +517,24 @@ async fn record_key_plan_failures(
                     "{name} {mode:?}: {index} must hold the chain in its index condition; {summary}"
                 ));
             }
-            if index != RESET_INDEX && !condition.contains("record_key") {
+            let reset = arm_of(scan) == RESET_ARM;
+            if !reset && !(condition.contains("\"left\"(") && condition.contains("record_key")) {
                 failures.push(format!(
-                    "{name} {mode:?}: {index} must hold the key in its index condition; {summary}"
+                    "{name} {mode:?}: {index} must hold the key prefix in its index condition; {summary}"
                 ));
             }
             if index == EMITTER_KEY_INDEX && !condition.contains("emitting_address") {
                 failures.push(format!("{name} {mode:?}: {index} must hold the emitter in its index condition; {summary}"));
             }
-            if filter.contains("->> 'record_key'::text) =") {
+            if !reset && filter.contains("emitting_address") {
                 failures.push(format!(
-                    "{name} {mode:?}: {index} filters the key on the heap; {summary}"
+                    "{name} {mode:?}: {index} filters the emitter on the heap; {summary}"
                 ));
             }
             let visited = (scan["Actual Rows"].as_f64().unwrap_or(0.0)
                 + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
                 * loops(scan);
+            let ceiling = if reset { KEY_CHAIN_RESETS } else { ceiling };
             if visited > ceiling {
                 failures.push(format!(
                     "{name} {mode:?}: {index} visited {visited} rows, over the ceiling {ceiling}; {summary}"
@@ -804,7 +823,7 @@ async fn record_key_pages_match_the_plain_statement() -> Result<()> {
 }
 
 /// The indexes make the reads cheap. Without them every page returns the same rows and
-/// cursors, and the plan check fails for every shape that reads an arm.
+/// cursors, and the plan check fails for every shape that reads a write arm.
 #[tokio::test]
 async fn record_key_pages_without_the_record_indexes_match_and_fail_the_plan_check() -> Result<()> {
     let database = key_database("history_record_key_no_index", true).await?;
@@ -836,7 +855,10 @@ async fn record_key_pages_without_the_record_indexes_match_and_fail_the_plan_che
         let mut connection = pool.acquire().await?;
         let failures =
             record_key_plan_failures(&mut connection, &shapes, PlanMode::Unprepared).await?;
-        for shape in shapes.iter().filter(|shape| !shape.arms.is_empty()) {
+        for shape in shapes
+            .iter()
+            .filter(|shape| shape.arms.iter().any(|arm| *arm != RESET_ARM))
+        {
             ensure!(
                 failures
                     .iter()

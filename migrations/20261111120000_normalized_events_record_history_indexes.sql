@@ -1,14 +1,15 @@
 -- API read-only access paths for history pages filtered by one record key: `/v1/events`, name
 -- history and address history with `record_key`. An unanchored page reads one RecordChanged
 -- arm and one RecordVersionChanged arm per chain (crates/storage/src/history/record_key_source.rs).
--- Three partial indexes serve them:
+-- Two partial indexes serve the RecordChanged arm:
 -- - normalized_events_record_key_history_idx: a key's writes on one chain, in page order.
 -- - normalized_events_record_emitter_key_history_idx: a key's writes by one emitter on one
 --   chain, in page order, for a read scoped by resolver or contract_address.
--- - normalized_events_record_reset_history_idx: record-version resets on one chain, in page
---   order.
--- Without them each arm walks the chain's events in page order and tests the key on every
--- row. No rows, phase markers, catalogue version or content-hash inputs change, and no redo
+-- Both key on the first 256 characters of the key, at most 1,024 bytes, so a row with a key of
+-- any length can be written. The arm matches that prefix in the index and the whole key on the
+-- row. The RecordVersionChanged arm reads normalized_events_projection_idx. Without these
+-- indexes the RecordChanged arm walks the chain's events in page order and tests the key on
+-- every row. No rows, phase markers, catalogue version or content-hash inputs change, and no redo
 -- is required.
 --
 -- Populated tables require valid prebuilds with the reviewed definitions, built concurrently
@@ -45,9 +46,7 @@ BEGIN
         CASE WHEN to_regclass('bigname_phase.normalized_events_record_key_history_idx') IS NULL
             THEN 'normalized_events_record_key_history_idx' END,
         CASE WHEN to_regclass('bigname_phase.normalized_events_record_emitter_key_history_idx') IS NULL
-            THEN 'normalized_events_record_emitter_key_history_idx' END,
-        CASE WHEN to_regclass('bigname_phase.normalized_events_record_reset_history_idx') IS NULL
-            THEN 'normalized_events_record_reset_history_idx' END);
+            THEN 'normalized_events_record_emitter_key_history_idx' END);
     IF missing <> '' THEN
         BEGIN
             LOCK TABLE bigname_phase.normalized_events IN SHARE MODE NOWAIT;
@@ -60,7 +59,7 @@ BEGIN
         CREATE INDEX IF NOT EXISTS normalized_events_record_key_history_idx
             ON bigname_phase.normalized_events (
                 chain_id,
-                (after_state ->> 'record_key'),
+                left(after_state ->> 'record_key', 256),
                 block_number DESC NULLS LAST
             )
             WHERE event_kind = 'RecordChanged'
@@ -70,18 +69,10 @@ BEGIN
             ON bigname_phase.normalized_events (
                 chain_id,
                 lower(raw_fact_ref ->> 'emitting_address'),
-                (after_state ->> 'record_key'),
+                left(after_state ->> 'record_key', 256),
                 block_number DESC NULLS LAST
             )
             WHERE event_kind = 'RecordChanged'
-              AND consumer_visibility = 'activated'
-              AND canonicality_state IN ('canonical', 'safe', 'finalized');
-        CREATE INDEX IF NOT EXISTS normalized_events_record_reset_history_idx
-            ON bigname_phase.normalized_events (
-                chain_id,
-                block_number DESC NULLS LAST
-            )
-            WHERE event_kind = 'RecordVersionChanged'
               AND consumer_visibility = 'activated'
               AND canonicality_state IN ('canonical', 'safe', 'finalized');
     END IF;
@@ -96,11 +87,9 @@ BEGIN
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
             ('normalized_events_record_key_history_idx',
-             $def$CREATE INDEX normalized_events_record_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, ((after_state ->> 'record_key'::text)), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+             $def$CREATE INDEX normalized_events_record_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, "left"((after_state ->> 'record_key'::text), 256), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_record_emitter_key_history_idx',
-             $def$CREATE INDEX normalized_events_record_emitter_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), ((after_state ->> 'record_key'::text)), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
-            ('normalized_events_record_reset_history_idx',
-             $def$CREATE INDEX normalized_events_record_reset_history_idx ON bigname_phase.normalized_events USING btree (chain_id, block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordVersionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
+             $def$CREATE INDEX normalized_events_record_emitter_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), "left"((after_state ->> 'record_key'::text), 256), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind

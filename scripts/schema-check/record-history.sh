@@ -1,5 +1,5 @@
 # Sourced by check-schema with its scratch schema and assertion helpers.
-# 20261111120000_normalized_events_record_history_indexes.sql must build the baseline's three
+# 20261111120000_normalized_events_record_history_indexes.sql must build the baseline's two
 # definitions on an empty table, refuse a populated table without the prebuilds, adopt the
 # ops/record-history-indexes/install.sql prebuilds by OID with every row unchanged, rerun as a
 # no-op, leave the caller's search_path and quote_all_identifiers as it found them, and refuse
@@ -10,20 +10,19 @@ record_history_install="$ROOT/ops/record-history-indexes/install.sql"
 record_history_readme=ops/record-history-indexes/README.md
 record_history_key_index=normalized_events_record_key_history_idx
 record_history_emitter_index=normalized_events_record_emitter_key_history_idx
-record_history_reset_index=normalized_events_record_reset_history_idx
-record_history_indexes="$record_history_key_index $record_history_emitter_index $record_history_reset_index"
-record_history_names="'$record_history_key_index', '$record_history_emitter_index', '$record_history_reset_index'"
+record_history_indexes="$record_history_key_index $record_history_emitter_index"
+record_history_names="'$record_history_key_index', '$record_history_emitter_index'"
 record_history_expected="CREATE TEMP TABLE expected_record_history_indexes AS
 SELECT relname::text AS index_name, pg_get_indexdef(oid) AS definition
 FROM pg_class
 WHERE relname IN ($record_history_names) AND relnamespace = '$scratch_schema'::regnamespace;"
-record_history_matches_baseline="(SELECT count(*) FROM expected_record_history_indexes) = 3 AND NOT EXISTS (
+record_history_matches_baseline="(SELECT count(*) FROM expected_record_history_indexes) = 2 AND NOT EXISTS (
     SELECT 1 FROM expected_record_history_indexes expected
     WHERE pg_get_indexdef(to_regclass(expected.index_name)) IS DISTINCT FROM expected.definition)"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' "$record_history_expected" \
-        "BEGIN; DELETE FROM normalized_events; DROP INDEX $record_history_key_index, $record_history_emitter_index, $record_history_reset_index;"
+        "BEGIN; DELETE FROM normalized_events; DROP INDEX $record_history_key_index, $record_history_emitter_index;"
     emit_phase_migration "$record_history_migration" preceding-shape
     emit_phase_migration "$record_history_migration" baseline-first
     cat <<SQL
@@ -61,7 +60,7 @@ done
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' "$record_history_expected" "$record_history_seed" \
-        "DROP INDEX $record_history_key_index, $record_history_emitter_index, $record_history_reset_index;"
+        "DROP INDEX $record_history_key_index, $record_history_emitter_index;"
     render_phase_migration "$record_history_install"
     cat <<SQL
 CREATE TEMP TABLE record_history_upgrade_before AS SELECT
@@ -94,13 +93,13 @@ SQL
 # the README's drop-and-rerun recovery rebuilds it.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    printf '%s\n' "UPDATE pg_index SET indisvalid = false WHERE indexrelid = '$record_history_reset_index'::regclass;"
+    printf '%s\n' "UPDATE pg_index SET indisvalid = false WHERE indexrelid = '$record_history_emitter_index'::regclass;"
 } | run_psql >/dev/null
 assert_index_install_refusal record-history-install-invalid-index "$record_history_install" \
-    "$record_history_reset_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $record_history_readme before retrying"
+    "$record_history_emitter_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $record_history_readme before retrying"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    printf '%s\n' "DROP INDEX CONCURRENTLY $record_history_reset_index;"
+    printf '%s\n' "DROP INDEX CONCURRENTLY $record_history_emitter_index;"
     render_phase_migration "$record_history_install"
 } | run_psql >/dev/null
 record_history_recovery="follow the recovery steps in $record_history_readme, then run the schema-migrations again"
@@ -146,11 +145,10 @@ record_history_predicate="WHERE event_kind = 'RecordChanged' AND consumer_visibi
 # Each is a valid, ready index under the name.
 record_history_wrong_definitions=(
     "$record_history_key_index|(chain_id, block_number)"
-    "$record_history_key_index|(chain_id, (after_state ->> 'record_key'), block_number DESC NULLS LAST) WHERE event_kind = 'RecordChanged' AND canonicality_state IN ('canonical', 'safe', 'finalized')"
+    "$record_history_key_index|(chain_id, left(after_state ->> 'record_key', 256), block_number DESC NULLS LAST) WHERE event_kind = 'RecordChanged' AND canonicality_state IN ('canonical', 'safe', 'finalized')"
+    "$record_history_key_index|(chain_id, (after_state ->> 'record_key'), block_number DESC NULLS LAST) $record_history_predicate"
     "$record_history_emitter_index|(chain_id, block_number)"
-    "$record_history_emitter_index|(chain_id, (after_state ->> 'record_key'), lower(raw_fact_ref ->> 'emitting_address'), block_number DESC NULLS LAST) $record_history_predicate"
-    "$record_history_reset_index|(chain_id, block_number)"
-    "$record_history_reset_index|(chain_id, block_number DESC NULLS LAST) $record_history_predicate"
+    "$record_history_emitter_index|(chain_id, left(after_state ->> 'record_key', 256), lower(raw_fact_ref ->> 'emitting_address'), block_number DESC NULLS LAST) $record_history_predicate"
 )
 for record_history_entry in "${record_history_wrong_definitions[@]}"; do
     record_history_index="${record_history_entry%%|*}"

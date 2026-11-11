@@ -22,7 +22,8 @@ enum RecordArm {
     /// or `normalized_events_record_emitter_key_history_idx` under an emitter scope.
     Write,
     /// Record-version resets, which carry no key and match every key, read through
-    /// `normalized_events_record_reset_history_idx`. An emitter scope filters its rows.
+    /// `normalized_events_projection_idx`, at most the chain's resets. An emitter scope filters
+    /// its rows.
     Reset,
 }
 
@@ -135,10 +136,14 @@ fn push_record_arm<'a>(
     builder.push_bind(chain);
     match arm {
         RecordArm::Write => {
+            // The indexes hold the key's first 256 characters, so a key of any length can be
+            // written. The prefix bounds the index scan and the whole key decides each row.
             builder.push(
                 " AND candidate.event_kind = 'RecordChanged' \
-                 AND (candidate.after_state ->> 'record_key') = ",
+                 AND left(candidate.after_state ->> 'record_key', 256) = left(",
             );
+            builder.push_bind(filter.record_key.as_deref());
+            builder.push(", 256) AND (candidate.after_state ->> 'record_key') = ");
             builder.push_bind(filter.record_key.as_deref());
         }
         RecordArm::Reset => {
