@@ -54,12 +54,14 @@ RESET default_statistics_target;
 "#;
 
 /// Every statement's executed plan, sent to the client as a notice.
-const AUTO_EXPLAIN: &str = "LOAD 'auto_explain';
-    SET auto_explain.log_min_duration = 0;
-    SET auto_explain.log_analyze = on;
-    SET auto_explain.log_buffers = on;
-    SET auto_explain.log_format = 'json';
-    SET auto_explain.log_level = 'notice';";
+const AUTO_EXPLAIN: [&str; 6] = [
+    "LOAD 'auto_explain'",
+    "SET auto_explain.log_min_duration = 0",
+    "SET auto_explain.log_analyze = on",
+    "SET auto_explain.log_buffers = on",
+    "SET auto_explain.log_format = 'json'",
+    "SET auto_explain.log_level = 'notice'",
+];
 
 #[derive(Clone, Default)]
 struct Notices(Arc<Mutex<Vec<String>>>);
@@ -147,9 +149,9 @@ async fn route_pool(database: &TestDatabase, explain: bool) -> Result<PgPool> {
     if explain {
         options = options.after_connect(|connection, _| {
             Box::pin(async move {
-                sqlx::raw_sql(AUTO_EXPLAIN)
-                    .execute(&mut *connection)
-                    .await?;
+                for statement in AUTO_EXPLAIN {
+                    sqlx::query(statement).execute(&mut *connection).await?;
+                }
                 Ok(())
             })
         });
