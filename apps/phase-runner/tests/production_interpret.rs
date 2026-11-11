@@ -11652,6 +11652,28 @@ fn block_hash(chain_id: &str, block: i64) -> String {
     format!("{chain_id}-block-{block}")
 }
 
+async fn f5_tampered(pool: &PgPool, chain: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 1 AND after_state ? 'tampered'",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn f5_tamper(pool: &PgPool, chain: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = COALESCE(after_state, '{}'::jsonb) || '{\"tampered\": true}'::jsonb
+         WHERE chain_id = $1 AND block_number = 1",
+    )
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// TYR-521 F5, as validation. `EXTEND_STAMP` keeps `redo_mode` (`redo_stamp.rs:37-49`), so a
 /// required range merged into an interrupted flag recomputation is carried by that
 /// recomputation. This asks whether the rerun the runner then asks for re-derives the stamped
@@ -11660,39 +11682,21 @@ fn block_hash(chain_id: &str, block: i64) -> String {
 #[tokio::test]
 async fn a_required_range_merged_into_an_interrupted_recompute_is_rederived_by_its_rerun()
 -> Result<()> {
-    let scratch = ScratchDatabase::create("production_interpret_flags_merged_required").await?;
-    let pool = scratch.pool();
-    let tampered = |chain: &'static str| async move {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM normalized_events
-             WHERE chain_id = $1 AND block_number = 1 AND after_state ? 'tampered'",
-        )
-        .bind(chain)
-        .fetch_one(pool)
-        .await
-    };
-    let tamper = |chain: &'static str| async move {
-        sqlx::query(
-            "UPDATE normalized_events
-             SET after_state = COALESCE(after_state, '{}'::jsonb) || '{\"tampered\": true}'::jsonb
-             WHERE chain_id = $1 AND block_number = 1",
-        )
-        .bind(chain)
-        .execute(pool)
-        .await
-    };
-
-    // Control: an Interpret redo over 1..=2 rewrites block 1.
+    // Control, in its own database (logical name IDs are not per chain): an Interpret redo over
+    // 1..=2 rewrites block 1.
+    let control_scratch =
+        ScratchDatabase::create("production_interpret_flags_merged_control").await?;
+    let pool = control_scratch.pool();
     let control = "interpret-flags-merged-control";
     seed_fixture(pool, control, &[(1, "alice"), (2, "bob")]).await?;
     run_engine(pool, control, 0, 2, InterpretRunMode::Normal).await?;
     initialize_completed_recompute_extent(pool, control, 2).await?;
-    tamper(control).await?;
+    f5_tamper(pool, control).await?;
     assert!(
-        tampered(control).await? > 0,
+        f5_tampered(pool, control).await? > 0,
         "block 1 holds no events to tamper"
     );
-    recompute_runner(&scratch, control, "flags-merged-control-runner")?
+    recompute_runner(&control_scratch, control, "flags-merged-control-runner")?
         .redo(
             &chain_config(control)?,
             RedoPhase::Phase(PhaseName::Interpret),
@@ -11701,12 +11705,16 @@ async fn a_required_range_merged_into_an_interrupted_recompute_is_rederived_by_i
         )
         .await?;
     assert_eq!(
-        tampered(control).await?,
+        f5_tampered(pool, control).await?,
         0,
         "the control redo did not rewrite block 1"
     );
 
+    control_scratch.cleanup().await?;
+
     // The case: a flag recomputation of 2..=2 interrupted after its write.
+    let scratch = ScratchDatabase::create("production_interpret_flags_merged_required").await?;
+    let pool = scratch.pool();
     let chain = "interpret-flags-merged-required";
     seed_fixture(pool, chain, &[(1, "alice"), (2, "bob")]).await?;
     run_engine(pool, chain, 0, 2, InterpretRunMode::Normal).await?;
@@ -11746,9 +11754,9 @@ async fn a_required_range_merged_into_an_interrupted_recompute_is_rederived_by_i
         .execute(pool)
         .await?;
     assert_eq!(extended.rows_affected(), 1);
-    tamper(chain).await?;
+    f5_tamper(pool, chain).await?;
     assert!(
-        tampered(chain).await? > 0,
+        f5_tampered(pool, chain).await? > 0,
         "block 1 holds no events to tamper"
     );
     let marker: (String, i64, i64, Option<String>) = sqlx::query_as(
@@ -11793,7 +11801,7 @@ async fn a_required_range_merged_into_an_interrupted_recompute_is_rederived_by_i
     .bind(chain)
     .fetch_one(pool)
     .await?;
-    let stale = tampered(chain).await?;
+    let stale = f5_tampered(pool, chain).await?;
     assert!(
         stale == 0,
         "the rerun completed (interpret redo markers left: {pending}) and {stale} stamped events \
