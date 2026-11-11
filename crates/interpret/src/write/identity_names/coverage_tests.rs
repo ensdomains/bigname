@@ -359,3 +359,185 @@ async fn stored_higher_priority_keeps_source_and_refreshes_observed_time() -> Te
     database.cleanup().await?;
     Ok(())
 }
+
+/// The `NamedResource` event allows a DNS-encoded name of any length, as unbounded `bytes`
+/// (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L521-L539 @ ens_v2@a971bd64).
+/// Interpret selects it from any emitting address (`is_match_all` in the adapter's
+/// `protocol.rs`), so an arbitrary contract can emit it. These tests give Interpret one such log
+/// of thousands of distinct labels. It is interpreted and written whole: one name surface and one
+/// preimage per label. The surface's raw name is over 2,000 bytes, so it gets no search document
+/// and no btree index reads it. Each test prints how long interpreting and writing the log took,
+/// and asserts nothing about it.
+mod long_resolver_dns_name {
+    use std::time::Instant;
+
+    use alloy_primitives::U256;
+    use alloy_sol_types::{SolEvent, sol};
+    use bigname_adapters::schema_v2::{
+        BatchInput, ManifestInput, RawBlockInput, RawLogInput,
+        seam::PREIMAGE_OBSERVATION_EVENT_KIND,
+    };
+    use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
+    use bigname_test_support::fixture_logs::interpret_checked;
+    use time::OffsetDateTime;
+
+    use super::{TestResult, database, write_output};
+
+    sol! {
+        event NamedResource(uint256 indexed resource, bytes name);
+    }
+
+    const CHAIN: &str = "batch-test";
+
+    /// `count` distinct four-letter labels: `aaaa`, `aaab`, and so on.
+    fn labels(count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|index| {
+                (0..4_u32)
+                    .rev()
+                    .map(|place| b"abcdefghijklmnopqrstuvwxyz"[index / 26_usize.pow(place) % 26])
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn named_resource(labels: &[Vec<u8>]) -> BatchInput {
+        let mut name = Vec::new();
+        for label in labels {
+            name.push(u8::try_from(label.len()).expect("a DNS label is at most 255 bytes"));
+            name.extend_from_slice(label);
+        }
+        name.push(0);
+        let log = NamedResource {
+            resource: U256::from(1),
+            name: name.into(),
+        }
+        .encode_log_data();
+        let block_timestamp = OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1);
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![ManifestInput {
+                manifest_id: 1,
+                manifest_version: 1,
+                namespace: "ens".to_owned(),
+                source_family: "ens_v2_resolver_l1".to_owned(),
+                chain_id: CHAIN.to_owned(),
+                deployment_label: "test".to_owned(),
+                normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+                payload_json: serde_json::json!({
+                    "abi": {
+                        "events": [{
+                            "name": "NamedResource",
+                            "fragment": "event NamedResource(uint256 indexed resource, bytes name)",
+                            "emitter_roles": [],
+                            "normalized_events": [PREIMAGE_OBSERVATION_EVENT_KIND]
+                        }]
+                    }
+                })
+                .to_string(),
+            }],
+            discovery_rules: Vec::new(),
+            admissions: Vec::new(),
+            prior_events: Vec::new(),
+            blocks: vec![RawBlockInput {
+                chain_id: CHAIN.to_owned(),
+                block_hash: "0x01".to_owned(),
+                block_number: 1,
+                block_timestamp,
+                canonicality_state: "canonical".to_owned(),
+            }],
+            raw_logs: vec![RawLogInput {
+                chain_id: CHAIN.to_owned(),
+                block_hash: "0x01".to_owned(),
+                block_number: 1,
+                block_timestamp,
+                canonicality_state: "canonical".to_owned(),
+                transaction_hash: "transaction-1".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: "0x0000000000000000000000000000000000000042".to_owned(),
+                topics: log
+                    .topics()
+                    .iter()
+                    .map(|topic| format!("{topic:#x}"))
+                    .collect(),
+                data: log.data.to_vec(),
+            }],
+        }
+    }
+
+    async fn interpreted_and_stored_whole(count: usize) -> TestResult {
+        stored_whole(count, None).await
+    }
+
+    /// Interprets and writes one log of `count` labels into its own database and prints the
+    /// time. `pass` names the run when one test makes several.
+    async fn stored_whole(count: usize, pass: Option<&str>) -> TestResult {
+        let name = pass.map_or_else(
+            || format!("interpret_long_resolver_dns_name_{count}"),
+            |pass| format!("interpret_long_resolver_dns_name_{count}_{pass}"),
+        );
+        let database = database(&name).await?;
+        let input = named_resource(&labels(count));
+        let started = Instant::now();
+        let output = interpret_checked(input)?;
+        let interpreted = started.elapsed();
+        write_output(&database, &output).await?;
+        let elapsed = started.elapsed();
+        let pass = pass.map_or_else(String::new, |pass| format!(" pass={pass}"));
+        println!(
+            "resolver_dns_name wall time: labels={count} elapsed_ms={} interpret_ms={} write_ms={}{pass}",
+            elapsed.as_millis(),
+            interpreted.as_millis(),
+            (elapsed - interpreted).as_millis(),
+        );
+
+        let surface: (i64, Option<i32>, Option<i32>, Option<String>) = sqlx::query_as(
+            "SELECT count(*), max(octet_length(raw_name)), max(cardinality(labelhashes)),
+                    max(visibility_state)
+             FROM name_surfaces",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        let label_count = i32::try_from(count)?;
+        let raw_name_bytes = 5 * label_count - 1;
+        assert_eq!(
+            surface,
+            (
+                1,
+                Some(raw_name_bytes),
+                Some(label_count),
+                Some("active".to_owned())
+            )
+        );
+        let rows: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM label_preimages),
+                    (SELECT count(*) FROM name_search_documents)",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(rows, (i64::from(label_count), 0));
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_resolver_dns_name_of_4000_distinct_labels_is_stored_whole() -> TestResult {
+        interpreted_and_stored_whole(4_000).await
+    }
+
+    #[tokio::test]
+    async fn a_resolver_dns_name_of_40000_distinct_labels_is_stored_whole() -> TestResult {
+        interpreted_and_stored_whole(40_000).await
+    }
+
+    /// Three runs in one process: 4,000 labels, then 120,000, then 4,000 again. The first run
+    /// takes the process's one-time costs, so the last shows the 4,000-label time without them.
+    #[tokio::test]
+    async fn a_resolver_dns_name_of_120000_distinct_labels_is_stored_whole_between_two_short_runs()
+    -> TestResult {
+        stored_whole(4_000, Some("warmup")).await?;
+        stored_whole(120_000, Some("main")).await?;
+        stored_whole(4_000, Some("after")).await
+    }
+}
