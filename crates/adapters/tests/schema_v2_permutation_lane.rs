@@ -561,6 +561,276 @@ fn v2_same_token_claim_clears_reserved_topology_after_restore() -> Result<()> {
     Ok(())
 }
 
+/// The deployed registry emits a token's `TokenResource` and pointers after its
+/// `LabelRegistered`, in the same call
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L479 @ ens_v2@a971bd64).
+/// A registry with its own bytecode can emit them before the label, or link a registered
+/// reservation in a later transaction. Whatever the order, live adapter state and a restore from
+/// the stored rows must agree, and so must every batch split. `blocks[i]` holds block `i`'s logs
+/// from the declared Sepolia registry, one transaction per block.
+fn v2_label_order_input(
+    wiring: &Wiring,
+    base: i64,
+    blocks: Vec<Vec<LogData>>,
+) -> Result<BatchInput> {
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let specs = (0..blocks.len() as i64)
+        .map(|index| BlockSpec {
+            number: base + index,
+            hash: format!("0x{:064x}", base + index),
+            timestamp: 1_700_000_000 + (base - 20_000_000) + index,
+        })
+        .collect::<Vec<_>>();
+    let mut logs = Vec::new();
+    for (block_index, block) in blocks.into_iter().enumerate() {
+        for (log_index, encoded) in block.into_iter().enumerate() {
+            let emission = scenario::emission(registry, encoded);
+            logs.push(GeneratedLog {
+                block_index,
+                transaction_hash: format!("0x{:064x}", (base + block_index as i64) << 8),
+                transaction_index: 0,
+                log_index: log_index as i64,
+                emitter: emission.emitter,
+                topics: emission.topics,
+                data: emission.data,
+                burst: None,
+            });
+        }
+    }
+    wiring.batch_input(&specs, &logs)
+}
+
+fn label_order_owner() -> Address {
+    "0x00000000000000000000000000000000f0000001"
+        .parse()
+        .expect("the owner is an address")
+}
+
+fn label_order_registered(token: U256, label: &str) -> LogData {
+    V2Registry::LabelRegistered {
+        tokenId: token,
+        labelHash: labelhash(label),
+        label: label.to_owned(),
+        owner: label_order_owner(),
+        expiry: 1_800_000_000,
+        sender: label_order_owner(),
+    }
+    .encode_log_data()
+}
+
+fn label_order_reserved(token: U256, label: &str) -> LogData {
+    V2Registry::LabelReserved {
+        tokenId: token,
+        labelHash: labelhash(label),
+        label: label.to_owned(),
+        expiry: 1_800_000_000,
+        sender: label_order_owner(),
+    }
+    .encode_log_data()
+}
+
+/// The token's resource, whose word is the token id itself, as for every token version 0.
+fn label_order_link(token: U256) -> LogData {
+    V2Registry::TokenResource {
+        tokenId: token,
+        resource: token,
+    }
+    .encode_log_data()
+}
+
+fn label_order_transfer(token: U256, from: Address, to: Address) -> LogData {
+    V2Registry::TransferSingle {
+        operator: label_order_owner(),
+        from,
+        to,
+        id: token,
+        value: U256::from(1),
+    }
+    .encode_log_data()
+}
+
+fn label_order_resolver(token: U256) -> LogData {
+    V2Registry::ResolverUpdated {
+        tokenId: token,
+        resolver: "0x00000000000000000000000000000000f0000097"
+            .parse()
+            .expect("the resolver is an address"),
+        sender: label_order_owner(),
+    }
+    .encode_log_data()
+}
+
+fn label_order_subregistry(token: U256) -> LogData {
+    V2Registry::SubregistryUpdated {
+        tokenId: token,
+        subregistry: "0x00000000000000000000000000000000f0000098"
+            .parse()
+            .expect("the subregistry is an address"),
+        sender: label_order_owner(),
+    }
+    .encode_log_data()
+}
+
+fn converge_label_order(context: &str, base: i64, blocks: Vec<Vec<LogData>>) -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let count = blocks.len();
+    converge_without_artifacts(context, v2_label_order_input(&wiring, base, blocks)?, count)
+}
+
+/// Nothing unbinds a token's resource, so a label registered after `TokenResource` keeps it, and
+/// a later `TokenResource` for the same resource links it again.
+#[test]
+fn v2_label_after_token_resource_is_batch_grid_independent() -> Result<()> {
+    let token = versioned_token("order", 0);
+    converge_label_order(
+        "directed=v2-label-after-token-resource",
+        20_000_500,
+        vec![
+            vec![label_order_link(token)],
+            vec![label_order_registered(token, "order")],
+            vec![label_order_transfer(
+                token,
+                label_order_owner(),
+                Address::with_last_byte(0xd1),
+            )],
+            vec![label_order_link(token)],
+        ],
+    )
+}
+
+/// The label install drops the token's earlier pointer with a terminal null row and keeps its
+/// resource.
+#[test]
+fn v2_label_after_pointer_and_token_resource_is_batch_grid_independent() -> Result<()> {
+    let token = versioned_token("order", 0);
+    converge_label_order(
+        "directed=v2-label-after-pointer-and-token-resource",
+        20_000_510,
+        vec![
+            vec![label_order_resolver(token)],
+            vec![label_order_link(token)],
+            vec![label_order_registered(token, "order")],
+        ],
+    )
+}
+
+/// A token with pointers and no resource has nothing to keep across its label install.
+#[test]
+fn v2_label_after_pointers_only_is_batch_grid_independent() -> Result<()> {
+    let token = versioned_token("order", 0);
+    converge_label_order(
+        "directed=v2-label-after-pointers-only",
+        20_000_520,
+        vec![
+            vec![label_order_resolver(token)],
+            vec![label_order_subregistry(token)],
+            vec![label_order_registered(token, "order")],
+        ],
+    )
+}
+
+/// The same token id registered under a label other than the one it reserved does not keep the
+/// reservation's resource.
+#[test]
+fn v2_label_on_a_reserved_token_under_another_label_is_batch_grid_independent() -> Result<()> {
+    let token = versioned_token("claim", 0);
+    converge_label_order(
+        "directed=v2-label-on-a-reserved-token-under-another-label",
+        20_000_530,
+        vec![
+            vec![label_order_reserved(token, "claim")],
+            vec![label_order_registered(token, "other")],
+        ],
+    )
+}
+
+/// A registered reservation keeps the reservation's resource, and a `TokenResource` in a later
+/// transaction links it again.
+#[test]
+fn v2_reserved_then_registered_then_linked_is_batch_grid_independent() -> Result<()> {
+    let token = versioned_token("order", 0);
+    converge_label_order(
+        "directed=v2-reserved-then-registered-then-linked",
+        20_000_540,
+        vec![
+            vec![
+                label_order_reserved(token, "order"),
+                label_order_registered(token, "order"),
+                label_order_transfer(token, Address::ZERO, label_order_owner()),
+            ],
+            vec![label_order_link(token)],
+        ],
+    )
+}
+
+/// The deployed registry registers a reserved label and links it in one call, keeping the
+/// reservation's token id (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455-L472 @ ens_v2@a971bd64).
+/// The link's registration row carries the resource the registration kept, as the registration
+/// row it extends does.
+#[test]
+fn v2_reserved_then_deployed_registration_links_with_the_kept_resource() -> Result<()> {
+    let token = versioned_token("order", 0);
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let blocks = vec![
+        vec![label_order_reserved(token, "order")],
+        vec![
+            label_order_registered(token, "order"),
+            label_order_transfer(token, Address::ZERO, label_order_owner()),
+            label_order_link(token),
+        ],
+    ];
+    let input = v2_label_order_input(&wiring, 20_000_550, blocks)?;
+    let output = interpret_checked(input.clone())?;
+    let linked = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationGranted"
+                && event.after_state["derived_from"] == "registry_state"
+        })
+        .context("the link emits a registration row")?;
+    let resource_id = linked
+        .resource_id
+        .context("the link names its resource")?
+        .to_string();
+    assert_eq!(
+        linked.after_state["resource_id"], resource_id,
+        "{}",
+        linked.after_state
+    );
+    converge_without_artifacts("directed=v2-reserved-then-deployed-registration", input, 2)
+}
+
+/// A reservation is no registration, so a `TokenResource` after it emits no registration row,
+/// in one batch or after a restore.
+#[test]
+fn v2_reservation_then_link_emits_no_registration_row() -> Result<()> {
+    let token = versioned_token("order", 0);
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let blocks = vec![
+        vec![label_order_reserved(token, "order")],
+        vec![label_order_link(token)],
+    ];
+    let input = v2_label_order_input(&wiring, 20_000_560, blocks)?;
+    let converged = converge("directed=v2-reservation-then-link", input, vec![0..1, 1..2])?;
+    assert!(converged.artifacts.counts().is_empty());
+    let granted = |output: &BatchOutput| {
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "RegistrationGranted")
+            .count()
+    };
+    assert_eq!(granted(&converged.whole.output), 0);
+    for batch in &converged.batches {
+        assert_eq!(granted(&batch.output), 0);
+    }
+    Ok(())
+}
+
 #[test]
 fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Result<()> {
     let checked_in = checked_in_manifests()?;
