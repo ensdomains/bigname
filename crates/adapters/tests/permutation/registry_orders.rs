@@ -101,9 +101,11 @@ pub const TYR_522: &str = "TYR-522";
 /// custom bytecode emits that order. It is TYR-522 S-A3, out of TYR-522's PR.
 pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
 /// TYR-525: a `LabelRegistered` that is already expired, or whose token is already registered,
-/// when it is emitted. Live state and a restore disagree on the expiry retirement flags, or the
-/// split replay attributes or releases differently. The deployed registry reverts both orders
-/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L460 @ ens_v2@a971bd64).
+/// when it is emitted, or an `ExpiryUpdated` that cuts a label's live expiry to one that has
+/// passed. Live state and a restore disagree on the expiry retirement flags, or the split replay
+/// attributes or releases differently. The deployed registry reverts all three orders
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L460 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222-L224 @ ens_v2@a971bd64).
 pub const TYR_525: &str = "TYR-525";
 /// TYR-526: a pointer update or unregister on a token that was never registered, then a transfer
 /// of it. Only the whole pass marks the transfer's registry state as pending hydration.
@@ -177,11 +179,27 @@ fn relinks_a_closed_binding(actions: &[Action]) -> bool {
 }
 
 /// A label registered with an expiry that has passed or may have passed by its block, or over a
-/// token a registration still holds.
+/// token a registration still holds, or a labelled token renewed to such an expiry.
 fn registers_expired_or_live(actions: &[Action]) -> bool {
     let mut registered = BTreeSet::new();
+    let mut labelled = BTreeSet::new();
     for atom in atoms(actions) {
         match atom {
+            Atom::Reserve {
+                registry, token, ..
+            } => {
+                labelled.insert((registry, token));
+            }
+            Atom::Renew {
+                registry,
+                token,
+                expiry,
+            } if expiry != Expiry::Far
+                && (labelled.contains(&(registry, token))
+                    || registered.contains(&(registry, token))) =>
+            {
+                return true;
+            }
             Atom::Register {
                 registry,
                 token,
