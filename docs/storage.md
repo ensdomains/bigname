@@ -1027,10 +1027,8 @@ one key.
 
 The `RecordVersionChanged` arm reads `normalized_events_projection_idx` with the kind, the
 canonical states and the chain in its index condition, and sorts the chain's record-version
-resets. It reads at most the chain's resets and no `RecordChanged` row, scoped or not. In
-November 2026 that was a few thousand rows on the busiest served chain, and it grows by a few
-hundred per 100,000 blocks. If a chain's resets pass about 50,000, the arm needs a partial
-index of its own in page order.
+resets. It reads at most the chain's `RecordVersionChanged` events and no `RecordChanged` row,
+scoped or not, so its cost grows with the chain's record-version resets.
 
 Pages on the record arms are sent unprepared, scoped or not, so each is planned with its own
 values, and anchored pages keep their prepared statements. The planner's choice of the

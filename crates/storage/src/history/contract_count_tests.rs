@@ -124,7 +124,15 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                         + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
                         * scan["Actual Loops"].as_f64().unwrap_or(1.0);
                     let encoded = plan.to_string();
-                    ensure!(encoded.contains("normalized_events_emitter_history_idx") || (count == 0 && visited == 0.0), "{label} {mode:?}: {plan}");
+                    // A count with a record key reads the key's rows through the emitter-led
+                    // record index (`record_key_count_cells_match_the_old_statement_and_record_
+                    // their_driver` records each count cell's driver).
+                    let driver = if key.is_some() && label == "count" {
+                        "normalized_events_record_emitter_key_history_idx"
+                    } else {
+                        "normalized_events_emitter_history_idx"
+                    };
+                    ensure!(encoded.contains(driver) || (count == 0 && visited == 0.0), "{label} {mode:?}: {plan}");
                     ensure!(visited <= 12000.0, "{label} scanned unrelated history: {plan}");
                     eprintln!("contract {label} {mode:?} case={case}: count={count}; principal_event_rows_visited={visited}; execution_ms={}; shared_hit_blocks={}", plan[0]["Execution Time"], plan[0]["Plan"]["Shared Hit Blocks"]);
                 }

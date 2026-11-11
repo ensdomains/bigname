@@ -583,13 +583,12 @@ async fn key_database(name: &str, analyze: bool) -> Result<TestDatabase> {
     phase_database(name, &fixture).await
 }
 
-async fn assert_record_key_plans(name: &str, mode: PlanMode, analyze: bool) -> Result<()> {
+/// Plan every shape in `mode` and return each shape's failures against the bar.
+async fn record_key_plan_report(name: &str, mode: PlanMode, analyze: bool) -> Result<Vec<String>> {
     let database = key_database(name, analyze).await?;
     let result = async {
         let mut connection = database.pool().acquire().await?;
-        let failures = record_key_plan_failures(&mut connection, &plan_shapes(), mode).await?;
-        ensure!(failures.is_empty(), "{}", failures.join("\n"));
-        Ok(())
+        record_key_plan_failures(&mut connection, &plan_shapes(), mode).await
     }
     .await;
     database.cleanup().await?;
@@ -598,25 +597,47 @@ async fn assert_record_key_plans(name: &str, mode: PlanMode, analyze: bool) -> R
 
 #[tokio::test]
 async fn record_key_pages_read_the_record_indexes() -> Result<()> {
-    assert_record_key_plans("history_record_key_plan", PlanMode::Unprepared, true).await
-}
-
-/// Scoped key reads are anchored by their emitter, so the API sends them prepared and they
-/// may reach a generic plan.
-#[tokio::test]
-async fn record_key_generic_plans_read_the_record_indexes() -> Result<()> {
-    assert_record_key_plans("history_record_key_generic", PlanMode::Generic, true).await
+    let failures =
+        record_key_plan_report("history_record_key_plan", PlanMode::Unprepared, true).await?;
+    ensure!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
 }
 
 #[tokio::test]
 async fn record_key_custom_plans_read_the_record_indexes() -> Result<()> {
-    assert_record_key_plans("history_record_key_custom", PlanMode::Custom, true).await
+    let failures =
+        record_key_plan_report("history_record_key_custom", PlanMode::Custom, true).await?;
+    ensure!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
 }
 
-/// The arms are chosen by their index conditions, not by statistics.
+/// Test-only evidence, not a gate. Record-arm pages are never prepared (`load_history_page`
+/// sends them unprepared), so no request reaches a generic plan of them. This records what a
+/// generic plan would read: at the time of writing, the scoped oldest-first page from a deep
+/// cursor read the key index with the emitter on the heap. Whoever prepares these pages finds
+/// that here.
 #[tokio::test]
-async fn record_key_plans_read_the_record_indexes_before_analyze() -> Result<()> {
-    assert_record_key_plans("history_record_key_unanalyzed", PlanMode::Unprepared, false).await
+async fn record_key_generic_plans_are_recorded_test_only() -> Result<()> {
+    let failures =
+        record_key_plan_report("history_record_key_generic", PlanMode::Generic, true).await?;
+    for failure in &failures {
+        eprintln!("generic plan, test-only: {failure}");
+    }
+    Ok(())
+}
+
+/// Test-only evidence, not a gate. On a table with no statistics at all the planner can tie
+/// the key index and the emitter-led index for a scoped arm. Served tables are analyzed. This
+/// records what each shape reads before `ANALYZE`.
+#[tokio::test]
+async fn record_key_plans_before_analyze_are_recorded_test_only() -> Result<()> {
+    let failures =
+        record_key_plan_report("history_record_key_unanalyzed", PlanMode::Unprepared, false)
+            .await?;
+    for failure in &failures {
+        eprintln!("before ANALYZE, test-only: {failure}");
+    }
+    Ok(())
 }
 
 /// The rows the plain statement returns for `filter`, in its order, unpaged: `source.rs`'s
@@ -995,4 +1016,287 @@ fn record_arms_serve_only_unanchored_canonical_key_pages() {
         !page_sql(&no_window, true, false).contains(RECORD_ARM_SQL),
         "a read with no window and no resolver names no chain for the arms"
     );
+}
+
+/// Keys the indexed prefix cannot tell apart on its own, all on the key chain: a key of about
+/// 9 kB of hex, which no index entry could hold whole; two keys that share their first 256
+/// characters, one of them also written by a small emitter; a 256-character key of four-byte
+/// characters; and a 256-character key with a 257-character key that extends it. One reset.
+const LONG_KEY_FIXTURE: &str = r#"
+    INSERT INTO chain_lineage
+        (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+    SELECT 'ethereum-sepolia', 'ethereum-sepolia-block-' || n, n, to_timestamp(n), 'canonical'
+    FROM generate_series(1, 100) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, after_state, raw_fact_ref)
+    SELECT identity_, 'ens', kind_, 'ens_v1_resolver_l1', 1,
+           'ethereum-sepolia', 'ethereum-sepolia-block-' || n, n, 'tx-' || n, 0, 1,
+           'ens_v1_unwrapped_authority', 'canonical',
+           CASE WHEN key_ IS NULL THEN jsonb_build_object('node', 'node-key')
+                ELSE jsonb_build_object('node', 'node-key', 'record_key', key_) END,
+           jsonb_build_object('emitting_address', emitter_)
+    FROM (VALUES
+            ('long:k1', 10, 'RecordChanged',
+             'text:' || (SELECT string_agg(md5(i::text), '' ORDER BY i)
+                         FROM generate_series(1, 290) i),
+             '0x00000000000000000000000000000000000000a7'),
+            ('long:k2a', 20, 'RecordChanged', 'text:' || repeat('x', 300) || 'a',
+             '0x00000000000000000000000000000000000000a7'),
+            ('long:k2b', 21, 'RecordChanged', 'text:' || repeat('x', 300) || 'b',
+             '0x00000000000000000000000000000000000000a7'),
+            ('long:k2b-small', 22, 'RecordChanged', 'text:' || repeat('x', 300) || 'b',
+             '0x00000000000000000000000000000000000000c7'),
+            ('long:k3', 30, 'RecordChanged', 'text:' || repeat(chr(128512), 251),
+             '0x00000000000000000000000000000000000000a7'),
+            ('long:k4-256', 40, 'RecordChanged', 'text:' || repeat('y', 251),
+             '0x00000000000000000000000000000000000000a7'),
+            ('long:k4-257', 41, 'RecordChanged', 'text:' || repeat('y', 251) || 'z',
+             '0x00000000000000000000000000000000000000a7'),
+            ('long:reset', 50, 'RecordVersionChanged', NULL,
+             '0x00000000000000000000000000000000000000a7'))
+         keys(identity_, n, kind_, key_, emitter_);
+    ANALYZE normalized_events;
+    ANALYZE chain_lineage;
+"#;
+
+/// For each case, the stored key of `key_of`, read on each scope: the page, every page of one,
+/// and the plain statement return exactly `rows`, newest first, and the write arm reads its
+/// prefix index.
+async fn assert_long_keys(name: &str, cases: &[(&str, KeyScope, &[&str])]) -> Result<()> {
+    let database = phase_database(name, LONG_KEY_FIXTURE).await?;
+    let result = async {
+        let pool = database.pool();
+        let mut shapes = Vec::new();
+        for (key_of, scope, rows) in cases {
+            let key: String = sqlx::query_scalar(
+                "SELECT after_state ->> 'record_key' FROM normalized_events
+                 WHERE event_identity = $1",
+            )
+            .bind(*key_of)
+            .fetch_one(pool)
+            .await?;
+            let filter = key_filter(
+                &key,
+                HistoryOrder::Desc,
+                *scope,
+                Some(window(&[(KEY_CHAIN, None, Some(100))])),
+            );
+            let expected: Vec<String> = rows.iter().map(|row| (*row).to_owned()).collect();
+            let label = format!("{key_of} {scope:?}");
+            ensure!(
+                key_plain_identities(pool, &filter).await? == expected,
+                "{label}: the plain statement returned other rows"
+            );
+            let (page, _) = page_identities(pool, &filter, None, 100).await?;
+            ensure!(page == expected, "{label}: the page returned {page:?}");
+            ensure!(
+                key_walk(pool, &filter, 1).await? == expected,
+                "{label}: pages of one differ"
+            );
+            shapes.push(KeyShape {
+                name: label,
+                filter,
+                cursor: None,
+                limit: KEY_LIMIT,
+                arms: vec![
+                    match scope {
+                        KeyScope::Unscoped => KEY_INDEX,
+                        _ => EMITTER_KEY_INDEX,
+                    },
+                    RESET_ARM,
+                ],
+            });
+        }
+        let mut connection = pool.acquire().await?;
+        let failures =
+            record_key_plan_failures(&mut connection, &shapes, PlanMode::Unprepared).await?;
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+const LONG_SCOPES: [KeyScope; 3] = [
+    KeyScope::Unscoped,
+    KeyScope::Contract(LARGE),
+    KeyScope::Resolver(KEY_CHAIN, LARGE),
+];
+
+/// K1. A key of about 9 kB, longer than any index entry, is written with every index in place
+/// and read back.
+#[tokio::test]
+async fn k1_a_key_longer_than_an_index_entry_is_written_and_read() -> Result<()> {
+    let cases: Vec<(&str, KeyScope, &[&str])> = LONG_SCOPES
+        .iter()
+        .map(|scope| ("long:k1", *scope, &["long:reset", "long:k1"] as &[&str]))
+        .collect();
+    assert_long_keys("history_record_key_k1", &cases).await
+}
+
+/// K2. Two keys that share their first 256 characters are told apart, scoped and unscoped.
+#[tokio::test]
+async fn k2_keys_sharing_the_indexed_prefix_are_told_apart() -> Result<()> {
+    let mut cases: Vec<(&str, KeyScope, &[&str])> = vec![
+        (
+            "long:k2a",
+            KeyScope::Unscoped,
+            &["long:reset", "long:k2a"] as &[&str],
+        ),
+        (
+            "long:k2b",
+            KeyScope::Unscoped,
+            &["long:reset", "long:k2b-small", "long:k2b"] as &[&str],
+        ),
+        (
+            "long:k2b",
+            KeyScope::Contract(SMALL_FEW),
+            &["long:k2b-small"] as &[&str],
+        ),
+    ];
+    for scope in &LONG_SCOPES[1..] {
+        cases.push(("long:k2a", *scope, &["long:reset", "long:k2a"] as &[&str]));
+        cases.push(("long:k2b", *scope, &["long:reset", "long:k2b"] as &[&str]));
+    }
+    assert_long_keys("history_record_key_k2", &cases).await
+}
+
+/// K3. A 256-character key of four-byte characters is written and read back.
+#[tokio::test]
+async fn k3_a_key_of_four_byte_characters_is_written_and_read() -> Result<()> {
+    let cases: Vec<(&str, KeyScope, &[&str])> = LONG_SCOPES
+        .iter()
+        .map(|scope| ("long:k3", *scope, &["long:reset", "long:k3"] as &[&str]))
+        .collect();
+    assert_long_keys("history_record_key_k3", &cases).await
+}
+
+/// K4. A key of exactly 256 characters and one of 257 that extends it share the whole indexed
+/// prefix, and each returns only its own rows.
+#[tokio::test]
+async fn k4_keys_of_256_and_257_characters_read_only_their_own_rows() -> Result<()> {
+    let mut cases: Vec<(&str, KeyScope, &[&str])> = Vec::new();
+    for scope in LONG_SCOPES {
+        cases.push((
+            "long:k4-256",
+            scope,
+            &["long:reset", "long:k4-256"] as &[&str],
+        ));
+        cases.push((
+            "long:k4-257",
+            scope,
+            &["long:reset", "long:k4-257"] as &[&str],
+        ));
+    }
+    assert_long_keys("history_record_key_k4", &cases).await
+}
+
+/// The count cells: the key absent, rare and common, on a small and a large emitter, under
+/// `contract_address` and `resolver`, with and without `include=total_count`. With it, an
+/// emitter-scoped read runs the capped count over the plain source. Each cell's count equals the
+/// old statement's, the plain statement's rows counted, and the cell records its driver and how
+/// many index entries it read against the cap. Without it no count runs.
+#[tokio::test]
+async fn record_key_count_cells_match_the_old_statement_and_record_their_driver() -> Result<()> {
+    const CAP: i64 = 100;
+    let database = key_database("history_record_key_count_cells", true).await?;
+    let result = async {
+        let pool = database.pool();
+        for key in [None, Some("text:links"), Some("text:avatar")] {
+            for (size, emitter) in [("small", SMALL_FEW), ("large", LARGE)] {
+                for scope in [
+                    KeyScope::Contract(emitter),
+                    KeyScope::Resolver(KEY_CHAIN, emitter),
+                ] {
+                    let cell = format!("key {key:?}, {size} emitter, {scope:?}");
+                    let mut filter = key_filter(
+                        key.unwrap_or("text:avatar"),
+                        HistoryOrder::Desc,
+                        scope,
+                        key_window(),
+                    );
+                    if key.is_none() {
+                        filter.record_key = None;
+                        filter.event_kinds = Vec::new();
+                    }
+                    let rows = key_plain_identities(pool, &filter).await?;
+                    let old = i64::try_from(rows.len())?;
+                    ensure!(old > 0, "{cell}: the fixture gives no row");
+                    for (limit, want) in [(None, old), (Some(CAP + 1), old.min(CAP + 1))] {
+                        let mut count = QueryBuilder::<Postgres>::new("");
+                        push_history_count_query(&mut count, &filter, true, limit);
+                        let counted: i64 = count.build_query_scalar().fetch_one(pool).await?;
+                        ensure!(
+                            counted == want,
+                            "{cell} limit {limit:?}: counted {counted}, the old statement {want}"
+                        );
+                    }
+                    // Without `include=total_count` the page runs no count.
+                    let page = load_history_page(
+                        pool,
+                        filter.clone(),
+                        true,
+                        None,
+                        20,
+                        HistorySummaryMode::None,
+                        false,
+                        None,
+                    )
+                    .await?;
+                    ensure!(
+                        page.summary.is_none(),
+                        "{cell}: a count ran without total_count"
+                    );
+                    let paged: Vec<String> = page
+                        .rows
+                        .into_iter()
+                        .map(|row| row.event_identity)
+                        .collect();
+                    ensure!(
+                        paged == rows[..rows.len().min(20)],
+                        "{cell}: the page differs from the old statement"
+                    );
+                    let mut capped = QueryBuilder::<Postgres>::new("");
+                    push_history_count_query(&mut capped, &filter, true, Some(CAP + 1));
+                    let mut connection = pool.acquire().await?;
+                    let plan = explain_page(&mut connection, capped, PlanMode::Unprepared).await?;
+                    drop(connection);
+                    let mut nodes = Vec::new();
+                    page_nodes(&plan[0]["Plan"], &mut nodes);
+                    let mut driver = Vec::new();
+                    let mut entries = 0.0;
+                    for node in &nodes {
+                        let node_type = node["Node Type"].as_str().unwrap_or_default();
+                        ensure!(
+                            !(node_type == "Seq Scan"
+                                && node["Relation Name"] == "normalized_events"),
+                            "{cell}: the count scans normalized_events sequentially"
+                        );
+                        let Some(index) = node["Index Name"].as_str() else {
+                            continue;
+                        };
+                        if !index.starts_with("normalized_events_") {
+                            continue;
+                        }
+                        let read = node["Actual Rows"].as_f64().unwrap_or(0.0) * loops(node);
+                        entries += read;
+                        driver.push(format!("{node_type} {index} ({read})"));
+                    }
+                    let stops = entries <= (CAP + 1) as f64 + 16.0;
+                    eprintln!(
+                        "count cell {cell}: old statement {old} rows; driver {}; index entries \
+                         read {entries}; stops at the cap of {CAP}: {stops}",
+                        driver.join(", ")
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
 }
