@@ -2059,6 +2059,16 @@ or changes neither input. The phase runner owns validation of the durable phase
 marker and its range. Interpret validates only the normalized replay evidence
 and rejects malformed, wrong-arm, wrong-name, or wrong-binding evidence.
 
+## Required redo
+
+an explicit redo that the phase runner, manifest synchronization or Interpret
+records on a phase's `chain_phase_state` row because work the phase already did
+became invalid, for example after a reorg orphans readable blocks. Its
+`last_error` marks it as the runner's own work with a `required downstream redo`
+prefix. An operator redo is one begun with `phase-runner redo`. [Phase
+state](phase-state.md) lists the row states of both and the statements that
+write them.
+
 ## Preimage observation / label preimage
 
 learning the human-readable string
