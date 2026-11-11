@@ -4928,7 +4928,6 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- |
 | 200 | object ResolversByRoleHolderResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
 | 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
-| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
 | 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
 | 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
@@ -4941,7 +4940,8 @@ For a registrar lease first identified by a later readable observation, registra
 - Parameters: `role_holder` is required. A request without it, or with a blank
   value, returns `400 invalid_input` with `role_holder is required`: the
   collection never lists every resolver. `chain_id` keeps one chain's resolvers;
-  a chain whose namespace is not served returns `404 not_found`. `cursor` and
+  a supported chain this deployment does not serve returns `400 invalid_input`
+  with `chain_id names a chain this deployment does not serve`. `cursor` and
   `page_size` (default 50, maximum 200) page the list. Other query parameters,
   `at` and `finality` included, are rejected.
 - Each row is `{chain_id, address, grant_count, powers}` for one resolver on
@@ -4964,8 +4964,8 @@ For a registrar lease first identified by a later readable observation, registra
   roles and are not listed either.
 - Rows sort by chain and then by lowercase resolver address. Chains sort by
   bigname's chain key, so Base rows come before Ethereum rows; the order is
-  stable across pages. A page reads only the holder's grants on the resolvers it
-  returns and one more, so `page.total_count` is always `null`.
+  stable across pages. The route does not count the holder's whole list, so
+  `page.total_count` is always `null`.
 - The answer reflects the current publication of every chain the request
   spans, read on one database snapshot; a chain whose publication is not
   servable returns `409 stale`. Pagination binds the holder, the `chain_id`

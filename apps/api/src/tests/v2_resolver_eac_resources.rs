@@ -675,6 +675,7 @@ async fn resolvers_by_role_holder_page_by_cursor_and_refuse_malformed_requests()
         "/v1/resolvers?role_holder=".to_owned(),
         "/v1/resolvers?role_holder=0x12".to_owned(),
         format!("/v1/resolvers?role_holder={PAGER}&chain_id=5"),
+        format!("/v1/resolvers?role_holder={PAGER}&chain_id=11155111"),
         format!("/v1/resolvers?role_holder={PAGER}&chain_id=ethereum-mainnet"),
         format!("/v1/resolvers?role_holder={PAGER}&page_size=0"),
         format!("/v1/resolvers?role_holder={PAGER}&namespace=ens"),

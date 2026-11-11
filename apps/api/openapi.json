@@ -4479,35 +4479,6 @@
               }
             }
           },
-          "404": {
-            "description": "`not_found`: The selected resource or namespace does not exist.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/ErrorEnvelope"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "error": {
-                          "type": "object",
-                          "properties": {
-                            "code": {
-                              "enum": [
-                                "not_found"
-                              ]
-                            }
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
           "408": {
             "description": "`request_timeout`: The configured whole-request deadline expired.",
             "content": {

@@ -120,9 +120,18 @@ pub(crate) async fn get_resolvers(
         .map(|(_, slug)| resolver_namespace(slug))
         .transpose()?;
     let mut snapshot = CollectionSnapshot::capture_for_namespace(&state, None, namespace).await?;
-    let chains: Vec<String> = match params.chain {
+    let served: Vec<String> = snapshot.block_bounds().into_keys().collect();
+    let chains = match params.chain {
+        Some((_, slug)) if !served.iter().any(|chain| chain == slug) => {
+            return Err(snapshot
+                .refuse(
+                    &state,
+                    V2Error::invalid_input("chain_id names a chain this deployment does not serve"),
+                )
+                .await);
+        }
         Some((_, slug)) => vec![slug.to_owned()],
-        None => snapshot.block_bounds().into_keys().collect(),
+        None => served,
     };
     let limit = i64::try_from(params.page_size.saturating_add(1))
         .map_err(|_| V2Error::invalid_input("page_size is too large"))?;
