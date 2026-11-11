@@ -6472,3 +6472,30 @@ mark old rows ready under the new hash.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
 redo. It adds no schema-migration, table or setting.
+
+## Names of more than 128 labels
+
+The build that hashes a name and its parents in one pass, and observes no dot-separated name of
+more than 128 labels ([architecture](architecture.md#normalization-and-preimage-observation),
+[storage semantics](storage.md#interpret-process-memory)), changes `crates/adapters/src`. It
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+
+What changes for names:
+
+- A resolver `NameChanged`, a reverse registrar `NameForAddrChanged` or an ENSv2 resolver
+  `NameUpdated` whose name has more than 128 dot-separated labels yields no preimage
+  observation and no shadow name surface. Its `RecordChanged` row still carries the value.
+- An ENSv2 resolver's DNS-encoded name of more than 128 labels is still observed. Lookahead
+  dependency collection requests only that name's own node for it.
+- A name of at most 128 labels, which every DNS-encodable name is, is interpreted exactly as
+  before. So is every name a declared NameWrapper's `NameWrapped` carries.
+
+An existing deployment finishes the full-range Interpret redo and then the stamped Project redo
+it installs before the matching API serves, as the [handoff](#phase-runner-configuration)
+describes, at a planned [re-derivation boundary](glossary.md#re-derivation-boundary) under
+matching runner and API binaries. The change rides the next re-derivation release and shares
+that release's one Interpret and Project redo pair with its other hash-rotating changes. Do not
+mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.
