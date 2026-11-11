@@ -5776,3 +5776,56 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
         );
     }
 }
+
+/// A known failure in one layout does not end a sequence's runs, so an unknown failure in a later
+/// layout or split still fails the sweep. The order pinned by
+/// `registry_order_an_expired_registration_linked_in_one_transaction_diverges_until_tyr_525`
+/// fails the first run, a known TYR-525 failure, and the sweep still runs every other one.
+#[test]
+fn registry_order_sweep_runs_every_layout_after_a_known_failure() -> Result<()> {
+    use crate::permutation::registry_orders::{
+        Atom, Case, Expiry, RUNS, Registry, Sweep, Token, sweep_case,
+    };
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let registry = Registry::Announced;
+    let token = Token {
+        label: 1,
+        version: 0,
+    };
+    let case = Case {
+        seed: 0,
+        actions: vec![
+            in_new_block(vec![Atom::Announce]),
+            in_new_block(vec![
+                Atom::Register {
+                    registry,
+                    token,
+                    label: 1,
+                    owner: 2,
+                    expiry: Expiry::Past,
+                },
+                Atom::Link {
+                    registry,
+                    token,
+                    resource: token,
+                },
+            ]),
+        ],
+    };
+    let mut sweep = Sweep::default();
+    sweep_case(&wiring, &case, &mut sweep);
+    assert_eq!(sweep.runs, RUNS.len(), "{sweep}");
+    assert!(
+        sweep
+            .findings
+            .first()
+            .is_some_and(|finding| finding.layout == RUNS[0].0 && finding.split == RUNS[0].1),
+        "{sweep}"
+    );
+    assert!(
+        sweep.findings.iter().all(|finding| finding.known.is_some()),
+        "{sweep}"
+    );
+    Ok(())
+}

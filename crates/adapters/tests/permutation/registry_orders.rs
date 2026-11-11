@@ -1464,83 +1464,91 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
     let started = Instant::now();
     let mut sweep = Sweep::default();
     for case in 0..cases {
-        let generated = generate(case_seed(base, case));
-        sweep.sequences += 1;
-        sweep.observe(&generated.actions);
-        let shapes = tyr_510_shapes(&generated.actions);
-        for (layout, split_kind) in RUNS {
-            sweep.runs += 1;
-            let result = check(
-                wiring,
-                &generated.actions,
-                layout,
-                split_kind,
-                generated.seed,
-            );
-            for &shape in &shapes {
-                sweep.tyr_510_shapes.entry(shape).or_default()[usize::from(result.is_ok())] += 1;
-            }
-            match result {
-                Ok(converged) => sweep.count_named(&converged),
-                Err(error) => {
-                    let kept = signature(&error);
-                    if kept == DECLARED_STOP {
-                        sweep.declared_stops += 1;
-                        break;
-                    }
-                    let drawn_known =
-                        known_failure(&kept, &format!("{error:#}"), &generated.actions, layout);
-                    let limit = if drawn_known.is_some() {
-                        1
-                    } else {
-                        SHRUNK_PER_KIND
-                    };
-                    let shrunk = sweep
-                        .findings
-                        .iter()
-                        .filter(|finding| finding.shrunk && finding.signature == kept)
-                        .count()
-                        < limit;
-                    let minimal = if shrunk {
-                        shrink(
-                            wiring,
-                            &generated.actions,
-                            layout,
-                            split_kind,
-                            generated.seed,
-                            &kept,
-                        )
-                    } else {
-                        generated.actions.clone()
-                    };
-                    let error = if shrunk {
-                        check(wiring, &minimal, layout, split_kind, generated.seed)
-                            .err()
-                            .unwrap_or(error)
-                    } else {
-                        error
-                    };
-                    let text = format!("{error:#}");
-                    // Tagged only when both the drawn and the shrunk sequence carry the shape.
-                    let known = drawn_known.and(known_failure(&kept, &text, &minimal, layout));
-                    sweep.findings.push(Finding {
-                        seed: generated.seed,
+        sweep_case(wiring, &generate(case_seed(base, case)), &mut sweep);
+    }
+    sweep.elapsed = started.elapsed();
+    sweep
+}
+
+/// Runs one sequence in every layout and split. A known failure does not stop the remaining
+/// runs, so a different failure in a later layout still surfaces. An unknown failure, or a
+/// declared registry's stop, ends the sequence.
+pub fn sweep_case(wiring: &Wiring, generated: &Case, sweep: &mut Sweep) {
+    sweep.sequences += 1;
+    sweep.observe(&generated.actions);
+    let shapes = tyr_510_shapes(&generated.actions);
+    for (layout, split_kind) in RUNS {
+        sweep.runs += 1;
+        let result = check(
+            wiring,
+            &generated.actions,
+            layout,
+            split_kind,
+            generated.seed,
+        );
+        for &shape in &shapes {
+            sweep.tyr_510_shapes.entry(shape).or_default()[usize::from(result.is_ok())] += 1;
+        }
+        match result {
+            Ok(converged) => sweep.count_named(&converged),
+            Err(error) => {
+                let kept = signature(&error);
+                if kept == DECLARED_STOP {
+                    sweep.declared_stops += 1;
+                    break;
+                }
+                let drawn_known =
+                    known_failure(&kept, &format!("{error:#}"), &generated.actions, layout);
+                let limit = if drawn_known.is_some() {
+                    1
+                } else {
+                    SHRUNK_PER_KIND
+                };
+                let shrunk = sweep
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.shrunk && finding.signature == kept)
+                    .count()
+                    < limit;
+                let minimal = if shrunk {
+                    shrink(
+                        wiring,
+                        &generated.actions,
                         layout,
-                        split: split_kind,
-                        signature: kept,
-                        drawn: generated.actions.len(),
-                        shrunk,
-                        known,
-                        minimal,
-                        error: text,
-                    });
+                        split_kind,
+                        generated.seed,
+                        &kept,
+                    )
+                } else {
+                    generated.actions.clone()
+                };
+                let error = if shrunk {
+                    check(wiring, &minimal, layout, split_kind, generated.seed)
+                        .err()
+                        .unwrap_or(error)
+                } else {
+                    error
+                };
+                let text = format!("{error:#}");
+                // Tagged only when both the drawn and the shrunk sequence carry the shape.
+                let known = drawn_known.and(known_failure(&kept, &text, &minimal, layout));
+                sweep.findings.push(Finding {
+                    seed: generated.seed,
+                    layout,
+                    split: split_kind,
+                    signature: kept,
+                    drawn: generated.actions.len(),
+                    shrunk,
+                    known,
+                    minimal,
+                    error: text,
+                });
+                if known.is_none() {
                     break;
                 }
             }
         }
     }
-    sweep.elapsed = started.elapsed();
-    sweep
 }
 
 impl Sweep {
