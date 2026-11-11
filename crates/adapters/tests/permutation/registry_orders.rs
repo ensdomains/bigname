@@ -62,7 +62,9 @@ pub const DEFAULT_SEED: u64 = 0x7e51_9000;
 const CASE_STRIDE: u64 = 0x9fb2_1c65_1e98_df25;
 const SPLIT_SALT: u64 = 0x2545_f491_4f6c_dd1d;
 const MAX_ACTIONS: usize = 10;
-const SHRINK_BUDGET: usize = 400;
+const SHRINK_BUDGET: usize = 250;
+/// Findings shrunk per failure kind. Later ones are reported as drawn.
+const SHRUNK_PER_KIND: usize = 2;
 const BASE_BLOCK: i64 = 20_519_000;
 const BASE_TIMESTAMP: i64 = 1_700_000_000;
 const BLOCK_SECONDS: i64 = 12;
@@ -1077,6 +1079,7 @@ pub struct Finding {
     pub split: Split,
     pub signature: &'static str,
     pub drawn: usize,
+    pub shrunk: bool,
     pub minimal: Vec<Action>,
     pub error: String,
 }
@@ -1124,14 +1127,24 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                 Err(_) if excluded => {}
                 Err(error) => {
                     let kept = signature(&error);
-                    let minimal = shrink(
-                        wiring,
-                        &generated.actions,
-                        layout,
-                        split_kind,
-                        generated.seed,
-                        kept,
-                    );
+                    let shrunk = sweep
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.shrunk && finding.signature == kept)
+                        .count()
+                        < SHRUNK_PER_KIND;
+                    let minimal = if shrunk {
+                        shrink(
+                            wiring,
+                            &generated.actions,
+                            layout,
+                            split_kind,
+                            generated.seed,
+                            kept,
+                        )
+                    } else {
+                        generated.actions.clone()
+                    };
                     let error = check(wiring, &minimal, layout, split_kind, generated.seed)
                         .err()
                         .unwrap_or(error);
@@ -1141,6 +1154,7 @@ pub fn sweep(wiring: &Wiring, base: u64, cases: u64) -> Sweep {
                         split: split_kind,
                         signature: kept,
                         drawn: generated.actions.len(),
+                        shrunk,
                         minimal,
                         error: format!("{error:#}"),
                     });
@@ -1277,12 +1291,13 @@ impl fmt::Display for Sweep {
             }
             writeln!(
                 formatter,
-                "\nFINDING seed={} layout={:?} split={:?} failure={:?} drawn_actions={} minimal_actions={}\n{}\n  error: {error}",
+                "\nFINDING seed={} layout={:?} split={:?} failure={:?} drawn_actions={} shrunk={} actions={}\n{}\n  error: {error}",
                 finding.seed,
                 finding.layout,
                 finding.split,
                 finding.signature,
                 finding.drawn,
+                finding.shrunk,
                 finding.minimal.len(),
                 describe(&finding.minimal, finding.layout),
             )?;
