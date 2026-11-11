@@ -800,6 +800,13 @@ to the applicable entries below.
 > **Why**: the registry holds no resolver for the node, and the ancestor walk is the only way the chain could answer. For a reserved `.eth` second-level name on Mainnet the walk reaches ENSV2Resolver, which comes back to ENSV1Resolver and stops, so the chain has no answer either. Calling it costs one provider round trip per read and turns a provider outage into failed answers. A cleared subname below a live ENSv2 entry keeps the answer it had, because the cut-over path walk withholds it (`ens_v2_path_no_resolver`, `ens_v2_path_target_not_projected` or `ens_v2_path_not_projected`) and a withheld row is not a clear. A request through an alias path also keeps the chain, which reads the path requested. Names outside `.eth` are left to the chain, because a DNS name's nearest ancestor is its TLD, whose ENSIP-10 resolver answers from DNS.
 > **Since**: `2026-11-02`
 
+<a id="name-observation-label-limit"></a>
+> **Name observation label limit** — a resolver `NameChanged`, a reverse registrar `NameForAddrChanged` or an ENSv2 resolver `NameUpdated` whose name has more than 128 dot-separated labels yields no preimage observation. Its `RecordChanged` row still carries the value.
+> **Upstream**: `setName` stores and emits the name it is given unchanged `(upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/architecture.md` § Normalization and preimage observation; the collector side in `docs/storage.md` § Interpret process memory.
+> **Why**: one log from any contract can carry a name of millions of labels. 128 is the smallest power of two above the deepest DNS-encodable name, so no name a DNS-encoded surface can carry is affected.
+> **Since**: `2026-11-10`
+
 Per-entry format:
 
 > **Surface** — one-line description of what differs.

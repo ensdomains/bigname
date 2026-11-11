@@ -2620,6 +2620,13 @@ Interpret's adapter handles the Basenames Base families with its ENSv1 protocol
 code, so the loader applies the same name model and dependency rules to them. Before
 interpreting, the adapter decodes the batch's logs without interpreting them
 and lists every name (by namehash) and resource the logs can touch.
+For a name a log carries, that is the name and each of its parents, hashed in
+one pass from the root, so listing costs time linear in the log's bytes. A
+dot-separated name of more than 128 labels is observed as no name
+([architecture](architecture.md#normalization-and-preimage-observation)), so it
+lists none of its nodes. An ENSv2 resolver's DNS-encoded name of more than 128
+labels lists only its own node, the one interpreting it can read. The name a
+declared NameWrapper's `NameWrapped` carries has no such limit.
 Interpret adds the names whose registrar expiry plus the 90-day grace period
 falls inside the batch's time span (the Basenames Base registrar has the same
 grace period (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc)
