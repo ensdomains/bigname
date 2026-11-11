@@ -191,6 +191,12 @@ family.[^v1-namechanged-l10][^v1-namechanged-l18][^v1-revreg-l129][^v1-revreg-l1
 A nonempty `name` also produces preimage observations that can attach
 already-observed forward-node facts to a human-readable name; an empty clear
 produces no preimage observation.
+Nor does a `name` of more than 128 dot-separated labels, more than any
+DNS-encodable name has (`MAX_NAME_SEGMENTS` in
+`crates/adapters/src/schema_v2/common.rs`), in a `NameChanged` from an ENSv1,
+ENSv2 or Basenames resolver alike. Its `RecordChanged` row still carries the
+value. The same limit applies to the name a reverse registrar's
+`NameForAddrChanged` and an ENSv2 resolver's `NameUpdated` carry.
 Regardless of resolver or node type, these rows carry no `primary_claim_source`;
 interpretation does not synthesize ownership, resolver selection, or primary-name facts from them.
 The primary-name projection may later join such a row to a `ReverseClaimed` reverse node on
