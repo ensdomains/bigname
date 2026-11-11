@@ -6608,3 +6608,37 @@ binaries. Do not mark old rows ready under the new hash.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
 redo. It adds no schema-migration, table or setting.
+
+## A repeated TokenResource for a bound name
+
+The build that stops an ENSv2 registry's repeated `TokenResource` from binding a name again
+changes `crates/adapters/src/schema_v2/protocol/v2_registry/transfer.rs`. It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain, and the
+projection content hash follows through it.
+
+What changes:
+
+- A registry with its own bytecode on a named path can emit `TokenResource` for a token, and the
+  resource the token is already linked to, a second time. The adapter emitted the name's surface
+  binding again with the later block's start. The writer refused it as a binding with different
+  identity data, and Interpret stopped on that chain, in one batch or across batches.
+- A repeat now emits `TokenResourceLinked`, the resource and the name as before, but no surface
+  binding, no `SurfaceBound` and no linked `RegistrationGranted`, `AuthorityTransferred` or
+  `ExpiryChanged`. The name keeps the binding the first link opened.
+- The token's registration state is now the linked `RegistrationGranted` row a link emits, which a
+  restore installs. That row's `resource_pending: false` is what marks a later link as a repeat.
+- The first link after a registration binds as before, also when the registration kept a
+  reservation's resource or the token was linked before its label.
+- The deployed PermissionedRegistry emits `TokenResource` once per token, in `register`, so it
+  emits the same rows as before
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L472 @ ens_v2@a971bd64).
+- A registry that releases a token and registers the same token id again still stops Interpret.
+  That order is not changed here.
+
+Rows written by an older build are rewritten by re-derivation, not in place, under the same
+Interpret and Project redo pair as the sections above, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. Do not mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.
