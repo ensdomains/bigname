@@ -5515,8 +5515,8 @@ fn registry_order_reservation_over_a_registered_token_in_every_split() -> Result
 #[test]
 fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
     use crate::permutation::registry_orders::{
-        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522, TYR_522_S_A3, TYR_525, TYR_526,
-        Token, known_failure,
+        Action, Atom, Expiry, Layout, Pointer, Registry, TYR_522_S_A3, TYR_525, TYR_526, Token,
+        known_failure,
     };
     let registry = Registry::Announced;
     let token = Token {
@@ -5723,13 +5723,14 @@ fn registry_order_known_tags_fire_only_on_their_tickets_orders() {
             vec![block(vec![pointer]), block(vec![transfer])],
             None,
         ),
-        // TYR-522 and S-A3.
+        // S-A3. A second TokenResource for a token still holding its binding converges since
+        // #1425, so a refusal there is a new finding.
         (
             "a second TokenResource, a writer refusal",
             bindings,
             "",
             relinked.clone(),
-            Some(TYR_522),
+            None,
         ),
         (
             "a second TokenResource, a stream difference",

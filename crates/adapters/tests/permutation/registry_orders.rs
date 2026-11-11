@@ -89,13 +89,11 @@ pub const TYR_510_SHAPES: [&str; 2] = [TOKEN_RESOURCE_BEFORE_LABEL, LABEL_OVER_R
 /// Failure kinds tracked by open tickets. The sweep shrinks one finding of each, reports them and
 /// does not fail on them. Each comes out when its ticket lands.
 ///
-/// TYR-522: the writer's upsert guard refuses a re-emitted surface binding whose `active_from`
-/// moved, and the refusal stops the batch (`crates/interpret/src/write/identity.rs`). The order is
-/// a second `TokenResource(t, R)` for a token that already holds `R`, in a later block or the
-/// same one.
-pub const TYR_522: &str = "TYR-522";
-/// A binding closed and then re-linked under the same token id ends in the same refusal. Only
-/// custom bytecode emits that order. It is TYR-522 S-A3, out of TYR-522's PR.
+/// TYR-522 S-A3, out of TYR-522's PR: a binding closed and then re-linked under the same token id.
+/// The writer's upsert guard refuses the re-emitted surface binding whose `active_from` moved, and
+/// the refusal stops the batch (`crates/interpret/src/write/identity.rs`). Only custom bytecode
+/// emits that order. A second `TokenResource` for a token still holding its binding converges
+/// since #1425 and is gated like any order.
 pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
 /// TYR-525: a `LabelRegistered` that is already expired, or whose token is already registered,
 /// when it is emitted, or an `ExpiryUpdated` that cuts a label's live expiry to one that has
@@ -129,12 +127,9 @@ pub fn known_failure(
 ) -> Option<&'static str> {
     if signature == "the writer would reject a repeated surface_bindings row"
         && links_a_linked_token(actions)
+        && relinks_a_closed_binding(actions)
     {
-        return Some(if relinks_a_closed_binding(actions) {
-            TYR_522_S_A3
-        } else {
-            TYR_522
-        });
+        return Some(TYR_522_S_A3);
     }
     if tyr_525_symptom(signature, text) && emits_a_passed_or_live_label(actions, layout) {
         return Some(TYR_525);
