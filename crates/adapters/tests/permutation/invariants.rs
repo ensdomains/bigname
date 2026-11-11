@@ -699,8 +699,8 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
 fn session_difference(live: &AdapterSession, restored: &AdapterSession) -> String {
     let live = format!("{live:#?}");
     let restored = format!("{restored:#?}");
-    let live = live.lines().collect::<Vec<_>>();
-    let restored = restored.lines().collect::<Vec<_>>();
+    let live = without_cache_bookkeeping(&live);
+    let restored = without_cache_bookkeeping(&restored);
     let prefix = live
         .iter()
         .zip(&restored)
@@ -732,6 +732,34 @@ fn session_difference(live: &AdapterSession, restored: &AdapterSession) -> Strin
         window(&live),
         window(&restored)
     )
+}
+
+/// The debug rendering's lines without the state cache's access order, which session equality
+/// ignores (`StateResidency`'s `PartialEq`), so the first difference shown is one that counts.
+fn without_cache_bookkeeping(rendered: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut skipping: Option<usize> = None;
+    for line in rendered.lines() {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if let Some(depth) = skipping {
+            if indent == depth && trimmed.starts_with('}') {
+                skipping = None;
+            }
+            continue;
+        }
+        if trimmed.starts_with("accessed_at: {") || trimmed.starts_with("least_recent: {") {
+            if !trimmed.ends_with("},") {
+                skipping = Some(indent);
+            }
+            continue;
+        }
+        if trimmed.starts_with("clock: ") {
+            continue;
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 fn restore_adapter_session(
