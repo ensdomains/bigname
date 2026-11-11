@@ -1040,8 +1040,10 @@ indexes' predicates, would change that estimate. Either one means reading the sc
 again. On a table with no statistics at all the two can tie, which the tests record.
 
 Without the indexes the arms return the same rows and walk the chain's events in page order.
-`history/record_key_plan_tests.rs` checks each arm's driver and bound in unprepared, custom and
-generic plans, and the rows against the plain statement with and without the indexes. The
+`history/record_key_plan_tests.rs` checks each arm's driver and bound in unprepared and custom
+plans, and the rows against the plain statement with and without the indexes. It records the
+generic plans and the plans before `ANALYZE` as evidence only, since these pages are never
+prepared and served tables are analyzed. The
 indexes are advisory ([walk index set](#walk-index-set)). The prebuild is in
 [`ops/record-history-indexes/README.md`](../ops/record-history-indexes/README.md).
 
