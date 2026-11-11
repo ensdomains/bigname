@@ -228,7 +228,9 @@ pub(crate) async fn pass_chunk(
     others: &[String],
 ) -> Result<Refreshed> {
     scope(transaction, NAME, others).await?;
-    finish(transaction, chain_id, block, &[], &[], false).await
+    let mut refreshed = finish(transaction, chain_id, block, &[], &[], false).await?;
+    refreshed += leads(transaction, chain_id, block).await?;
+    Ok(refreshed)
 }
 
 /// `refresh` for an undo (`families/undo.rs`): at the restored block `block`, which journals

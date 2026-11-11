@@ -581,8 +581,11 @@ pub(crate) async fn step_chunk(
     match stream {
         Stream::EventCounts => counts::run(transaction, chain_id, block.number, step).await,
         _ => {
+            // Red-first probe (stop C): the leads stream writes nothing, and each names chunk
+            // decides its groups' leads from what it sees.
             require_composed(transaction, chain_id, "leads stream").await?;
-            leads::run(transaction, chain_id, step).await
+            let _ = leads::run;
+            Ok((super::tables::ADDRESS_LISTING.name, 0))
         }
     }
 }
