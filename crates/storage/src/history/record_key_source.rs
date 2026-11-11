@@ -86,7 +86,7 @@ pub(super) fn push_record_key_source<'a>(
 ) {
     builder.push(" FROM (");
     let mut arms = 0;
-    for chain in chains {
+    for &chain in chains {
         for arm in [RecordArm::Write, RecordArm::Reset] {
             if !filter.event_kinds.is_empty()
                 && !filter
