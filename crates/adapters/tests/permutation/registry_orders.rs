@@ -98,7 +98,7 @@ pub const TYR_522_S_A3: &str = "TYR-522 S-A3, out of TYR-522's PR";
 /// TYR-525: a `LabelRegistered` that is already expired, or whose token is already registered,
 /// when it is emitted, or an `ExpiryUpdated` that cuts a label's live expiry to one that has
 /// passed. Live state and a restore disagree on the expiry retirement flags, or the split replay
-/// attributes or releases differently. The deployed registry reverts all three orders
+/// attributes, releases or transfers differently. The deployed registry reverts all three orders
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L438-L460 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222-L224 @ ens_v2@a971bd64).
 pub const TYR_525: &str = "TYR-525";
@@ -117,6 +117,81 @@ fn tyr_525_symptom(signature: &str, text: &str) -> bool {
             && text.contains(":RegistrationReleased:expiry:"))
 }
 
+/// TYR-525's two further symptoms of a token registered again while its registration is live: the
+/// split replay re-attributes any number of events, or a later transfer's `token_lineage_id` and
+/// `upstream_resource` differ between the passes and nothing else does.
+fn tyr_525_reregistration_symptom(signature: &str, text: &str) -> bool {
+    let rebased = signature
+        .strip_prefix("batch-boundary artifact {\"rebased_attributions\": ")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(|count| !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit()));
+    rebased
+        || (signature
+            == "an event's after_state differs between the whole pass and the split replay"
+            && text.contains(":TokenControlTransferred:")
+            && only_the_transfer_lineage_differs(text))
+}
+
+fn only_the_transfer_lineage_differs(text: &str) -> bool {
+    let parse = |marker| {
+        after_state(text, marker)
+            .and_then(|state| serde_json::from_str::<serde_json::Value>(state).ok())
+            .and_then(|state| state.as_object().cloned())
+    };
+    let (Some(mut whole), Some(mut replayed)) = (parse("whole="), parse("replayed=")) else {
+        return false;
+    };
+    if whole == replayed {
+        return false;
+    }
+    for key in ["token_lineage_id", "upstream_resource"] {
+        whole.remove(key);
+        replayed.remove(key);
+    }
+    whole == replayed
+}
+
+/// A `LabelRegistered` over a token whose registration is still live at the new label's block.
+fn reregisters_a_live_token(actions: &[Action], layout: Layout) -> bool {
+    let mut registered = BTreeMap::new();
+    for (atom, at) in timed_atoms(actions, layout) {
+        match atom {
+            Atom::Register {
+                registry,
+                token,
+                expiry,
+                ..
+            } => {
+                if registered
+                    .insert((registry, token), expiry)
+                    .is_some_and(|before| !passed(before, at))
+                {
+                    return true;
+                }
+            }
+            Atom::Renew {
+                registry,
+                token,
+                expiry,
+            } => {
+                if let Some(current) = registered.get_mut(&(registry, token)) {
+                    *current = expiry;
+                }
+            }
+            Atom::Unregister { registry, token } => {
+                registered.remove(&(registry, token));
+            }
+            Atom::Regenerate { registry, from, to } => {
+                if let Some(expiry) = registered.remove(&(registry, from)) {
+                    registered.insert((registry, to), expiry);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The open ticket a failure belongs to, judged on its kind, the failure text and the order's
 /// shape in the layout it failed in. A kind alone never tags: each ticket names an order.
 pub fn known_failure(
@@ -132,6 +207,10 @@ pub fn known_failure(
         return Some(TYR_522_S_A3);
     }
     if tyr_525_symptom(signature, text) && emits_a_passed_or_live_label(actions, layout) {
+        return Some(TYR_525);
+    }
+    if tyr_525_reregistration_symptom(signature, text) && reregisters_a_live_token(actions, layout)
+    {
         return Some(TYR_525);
     }
     if signature.starts_with("an event's after_state differs")
