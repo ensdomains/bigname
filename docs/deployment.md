@@ -6766,3 +6766,17 @@ The index reads `bigname_phase.entry_key_hashes`, so that function can no longer
 while the index exists. Where the recovery of
 `20261012120000_name_surfaces_project_path_indexes.sql` drops the function, drop this index
 first and build it again afterwards with the statements above.
+
+## The narrowed children read looks each child's surface up by its id
+
+The statement Project's family step runs for a block's touched children now reads each wanted
+child's surface by its id (`name_surfaces_pkey`) instead of by namespace and node. A surface's id
+is its namespace and its lowercase namehash, so the rows are the same. The lookup no longer
+depends on planner statistics, which a redo's freshly rebuilt tables may not have yet.
+
+- It rotates the projection content hash, because the statement is in a hashed composition file
+  (`crates/storage/src/families/topology/children/wanted.rs`). The interpreter content hash does
+  not move.
+- It needs no schema-migration and no new index. `name_surfaces_project_parent_key_idx` stays as
+  it is.
+- The release that carries it redoes Project anyway, so it adds no redo of its own.

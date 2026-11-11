@@ -18688,6 +18688,7 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
     }
     let output = super::interpret_schema_v2_batch(input.clone())?;
     check_fixture_logs(&input, &output);
+    check_surface_ids(&output);
     // Every fixture input the lookahead covers doubles as a loader-equivalence case:
     // interpreting it from lookahead-scoped state must give exactly the output of full
     // restored state.
@@ -18777,6 +18778,7 @@ fn checked_interpret(input: BatchInput) -> anyhow::Result<BatchOutput> {
     let checked = input.clone();
     let output = super::interpret_schema_v2_batch(input)?;
     check_fixture_logs(&checked, &output);
+    check_surface_ids(&output);
     Ok(output)
 }
 
@@ -18790,7 +18792,71 @@ fn checked_finish(
         super::prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
             .finish(Vec::new())?;
     check_fixture_logs(&checked, &output);
+    check_surface_ids(&output);
     Ok((output, session))
+}
+
+/// Fails the test when a surface's id is not its namespace and its lowercase namehash. Project's
+/// narrowed children read looks a child's surface up by that id (`families/topology/children/
+/// wanted.rs` in storage), so a surface with another id would drop out of its parent's listing.
+/// Every adapter fixture batch passes through here.
+fn check_surface_ids(output: &BatchOutput) {
+    for surface in &output.name_surfaces {
+        assert!(
+            surface_id_follows_its_node(surface),
+            "surface {} is not `<namespace>:<lowercase namehash>` ({}, {})",
+            surface.logical_name_id,
+            surface.namespace,
+            surface.namehash
+        );
+    }
+}
+
+fn surface_id_follows_its_node(surface: &NameSurface) -> bool {
+    surface.namehash == surface.namehash.to_ascii_lowercase()
+        && surface.logical_name_id == format!("{}:{}", surface.namespace, surface.namehash)
+}
+
+#[test]
+fn a_surface_id_is_its_namespace_and_lowercase_namehash() {
+    let namehash = format!("0x{}", "ab".repeat(32));
+    let surface = NameSurface {
+        logical_name_id: format!("ens:{namehash}"),
+        namespace: "ens".to_owned(),
+        raw: None,
+        namehash,
+        labelhashes: Vec::new(),
+        normalizer_version: "test".to_owned(),
+        visibility_state: "active".to_owned(),
+        normalization_errors: json!([]),
+        deactivation_reason: None,
+        deactivated_at: None,
+        chain_id: CHAIN.to_owned(),
+        block_hash: "0xblock".to_owned(),
+        block_number: 1,
+        provenance: json!({}),
+        canonicality_state: "canonical".to_owned(),
+    };
+    assert!(surface_id_follows_its_node(&surface));
+    let mut upper = surface.clone();
+    upper.namehash = format!("0x{}", "AB".repeat(32));
+    upper.logical_name_id = format!("ens:{}", upper.namehash);
+    assert!(
+        !surface_id_follows_its_node(&upper),
+        "an uppercase namehash passed"
+    );
+    let mut other_namespace = surface.clone();
+    other_namespace.logical_name_id = format!("basenames:{}", surface.namehash);
+    assert!(
+        !surface_id_follows_its_node(&other_namespace),
+        "another namespace passed"
+    );
+    let mut bare = surface;
+    bare.logical_name_id = bare.namehash.clone();
+    assert!(
+        !surface_id_follows_its_node(&bare),
+        "an id without its namespace passed"
+    );
 }
 
 #[test]

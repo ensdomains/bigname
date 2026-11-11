@@ -1,9 +1,17 @@
 //! The candidates of the children a narrowed read wants (`push_selected`'s `children`), each
-//! read by its own key: the child's surface by node (`name_surfaces_project_node_idx`), its
-//! ENSv2 registrations by the registration key's prefix, and its ENSv1 and Basenames edges by
-//! node (`project_child_edge_candidate_child_idx`). The candidate arms join these in place of
-//! the base tables under the same conditions, so they keep the same rows, and hold only the
-//! wanted children's.
+//! read by its own key: the child's surface by its id (`name_surfaces_pkey`), its ENSv2
+//! registrations by the registration key's prefix, and its ENSv1 and Basenames edges by node
+//! (`project_child_edge_candidate_child_idx`). The candidate arms join these in place of the base
+//! tables under the same conditions, so they keep the same rows, and hold only the wanted
+//! children's.
+//!
+//! A surface's id is its namespace and its lowercase namehash (`<namespace>:<namehash>`, the
+//! adapters' `NameSurface`, pinned by the adapter fixture checks). So the id names the one surface
+//! of a node in a namespace, and the probe is a unique-index lookup whatever the planner's
+//! statistics say. The Project writer runs this statement during a redo, on tables rebuilt
+//! moments before, where a probe by namespace and node may take any index that leads with the
+//! namespace and read the whole namespace once per child. The namespace and node conditions stay
+//! as a recheck.
 //!
 //! Each probe is its own subquery (`OFFSET 0`), so its cost follows the children wanted, never
 //! the planner's estimate of the parents: the Project writer derives a block's touched children
@@ -29,7 +37,8 @@ pub(super) fn push<'a>(builder: &mut QueryBuilder<'a, Postgres>, children: &'a [
             CROSS JOIN wanted_node wanted
             CROSS JOIN LATERAL (
                 SELECT child.* FROM bigname_phase.name_surfaces child
-                WHERE child.namespace = scope.namespace AND lower(child.namehash) = wanted.node
+                WHERE child.logical_name_id = scope.namespace || ':' || wanted.node
+                  AND child.namespace = scope.namespace AND lower(child.namehash) = wanted.node
                 OFFSET 0
             ) child
         ), wanted_registration AS MATERIALIZED (
