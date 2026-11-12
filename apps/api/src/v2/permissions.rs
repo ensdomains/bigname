@@ -28,7 +28,7 @@ mod lineage;
 use lineage::permission_lineage;
 #[path = "permissions/current_name.rs"]
 mod current_name;
-use current_name::load_current_name_row;
+use current_name::{load_current_name_row, load_publication_names};
 
 mod filter;
 pub(crate) use filter::registration_row;
@@ -204,12 +204,7 @@ pub(crate) async fn get_permissions(
     // The selected resource is included so an empty page still serves its restrictions under
     // the name's registration_id.
     let current_names =
-        bigname_storage::load_current_names_by_resource_ids(&mut *reads, &support_resource_ids)
-            .await
-            .map_err(super::name_rows_error(
-                super::SnapshotReadResource::Resource,
-                |_| V2Error::internal_error("failed to load permission names"),
-            ))?;
+        load_publication_names(&mut *reads, &support_resource_ids, &block_bounds).await?;
     let nameless_resource_ids = support_resource_ids
         .iter()
         .copied()

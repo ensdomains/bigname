@@ -107,7 +107,9 @@ pub async fn load_current_normalized_names(
         .collect())
 }
 
-/// Load the canonical representative current name for each resource (registration).
+/// Load the canonical representative current name for each resource (registration), reading
+/// only the names bound on `chain_ids`, the chains of the caller's publication. An empty
+/// `chain_ids` serves no names.
 ///
 /// `name_current.resource_id` is 1:many; this picks one representative per resource using the
 /// `canonical_display_name ASC` tie-break the rest of v2 uses and returns the picked exact-name
@@ -116,6 +118,7 @@ pub async fn load_current_normalized_names(
 pub async fn load_current_names_by_resource_ids(
     db: impl Into<crate::ReadDb<'_>>,
     resource_ids: &[Uuid],
+    _chain_ids: &[String],
 ) -> Result<BTreeMap<Uuid, NameCurrentRow>> {
     if resource_ids.is_empty() {
         return Ok(BTreeMap::new());
