@@ -208,6 +208,50 @@ fn warn_on(
     missing
 }
 
+/// Warns, naming the table, when the API role cannot read the stored event counts
+/// (`docs/deployment.md`, Serving the stored event counts). It never refuses: without the
+/// privilege every emitter-anchored event count and the registry overview's `counts.events`
+/// count rows, exact up to 10,000. A check that fails only warns too. Returns whether the
+/// counts are readable.
+pub(crate) async fn warn_on_unreadable_stored_event_counts(pool: &PgPool) -> bool {
+    match bigname_storage::phase_schema_exists(pool).await {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(error) => {
+            tracing::warn!(
+                service = "api",
+                error = %error,
+                "the API could not check the phase schema for the stored event counts and \
+                 serves event counts from the rows"
+            );
+            return false;
+        }
+    }
+    match bigname_storage::stored_event_counts_readable(pool).await {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::warn!(
+                service = "api",
+                table = "bigname_phase.project_event_count",
+                "the API role cannot read the stored event counts, so it serves event counts \
+                 from the rows, exact up to 10,000 and null above; grant SELECT on the table \
+                 to serve them exactly"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                service = "api",
+                table = "bigname_phase.project_event_count",
+                error = %error,
+                "the API could not check its privilege on the stored event counts and serves \
+                 event counts from the rows until a read finds the privilege"
+            );
+            false
+        }
+    }
+}
+
 /// Refuses to serve when a configured RPC endpoint answers for another chain. An endpoint that
 /// cannot be reached only warns, as lookups on that chain already fail on their own until it
 /// answers.

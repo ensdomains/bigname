@@ -172,11 +172,12 @@ pub(crate) async fn get_events(
     let total_count = storage_page
         .summary
         .as_ref()
-        .map(|summary| summary.total_count)
-        .filter(|total_count| match summary_mode {
-            HistorySummaryMode::CappedCount(cap) => *total_count <= cap,
-            _ => true,
-        });
+        .filter(|summary| {
+            summary
+                .count_cap
+                .is_none_or(|cap| summary.total_count <= cap)
+        })
+        .map(|summary| summary.total_count);
     let context = super::history_context::load_history_row_context(
         &state.pool,
         &storage_page.rows,
@@ -334,6 +335,23 @@ pub(crate) fn events_storage_cursor(
 #[cfg(test)]
 tokio::task_local! {
     static EMITTER_EXACT_COUNT_CAP: u64;
+    static ROW_COUNTS_ONLY: ();
+}
+
+/// Runs `future` with every emitter-anchored count read from the rows, as before the stored
+/// event counts served, so a test can compare the two.
+#[cfg(test)]
+pub(crate) async fn with_row_counts_only<F: std::future::Future>(future: F) -> F::Output {
+    ROW_COUNTS_ONLY.scope((), future).await
+}
+
+/// Whether an emitter-anchored count may be served from the stored event counts.
+pub(crate) fn stored_event_counts_served() -> bool {
+    #[cfg(test)]
+    if ROW_COUNTS_ONLY.try_with(|_| ()).is_ok() {
+        return false;
+    }
+    true
 }
 
 /// Runs `future` with `cap` in place of the opt-in count cap on emitter-anchored reads.
@@ -346,12 +364,13 @@ pub(crate) async fn with_emitter_count_cap<F: std::future::Future>(
 }
 
 /// `include=total_count` on a `/v1/events` read that only an emitting contract anchors
-/// (`resolver` or `contract_address`, with no `name`, `registration_id` or `address`) counts at
-/// most this many rows and reports `total_count=null` above it. Such a contract can emit more
-/// rows than an exact count reads inside the request deadline. The registry overview's
-/// `counts.events` uses the same cap. The cap bounds rows, not time, and each counted row also
-/// pays for the duplicate and lineage filters. On the heaviest contracts a cap of 100,000 rows
-/// reached the request deadline. Sized from staging timings, 2026-11-03.
+/// (`resolver` or `contract_address`, with no `name`, `registration_id` or `address`) and that
+/// the stored event counts cannot serve counts at most this many rows and reports
+/// `total_count=null` above it. Such a contract can emit more rows than an exact count reads
+/// inside the request deadline. The registry overview's `counts.events` uses the same cap. The
+/// cap bounds rows, not time, and each counted row also pays for the duplicate and lineage
+/// filters. On the heaviest contracts a cap of 100,000 rows reached the request deadline. Sized
+/// from staging timings, 2026-11-03.
 const EVENTS_EMITTER_EXACT_COUNT_CAP: u64 = 10_000;
 
 pub(crate) fn emitter_exact_count_cap() -> u64 {
@@ -369,7 +388,16 @@ pub(crate) fn events_summary_mode(params: &QueryParams, anchored: bool) -> Histo
         && params.registration_id.is_none()
         && params.address.is_none()
         && (params.resolver.is_some() || params.contract_address.is_some());
-    if exact_count && emitter_only {
+    // The stored counts hold no record key and no block or time window. A resolver with another
+    // contract_address is left to storage, which reads the parsed addresses.
+    let key_filters_only = params.history_filters.record_key.is_none()
+        && params.from_block.is_none()
+        && params.to_block.is_none()
+        && params.from_timestamp.is_none()
+        && params.to_timestamp.is_none();
+    if exact_count && emitter_only && key_filters_only && stored_event_counts_served() {
+        HistorySummaryMode::StoredOrCapped(emitter_exact_count_cap())
+    } else if exact_count && emitter_only {
         HistorySummaryMode::CappedCount(emitter_exact_count_cap())
     } else if exact_count && anchored {
         HistorySummaryMode::Count

@@ -2540,6 +2540,7 @@ async fn v2_events_resolver_filter_lists_rows_for_one_resolver_contract() -> Res
     )
     .execute(&database.pool)
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     // The record write was emitted by the resolver and the pointer change names it.
     let payload = v2_history_payload_for_database(

@@ -408,7 +408,7 @@ async fn events_summary_mode_caps_only_emitter_anchored_opt_ins() {
                 include: flag(),
                 ..RawQueryParams::default()
             },
-            HistorySummaryMode::CappedCount(12_345),
+            HistorySummaryMode::StoredOrCapped(12_345),
         ),
         (
             "contract_address",
@@ -417,7 +417,7 @@ async fn events_summary_mode_caps_only_emitter_anchored_opt_ins() {
                 include: flag(),
                 ..RawQueryParams::default()
             },
-            HistorySummaryMode::CappedCount(12_345),
+            HistorySummaryMode::StoredOrCapped(12_345),
         ),
         (
             "resolver and contract_address",
@@ -425,6 +425,57 @@ async fn events_summary_mode_caps_only_emitter_anchored_opt_ins() {
                 resolver: some(RESOLVER),
                 contract_address: some(CONTRACT),
                 include: some("data,raw,total_count"),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::StoredOrCapped(12_345),
+        ),
+        // A record key or a block or time window keeps the row count under the cap.
+        (
+            "resolver and record_key",
+            RawQueryParams {
+                resolver: some(RESOLVER),
+                record_key: some("addr:60"),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(12_345),
+        ),
+        (
+            "contract_address and from_block",
+            RawQueryParams {
+                contract_address: some(CONTRACT),
+                from_block: some("100"),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(12_345),
+        ),
+        (
+            "contract_address and to_block",
+            RawQueryParams {
+                contract_address: some(CONTRACT),
+                to_block: some("100"),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(12_345),
+        ),
+        (
+            "resolver and from_timestamp",
+            RawQueryParams {
+                resolver: some(RESOLVER),
+                from_timestamp: some("1700000100"),
+                include: flag(),
+                ..RawQueryParams::default()
+            },
+            HistorySummaryMode::CappedCount(12_345),
+        ),
+        (
+            "resolver and to_timestamp",
+            RawQueryParams {
+                resolver: some(RESOLVER),
+                to_timestamp: some("1700000100"),
+                include: flag(),
                 ..RawQueryParams::default()
             },
             HistorySummaryMode::CappedCount(12_345),
@@ -538,7 +589,13 @@ async fn events_summary_mode_caps_only_emitter_anchored_opt_ins() {
     ];
     with_emitter_count_cap(12_345, async {
         for (label, raw, expected) in cases {
-            assert_eq!(summary_mode_for(raw), expected, "{label}");
+            assert_eq!(summary_mode_for(raw.clone()), expected, "{label}");
+            let walked = match expected {
+                HistorySummaryMode::StoredOrCapped(cap) => HistorySummaryMode::CappedCount(cap),
+                other => other,
+            };
+            let rows_only = with_row_counts_only(async { summary_mode_for(raw) }).await;
+            assert_eq!(rows_only, walked, "{label} with row counts only");
         }
     })
     .await;

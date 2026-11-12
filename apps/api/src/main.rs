@@ -78,6 +78,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     startup_preflight::warn_on_advisory_indexes(&pool).await;
     let walk_index_set_unusable =
         startup_preflight::ensure_walk_index_set(&pool, args.walk_index_set_check).await?;
+    startup_preflight::warn_on_unreadable_stored_event_counts(&pool).await;
     let health_pool = bigname_storage::connect_phase_reserved_readiness_pool(
         &args.database,
         "bigname-api-health",

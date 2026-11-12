@@ -205,10 +205,12 @@ pub(super) async fn load_page_on(
     let count_limit = match summary_mode {
         HistorySummaryMode::None => Some(0),
         HistorySummaryMode::Count => None,
-        HistorySummaryMode::CappedCount(cap) => Some(u64::try_from(
-            i64::try_from(cap.saturating_add(1))
-                .context("history total_count cap exceeds SQL limit")?,
-        )?),
+        HistorySummaryMode::CappedCount(cap) | HistorySummaryMode::StoredOrCapped(cap) => {
+            Some(u64::try_from(
+                i64::try_from(cap.saturating_add(1))
+                    .context("history total_count cap exceeds SQL limit")?,
+            )?)
+        }
         HistorySummaryMode::Full => {
             anyhow::bail!("bounded address history requires count-only summary")
         }
@@ -314,6 +316,7 @@ pub(super) async fn load_page_on(
             manifest_versions: Vec::new(),
             chain_position_samples: Vec::new(),
             last_updated: None,
+            count_cap: summary_mode.cap(),
         }),
         interpret_redo_fence: fence.cloned(),
     })

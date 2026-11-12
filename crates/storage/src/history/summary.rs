@@ -9,6 +9,7 @@ use super::{
     paging::{push_history_filters, push_history_order_terms},
     record_key_source::{push_record_key_source, record_count_chains},
     resolver_source::{ResolverPageBound, ResolverSource, push_history_source_for_filter},
+    stored_count,
 };
 
 pub(super) async fn load_history_summary(
@@ -19,21 +20,21 @@ pub(super) async fn load_history_summary(
 ) -> Result<Option<HistorySummary>> {
     match mode {
         HistorySummaryMode::None => Ok(None),
+        HistorySummaryMode::StoredOrCapped(cap) => {
+            if let Some(total_count) =
+                stored_count::load(connection, filter, canonical_only).await?
+            {
+                return Ok(Some(count_summary(total_count, None)));
+            }
+            let total_count =
+                load_history_total_count(connection, filter, canonical_only, Some(cap)).await?;
+            Ok(Some(count_summary(total_count, Some(cap))))
+        }
         HistorySummaryMode::Count | HistorySummaryMode::CappedCount(_) => {
-            let cap = match mode {
-                HistorySummaryMode::CappedCount(cap) => Some(cap),
-                _ => None,
-            };
+            let cap = mode.cap();
             let total_count =
                 load_history_total_count(connection, filter, canonical_only, cap).await?;
-            Ok(Some(HistorySummary {
-                total_count,
-                normalized_event_ids: Vec::new(),
-                raw_fact_refs: Vec::new(),
-                manifest_versions: Vec::new(),
-                chain_position_samples: Vec::new(),
-                last_updated: None,
-            }))
+            Ok(Some(count_summary(total_count, cap)))
         }
         HistorySummaryMode::Full => {
             let mut summary = load_history_full_summary(connection, filter, canonical_only).await?;
@@ -41,6 +42,18 @@ pub(super) async fn load_history_summary(
                 load_history_chain_position_samples(connection, filter, canonical_only).await?;
             Ok(Some(summary))
         }
+    }
+}
+
+fn count_summary(total_count: u64, count_cap: Option<u64>) -> HistorySummary {
+    HistorySummary {
+        total_count,
+        normalized_event_ids: Vec::new(),
+        raw_fact_refs: Vec::new(),
+        manifest_versions: Vec::new(),
+        chain_position_samples: Vec::new(),
+        last_updated: None,
+        count_cap,
     }
 }
 
@@ -179,6 +192,7 @@ async fn load_history_full_summary(
             .context("failed to decode normalized-event history summary manifest versions")?,
         chain_position_samples: Vec::new(),
         last_updated: crate::sql_row::get(&row, "last_updated")?,
+        count_cap: None,
     })
 }
 

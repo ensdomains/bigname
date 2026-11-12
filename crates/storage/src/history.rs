@@ -44,7 +44,10 @@ mod primary_values;
 #[cfg(any(test, feature = "test-support"))]
 mod query_plan;
 #[cfg(any(test, feature = "test-support"))]
-pub use query_plan::{explain_contract_event_count_for_test, explain_event_history_count_for_test};
+pub use query_plan::{
+    explain_contract_event_count_for_test, explain_event_history_count_for_test,
+    explain_stored_event_count_for_test,
+};
 mod read_filter;
 mod record_key_source;
 mod redo;
@@ -54,6 +57,8 @@ mod resolver_source;
 pub use registry_handoffs::{HistoryRegistryHandoff, load_history_registry_handoffs};
 mod selectors;
 mod source;
+mod stored_count;
+pub use stored_count::stored_event_counts_readable;
 mod summary;
 mod token_ids;
 mod wrapped_registrar;
@@ -81,7 +86,7 @@ pub use child_registrations::{
     HistorySubject, NameHistoryPage, NameHistoryRow,
     load_name_history_page_with_child_registrations,
 };
-pub use contract_count::count_contract_events;
+pub use contract_count::{count_contract_events, count_contract_events_at_publication};
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
 pub use keyset::{load_history_anchor_position, load_history_transaction_index};
 pub(crate) use lineage::lineage_probe_at_block;
@@ -180,6 +185,9 @@ pub struct HistorySummary {
     pub manifest_versions: Vec<Value>,
     pub chain_position_samples: Vec<HistoryChainPositionSample>,
     pub last_updated: Option<OffsetDateTime>,
+    /// The cap a capped count ran under: a `total_count` above it means only "more than the
+    /// cap". `None` for an exact count.
+    pub count_cap: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,7 +197,21 @@ pub enum HistorySummaryMode {
     /// Count at most `cap + 1` matching rows; a `total_count` above the cap
     /// tells the caller the exact count was not computed.
     CappedCount(u64),
+    /// The stored event count (`docs/projections.md`, "Event counts") when every filter of the
+    /// read is a column of its key and the read's publication is the one the counts describe;
+    /// otherwise `CappedCount(cap)`.
+    StoredOrCapped(u64),
     Full,
+}
+
+impl HistorySummaryMode {
+    /// The cap a row count under this mode stops at, if any.
+    pub fn cap(self) -> Option<u64> {
+        match self {
+            Self::CappedCount(cap) | Self::StoredOrCapped(cap) => Some(cap),
+            Self::None | Self::Count | Self::Full => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
