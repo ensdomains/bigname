@@ -676,6 +676,7 @@ async fn resolvers_by_role_holder_page_by_cursor_and_refuse_malformed_requests()
         "/v1/resolvers?role_holder=0x12".to_owned(),
         format!("/v1/resolvers?role_holder={PAGER}&chain_id=5"),
         format!("/v1/resolvers?role_holder={PAGER}&chain_id=11155111"),
+        format!("/v1/resolvers?role_holder={PAGER}&chain_id=8453"),
         format!("/v1/resolvers?role_holder={PAGER}&chain_id=ethereum-mainnet"),
         format!("/v1/resolvers?role_holder={PAGER}&page_size=0"),
         format!("/v1/resolvers?role_holder={PAGER}&namespace=ens"),
@@ -701,5 +702,53 @@ async fn resolvers_by_role_holder_page_by_cursor_and_refuse_malformed_requests()
             .is_some_and(|message| message.starts_with("role_holder is required")),
         "{body}"
     );
+    database.cleanup().await
+}
+
+/// How a `chain_id` filter is answered on an `ens`-only deployment:
+///
+/// | Chain | State | Answer |
+/// | --- | --- | --- |
+/// | Base (8453), a known chain no public namespace serves | nothing indexed, indexed, published | `400`, naming it as not served |
+/// | 5, not a supported chain | the same | `400` |
+/// | Ethereum (1), served | indexed, not yet published | `409 stale` |
+/// | Ethereum (1), served | published | `200` |
+///
+/// The unserved chain is refused before the request's publication is read, so it is never the
+/// `409 stale` a client would retry.
+#[tokio::test]
+async fn resolvers_by_role_holder_refuse_an_unserved_chain_before_any_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let route = |chain: &str| format!("/v1/resolvers?role_holder={HOLDER}&chain_id={chain}");
+    let manifest = manifest(false);
+    let output = interpret(&manifest, vec![], 120)?;
+    for state in ["nothing indexed", "indexed", "published"] {
+        match state {
+            "indexed" => seed(&database, &manifest, &output, 120).await?,
+            "published" => publish(&database, 120).await?,
+            _ => {}
+        }
+        let (status, body) = role_holder_response(&database, &route("8453")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{state}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_input", "{state}: {body}");
+        assert_eq!(
+            body["error"]["message"], "chain_id names a chain this deployment does not serve",
+            "{state}: {body}"
+        );
+        let (status, body) = role_holder_response(&database, &route("5")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{state}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_input", "{state}: {body}");
+        if state == "nothing indexed" {
+            continue;
+        }
+        let (status, body) = role_holder_response(&database, &route("1")).await?;
+        if state == "published" {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"], json!([]), "{body}");
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"]["code"], "stale", "{body}");
+        }
+    }
     database.cleanup().await
 }

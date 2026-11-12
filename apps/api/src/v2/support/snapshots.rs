@@ -54,6 +54,10 @@ impl PublicNamespaceDeployment {
     pub(crate) fn scope(&self) -> &SnapshotSelectionScope {
         &self.scope
     }
+
+    pub(crate) fn namespace(&self) -> &str {
+        &self.namespace
+    }
 }
 
 #[derive(Clone, Debug)]
