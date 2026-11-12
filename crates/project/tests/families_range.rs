@@ -1090,7 +1090,12 @@ async fn rebuild_in_runs_equal(
             }
             _ => false,
         };
-        if outcome.marker.is_some() && before_children {
+        // Its stored listing is empty until the children stream, so it differs from the relation
+        // once the relation lists a child.
+        if outcome.marker.is_some()
+            && before_children
+            && fixture.child_listing_composes_any(CHAIN).await?
+        {
             unfinished += 1;
         }
         ranges += outcome.ranges;
