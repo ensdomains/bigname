@@ -19,6 +19,7 @@ mod admission;
 mod canonical;
 mod control;
 mod expiry;
+mod graveyard;
 mod laterals;
 mod load;
 pub mod membership;

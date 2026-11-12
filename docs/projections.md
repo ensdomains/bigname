@@ -114,7 +114,7 @@ selector ends in exactly one of four outcomes:
 | Outcome | When | What is written |
 | --- | --- | --- |
 | Observed | The endpoint answered the aggregate and the selector's call returned a value or an empty answer. | The value, or the empty answer, with the block it was observed at. A successful empty answer replaces an earlier value. |
-| Failed call | The endpoint answered the aggregate and this selector's own call failed inside it, or returned data that cannot be decoded. | The overlay is cleared and the attempt recorded, so the reader serves the event-derived baseline. This is a fail-closed policy; it is not evidence that the value was cleared on chain. |
+| Failed call | The endpoint answered the aggregate and this selector's own call failed inside it, returned data that cannot be decoded, or returned a name or text value containing a NUL byte, which PostgreSQL cannot store. | The overlay is cleared and the attempt recorded, so the reader serves the event-derived baseline. This is a fail-closed policy; it is not evidence that the value was cleared on chain. |
 | Deferred | The selector's aggregate failed as a whole while the endpoint answered other calls at the same block, and the block had no call or time left to split it further. | No value is observed. The selector moves behind the rest of its queue and records the largest aggregate it may next be sent in; a reverse tuple keeps its name and the block it was observed at (see [Primary names](#primary-names)). |
 | Not observed | The endpoint did not serve the block, the block's reads ran out of time, or the block had no call left for the selector's first aggregate. | Nothing. The row, its value and the block the value was observed at are left exactly as they were, and the selector keeps its place. |
 
@@ -1343,6 +1343,58 @@ Graveyard as its `owner`, until it lapses.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L374 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L281-L303 @ ens_v1@91c966f)
+
+The Graveyard's record also ends the name's ENSv1 registration. The lifecycle composition
+(`crates/storage/src/families/control/lifecycle/graveyard.rs`) runs after the registration
+schedule. For a name on the `ens_v1` arm whose node's newest current-registry
+`AuthorityTransferred` carries `owner_getter_reason` `graveyard`, it serves
+`lifecycle_status` and `status` `released`, a null expiry with `expires_at_reason` `released`,
+no grace deadline, no `ens_v1_expiry`, no registrant and no control owner, registry owner or
+expiry. Its `lapsed_registration` names the holder before the Graveyard took control, with
+`released_at` the block time of the Graveyard's registry write that began that control and
+`release_kind` `expired`.
+
+Both come from one pass over the name's custody events in (block, transaction, log) order: its
+current-registry owner writes, its NameWrapper mints and transfers on every wrapped resource of
+the name, and, for a `.eth` second-level name, its BaseRegistrar grants and transfers. The pass
+tracks who controls the record:
+
+- a registry owner other than the NameWrapper controls it;
+- while the NameWrapper owns the record and its wrap is live, the wrapped token's holder does;
+- no one does when the record is zero, or when the NameWrapper owns it with no live wrap.
+
+A registry write naming anyone but the NameWrapper ends the wrap. A write naming the NameWrapper
+is one wrap step with the mint that follows it in the same transaction, with only BaseRegistrar
+rows between, since every mint path writes the record to the NameWrapper first. A registry
+`NewOwner` of the node between them, which Interpret keeps as a `SubregistryChanged` even when
+it names the NameWrapper again, is the mint's own write, and the earlier write is bare. Without
+such a mint it is a bare write, and no one controls the record from it on. Interpret records no write
+that names the record's current owner, so a mint on a record the NameWrapper already owns comes
+with no write, and a transfer of a live wrap needs none. A BaseRegistrar token move controls
+nothing until a `reclaim` writes the record.
+
+The Graveyard's control runs while it controls the record, directly or as the wrapped token's
+holder: a repeated `clear`, a BaseRegistrar move, a wrap minted to it and a wrapped token sent
+to it keep it. Any other controller ends it, even inside one transaction. `released_at` is the
+run's first Graveyard registry write. The lapsed holder is the controller just before the run,
+or none when no one controlled the record then. When someone did, a `.eth` second-level name
+names its lease's holder at that moment instead, the holder it served before. That is the
+BaseRegistrar token's holder. While the NameWrapper holds the token it is the live wrapped
+token's holder, unless that is the Graveyard, and otherwise the token's holder before the wrap:
+a wrap moves the token into custody and does not change who holds the lease. A write that ends
+the wrap while the NameWrapper still holds the token (`unwrapETH2LD` writes the record first)
+makes the wrapped token's last holder the lease's holder.
+
+The release itself needs only the registry write. The claim's sentinel `NameRegistered` stays
+the unretained historical cleanup row (`graveyard_cleanup`), never a lease. It applies to a
+claimed `.eth` second-level name and to a cleared subname alike. A name on the `ens_v2` arm is not read by it: a label
+registered in ENSv2, before or after the claim, and a migrated name, whose ENSv1 record the
+migration hands to the Graveyard, are served by their ENSv2 registration. The stored name
+summary takes `registration_status` `released` and no finite expiry from the composed row, so
+the expiry listing needs no rule of its own. The subnames route already leaves such a child out,
+since its record names no owner (above).
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_mainnet_20261002@4f47cbcc)
+(upstream: .refs/ens_v2_mainnet_20261002/contracts/src/migration/Graveyard.sol:L186-L201 @ ens_v2_mainnet_20261002@4f47cbcc)
 
 An `active` ENSv1 or Basenames registration whose authority is its registrar lease or its
 registry record always serves a registry owner, because the registry answers `owner(node)` for
@@ -2746,12 +2798,18 @@ an explicit rerun. The failure is not converted into a successful publication.
 
 A block whose write PostgreSQL refuses for the value itself is not retried.
 The transaction rolls back with that value still first in line, so a retry
-would meet it again at the same head. Two shapes reach this:
+would meet it again at the same head. Two shapes are refused this way:
 
-- a string with a NUL byte, such as a text record or reverse name read from
-  the resolver over RPC (SQLSTATE class 22, data exception)
+- a string with a NUL byte or invalid UTF-8 (SQLSTATE class 22, data
+  exception)
 - a record key longer than an index row may be (SQLSTATE class 54, program
   limit exceeded).
+
+A text record or reverse name read from the resolver over RPC never reaches
+the first shape. A returned value with a NUL byte is a failed call, the same
+outcome as a malformed return: no value is written, the failure is counted, the
+selector waits out the failed-call retry delay, and the block publishes
+([follow-only hydration](#follow-only-hydration)).
 
 The runner marks that chain's Project row `failed`, with PostgreSQL's message
 in `last_error`, and that chain's supervisor stops with a data-integrity error.
@@ -2765,11 +2823,11 @@ moves it too, because the runner runs Ingest to the source's head before Project
 meets the block again. That chain's reads then answer `409 stale` until it
 recovers.
 
-A runner exits nonzero once every chain it runs has stopped. A runner with one
-chain therefore exits on this stop. Under a restart policy it starts again,
-replays the same block and stops again, in a loop. Stop that runner until a
-build that stores or explicitly skips the value is deployed. On a runner with
-several chains the others keep running.
+A runner stays up when a chain stops this way, even when it was the only chain.
+The other chains keep running, and the runner keeps serving its metrics until
+it is stopped. There is no restart loop. Stop the runner and start a build that
+stores or explicitly skips the value once one is deployed. That stop exits 0,
+because the failure was already reported.
 
 The runner recognises these failures by PostgreSQL's English message text, so
 it assumes the server's `lc_messages` is English. Under another language the

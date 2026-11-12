@@ -2,6 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use sqlx::PgPool;
 
+use crate::label_staging::{LabelStaging, LabelStagingConfig};
 use crate::v2::support::status_freshness::{StatusFreshness, StatusFreshnessConfig};
 
 pub(crate) const DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS: i64 = 60;
@@ -51,6 +52,8 @@ pub(crate) struct AppState {
     pub(crate) lookup_chain_rpc_urls: bigname_lookup::ChainRpcUrls,
     pub(crate) phase_heartbeat_max_age_secs: i64,
     pub(crate) status_freshness: StatusFreshness,
+    /// The writer for labels a request proves, the API's only database write.
+    pub(crate) label_staging: LabelStaging,
     public_namespaces_override: Option<Arc<[String]>>,
 }
 
@@ -69,6 +72,7 @@ impl AppState {
             lookup_chain_rpc_urls,
             phase_heartbeat_max_age_secs: DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS,
             status_freshness: StatusFreshness::new(StatusFreshnessConfig::default()),
+            label_staging: LabelStaging::new(LabelStagingConfig::default()),
             public_namespaces_override: None,
         }
     }
@@ -94,6 +98,11 @@ impl AppState {
         phase_heartbeat_max_age_secs: i64,
     ) -> Self {
         self.phase_heartbeat_max_age_secs = phase_heartbeat_max_age_secs;
+        self
+    }
+
+    pub(crate) fn with_label_staging(mut self, config: LabelStagingConfig) -> Self {
+        self.label_staging = LabelStaging::new(config);
         self
     }
 

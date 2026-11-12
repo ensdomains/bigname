@@ -453,7 +453,9 @@ async fn self_parent_combines_token_and_root_operator_powers_under_one_account_k
 /// for another registry gives a current positive result with a different registration.
 #[tokio::test]
 async fn admitted_name_move_and_rebind_preserve_registration_composition_inputs() -> Result<()> {
-    use bigname_storage::families::records::seams::with_legacy_walk_batches;
+    use bigname_storage::families::records::seams::{
+        with_composed_address_names, with_legacy_walk_batches,
+    };
 
     fn mount(logs: &mut Logs, offset: i64, label: &str, registry: &str) {
         logs.push(
@@ -628,7 +630,11 @@ async fn admitted_name_move_and_rebind_preserve_registration_composition_inputs(
         let uri = format!(
             "/v1/addresses/{ALICE}/names?namespace=ens&relation=owner&dedupe={dedupe}&sort=name&order=desc&page_size=1"
         );
-        let read = || with_paths(with_batches(response(&database, &uri)));
+        let read = || {
+            with_paths(with_batches(with_composed_address_names(response(
+                &database, &uri,
+            ))))
+        };
         let ((old, old_batches), old_paths) = with_legacy_walk_batches(read()).await;
         let ((current, current_batches), current_paths) = read().await;
         let old = old?;

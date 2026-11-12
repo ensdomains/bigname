@@ -32,10 +32,13 @@ const PATHS: &str = "ENSv2 path decisions that schedule Project's summary deadli
 const LIFECYCLE: &str = "the lifecycle evaluation Project's summary decides from";
 /// The children relation, whose listed rows Project stores as the child listing family.
 const LISTING: &str = "Project's child listing composition";
+/// The address-names rows, which Project stores as the address listing family.
+const ADDRESS_LISTING: &str = "Project's address listing composition";
 
 /// Reached from Project's family step (`crates/project/src/families`): the name summary
 /// composition (`derived/summary.rs`), its `RequiredOwnerMissing` check, the child listing
-/// composition (`derived/children.rs`), and the family position ordinals (`position.rs`,
+/// composition (`derived/children.rs`), the address listing composition
+/// (`derived/address_listing.rs`), and the family position ordinals (`position.rs`,
 /// `hydrate/{reverse,text}.rs`). Every entry is project-class except one
 /// Interpret also reaches.
 pub(crate) const COMPOSITION_FILES: &[Classified] = &[
@@ -157,6 +160,18 @@ pub(crate) const COMPOSITION_FILES: &[Classified] = &[
         LISTING,
     ),
     project("crates/storage/src/families/topology/shims.rs", LISTING),
+    project(
+        "crates/storage/src/families/records/address_listing.rs",
+        ADDRESS_LISTING,
+    ),
+    project(
+        "crates/storage/src/families/records/former_owners.rs",
+        ADDRESS_LISTING,
+    ),
+    project(
+        "crates/storage/src/families/topology/registry_children.rs",
+        ADDRESS_LISTING,
+    ),
     project("crates/storage/src/families/control/cutover.rs", LIFECYCLE),
     project("crates/storage/src/families/control/position.rs", LIFECYCLE),
     project("crates/storage/src/families/control/registry.rs", LIFECYCLE),
@@ -184,6 +199,10 @@ pub(crate) const COMPOSITION_FILES: &[Classified] = &[
     ),
     project(
         "crates/storage/src/families/control/lifecycle/expiry.rs",
+        LIFECYCLE,
+    ),
+    project(
+        "crates/storage/src/families/control/lifecycle/graveyard.rs",
         LIFECYCLE,
     ),
     project(
@@ -247,7 +266,6 @@ const READER_FILES: &[&str] = &[
     // The composed-row listings and the API-side topology enrichment (`batch::load`).
     "crates/storage/src/families/name/bound.rs",
     "crates/storage/src/families/name/bound_parity.rs",
-    "crates/storage/src/families/name/bound_walk.rs",
     "crates/storage/src/families/name/list.rs",
     "crates/storage/src/families/name/list/search_rows.rs",
     "crates/storage/src/families/name/list/search_test_support.rs",
@@ -258,8 +276,9 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/name/registry_pointer.rs",
     "crates/storage/src/families/name/seams.rs",
     "crates/storage/src/families/name/topology.rs",
+    // Test-support parity of the address listing family against the route; no Project caller.
+    "crates/storage/src/families/records/address_listing_parity.rs",
     "crates/storage/src/families/records/candidates.rs",
-    "crates/storage/src/families/records/former_owners.rs",
     "crates/storage/src/families/records/inventory.rs",
     "crates/storage/src/families/records/node_inventory.rs",
     "crates/storage/src/families/records/primary.rs",
@@ -275,7 +294,6 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/topology/name_topology.rs",
     "crates/storage/src/families/topology/overview.rs",
     "crates/storage/src/families/topology/pointers.rs",
-    "crates/storage/src/families/topology/registry_children.rs",
 ];
 
 pub(crate) fn collect(

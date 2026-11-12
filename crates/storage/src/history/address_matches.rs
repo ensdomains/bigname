@@ -5,9 +5,9 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::address_names::{
-    AddressNameRelation, load_address_names_current_at_bound,
+    AddressNameCurrentRow, AddressNameRelation, load_address_names_current_at_bound,
     load_address_names_current_for_relations,
-    load_address_names_current_including_noncanonical_for_relations,
+    load_address_names_current_including_noncanonical_for_relations, load_stored_current_anchors,
 };
 
 use super::{
@@ -17,6 +17,12 @@ use super::{
     selectors::HistorySelector,
     source::{push_history_canonicality_filter, push_history_lineage_join},
 };
+
+fn anchors_of(rows: Vec<AddressNameCurrentRow>) -> Vec<(String, Uuid)> {
+    rows.into_iter()
+        .map(|row| (row.logical_name_id, row.resource_id))
+        .collect()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AddressHistoryAnchor {
@@ -43,26 +49,29 @@ pub(super) async fn load_address_history_selector(
     let raw_audit = include_candidates && published.is_none();
     let current_rows = match published {
         None if raw_audit => Ok(Vec::new()),
-        Some(published) => {
-            load_address_names_current_at_bound(
-                pool,
-                address,
-                namespace,
-                relations,
-                !canonical_only,
-                published,
-            )
-            .await
+        Some(published) if canonical_only => {
+            load_stored_current_anchors(pool, address, namespace, relations, published).await
         }
+        Some(published) => load_address_names_current_at_bound(
+            pool,
+            address,
+            namespace,
+            relations,
+            !canonical_only,
+            published,
+        )
+        .await
+        .map(anchors_of),
         None if canonical_only => {
-            load_address_names_current_for_relations(pool, address, namespace, relations).await
+            load_address_names_current_for_relations(pool, address, namespace, relations)
+                .await
+                .map(anchors_of)
         }
-        None => {
-            load_address_names_current_including_noncanonical_for_relations(
-                pool, address, namespace, relations,
-            )
-            .await
-        }
+        None => load_address_names_current_including_noncanonical_for_relations(
+            pool, address, namespace, relations,
+        )
+        .await
+        .map(anchors_of),
     }
     .with_context(|| {
         let mut parts = vec![format!("address {address}")];
@@ -87,11 +96,11 @@ pub(super) async fn load_address_history_selector(
 
     let mut logical_name_ids = current_rows
         .iter()
-        .map(|row| row.logical_name_id.clone())
+        .map(|(logical_name_id, _)| logical_name_id.clone())
         .collect::<BTreeSet<_>>();
     let mut resource_ids = current_rows
         .iter()
-        .map(|row| row.resource_id)
+        .map(|(_, resource_id)| *resource_id)
         .collect::<BTreeSet<_>>();
 
     let historical_matches = load_historical_address_history_matches(

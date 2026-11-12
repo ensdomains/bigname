@@ -59,14 +59,16 @@ const CONTROL_TABLES: [&str; 3] = [
 ];
 
 /// The family tables added after the last migration with a reset list
-/// (migrations/20261103120000_project_child_listing.sql and
-/// migrations/20261104130000_project_event_count.sql create them). The published reset lists
+/// (migrations/20261103120000_project_child_listing.sql,
+/// migrations/20261104130000_project_event_count.sql and
+/// migrations/20261104140000_project_address_listing.sql create them). The published reset lists
 /// cannot name them. The family reset (`families::family_tables`) clears them.
-const LATER_TABLES: [&str; 4] = [
+const LATER_TABLES: [&str; 5] = [
     "project_child_listing",
     "project_child_listing_count",
     "project_child_preimage_watermark",
     "project_event_count",
+    "project_address_listing",
 ];
 
 /// The family reset covers the tables added after the last reset list, so a later reset clears
@@ -123,6 +125,7 @@ fn reset_tables() -> Vec<String> {
                     | "project_child_listing_count"
                     | "project_child_preimage_watermark"
                     | "project_event_count"
+                    | "project_address_listing"
             )
         })
         .map(str::to_owned)
@@ -164,6 +167,7 @@ fn selector_reset_tables() -> Vec<String> {
                     | "project_child_listing_count"
                     | "project_child_preimage_watermark"
                     | "project_event_count"
+                    | "project_address_listing"
             )
         })
         .map(str::to_owned)
@@ -596,7 +600,7 @@ async fn the_bound_name_listing_refuses_after_the_migration_until_the_rebuild() 
     fixture.apply(7, FamilyMode::Normal).await?;
     let listing = |pool: PgPool| async move {
         bigname_storage::families::name::load_family_bound_names(
-            &pool, CHAIN, RESOLVER, None, None, 10, true,
+            &pool, CHAIN, RESOLVER, None, None, 10, true, None,
         )
         .await
     };

@@ -435,6 +435,33 @@ CREATE INDEX IF NOT EXISTS normalized_events_emitter_history_idx
     WHERE raw_fact_ref ->> 'emitting_address' IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+-- History pages filtered by one record key read a write arm per chain
+-- (crates/storage/src/history/record_key_source.rs): the key's writes on one chain, and the
+-- key's writes by one emitter on one chain, each in page order. The key is indexed by its first
+-- 256 characters, so a key of any length can be written, and the arm compares the whole key on
+-- the row. Keep them identical to ops/record-history-indexes/install.sql and
+-- migrations/20261111120000_normalized_events_record_history_indexes.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_record_key_history_idx
+    ON normalized_events (
+        chain_id,
+        left(after_state ->> 'record_key', 256),
+        block_number DESC NULLS LAST
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX IF NOT EXISTS normalized_events_record_emitter_key_history_idx
+    ON normalized_events (
+        chain_id,
+        lower(raw_fact_ref ->> 'emitting_address'),
+        left(after_state ->> 'record_key', 256),
+        block_number DESC NULLS LAST
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_ens_v1_record_node_resolver_idx
     ON normalized_events (
         chain_id,
@@ -709,6 +736,25 @@ CREATE INDEX IF NOT EXISTS normalized_events_address_registry_owner_match_idx
     WHERE event_kind = 'AuthorityTransferred'
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+-- The historical address membership statement (crates/storage/src/history/address_evidence.rs)
+-- probes each address key in its own fenced subquery, which holds only the key's match and
+-- the address length of its value. The predicates name no event kind, visibility or
+-- canonicality state, which the statement applies after the subqueries. The length bounds the
+-- key, so a long string under one of these keys is left out instead of failing the insert. Keep them identical to the subqueries,
+-- ops/address-key-indexes/install.sql and
+-- migrations/20261112150000_normalized_events_address_key_indexes.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_address_to_idx
+    ON normalized_events (lower(COALESCE(after_state ->> 'to', '')))
+    WHERE length(after_state ->> 'to') = 42;
+
+CREATE INDEX IF NOT EXISTS normalized_events_address_registrant_idx
+    ON normalized_events (lower(COALESCE(after_state ->> 'registrant', '')))
+    WHERE length(after_state ->> 'registrant') = 42;
+
+CREATE INDEX IF NOT EXISTS normalized_events_address_owner_idx
+    ON normalized_events (lower(COALESCE(after_state ->> 'owner', '')))
+    WHERE length(after_state ->> 'owner') = 42;
 
 -- Address history also lists the registry root role changes made to the address: the
 -- RootPermissionChanged rows whose subject is the address, which name no name or per-address

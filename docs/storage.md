@@ -475,7 +475,7 @@ field requires no schema migration or replay.
 | `project_lookup_name`, `project_lookup_relation`, `project_lookup_inventory`, `project_lookup_record`, `project_lookup_dependency` | Project | Journalled current lookup facts, exact relations and per-resource selected records/dependencies; published with the family marker. |
 | `name_search_documents`, `name_search_postings` | Interpret and the verified label-preimage importer | Atomic current spelling and lexical indexes; rebuilt from surface and retained verified label evidence. |
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
-| `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
+| `ens_names` | operator rainbow load, and the API's [label candidates](deployment.md#api-label-candidates) | Unverified rainbow-table candidates consumed by the import command. No serving path reads them. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding or because they contradict themselves or their emitter's earlier logs, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
@@ -635,15 +635,19 @@ Family indexes serve these concrete readers:
   names are composed, and the listing rules run again over them. The page shows each name as
   served, imported preimages included. The capability gate is never stored, because a
   classification can change while no name is composed again. `include=total_count` counts
-  the same names on the same snapshot, with the surface fences as one semi-join, so it reads
-  every listed name of the resolver. The count is sent unprepared, inside a savepoint that sets
-  `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count with the resolver's own
-  values even on a session set to `force_generic_plan`. A cached generic plan guesses a few hundred names and
-  probes every name's surfaces in a nested loop. On the plan test's 1.1 million names the
-  unprepared count takes about 0.4 s and that generic plan about 3.7 s. The unprepared count
-  hashes the surfaces in a parallel semi-join. On those 1.1 million names, with the default
-  `work_mem` and 2 parallel workers, it writes about 243 MB of temp files per count, an amount
-  that grows with the chain's surfaces. Interpret writes a surface's raw bytes and its shadow
+  the same names on the same snapshot with the page's statement under a limit: the same index
+  range in page order, the surface fences as the same scalar subquery, and no cursor. It stops
+  after 100,001 names pass the fences, and the API serves `null` above 100,000. So a count
+  reads index rows in page order until 100,001 pass, whatever the resolver's size. The
+  fences are not written as `EXISTS`, which the planner can run as a semi-join that hashes
+  every surface before the first row, past any limit. The count is sent unprepared, inside a
+  savepoint that sets `plan_cache_mode = force_custom_plan`, so PostgreSQL plans each count
+  with the resolver's own values and limit even on a session set to `force_generic_plan`.
+  The savepoint also sets `enable_sort = off`. A resolver whose size the planner estimates
+  below the limit would otherwise be read by a bitmap scan of every listed row, each probed
+  by the fences, and then sorted. Without a sort only the index range in page order meets the
+  count's order.
+  Interpret writes a surface's raw bytes and its shadow
   state in place when it observes a preimage for it, and keeps the surface's block. The summary
   writer reads them as the composed block does (`loaders::surfaces_at`): only when the surface's
   preimage witness is a readable `PreimageObserved` at or below the block. Otherwise the surface
@@ -823,6 +827,25 @@ gives that range only under the C collation. The prefix index has the name order
 predicate, and the reader carries the same bounds. Its order is byte order, so the reader
 sorts the matched rows into name order.
 
+The expiring listing of `GET /v1/names` with `parent` adds one more, installed by the identity
+baseline and `20261104120000_name_surfaces_project_parent_key_index.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `name_surfaces_project_parent_key_idx` | `storage:families.name.expiring_names` and `storage:families.name.expiring_union`: the surfaces one label below a parent, by namespace and the hash of their labelhashes after the first |
+
+It is a btree on `(namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0))` over
+every surface. It is not partial, because PostgreSQL estimates an expression from an index's
+statistics only when the index has no predicate. The statement keeps its visibility and
+root-name terms as filters. The statement also compares
+the labelhashes after the first with the parent's path, so a hash collision never lists a name.
+A parent with few names below it is read from this index. A parent above most names, such as
+`eth`, is read from `project_name_summary_expiry_idx`, with the key compared on each row. With a
+parent, both statements run unprepared, so each is planned with its own parent and the index statistics
+choose between the two. `crates/storage/src/families/name/list/expiring/parent_tests.rs` checks
+the rows of every parent class and the rows each plan examines. Interpret pays one btree entry
+when it inserts a surface.
+
 Interpret and the verified label-preimage importer write `name_search_documents`. The
 API's prefix search adds three read-only indexes on it, installed by the identity baseline
 and `20261029120000_search_prefix_bucket_indexes.sql` and changing no row:
@@ -951,6 +974,25 @@ populated upgrades must first use the [concurrent installer](../ops/history-regi
 No facts, memberships, markers or hash inputs change, so this addition requires no Interpret
 or Project reset and an existing rebuild can continue from its recorded progress.
 
+The historical address membership statement (`push_historical_address_matches_query` in
+`crates/storage/src/history/address_evidence.rs`), which `/v1/events?address=`,
+`/v1/diagnostics/events?address=` and the address history walker send, reads three read-only
+indexes on `normalized_events`. The normalized-events baseline and
+`20261112150000_normalized_events_address_key_indexes.sql` install them, and populated upgrades
+require the [concurrent prebuild](../ops/address-key-indexes/README.md):
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_address_registrant_idx` | the `registrant` probe: rows whose `registrant` value is 42 characters long, by the lowercased value |
+| `normalized_events_address_to_idx` | the `to` probe, which the token holder and ENSv2 controller arms share: rows whose `to` value is 42 characters long, by the lowercased value |
+| `normalized_events_address_owner_idx` | the `owner` probe of the registry owner arm: rows whose `owner` value is 42 characters long, by the lowercased value |
+
+Their predicates name no event kind, visibility or canonicality state, so one probe text serves
+every flag combination, diagnostics included, and the statement applies those filters after the
+probes. They change no rows, hash inputs, catalogue encoding or phase markers and require no
+replay. The earlier kind-partial `normalized_events_address_*_match_idx` indexes stay installed
+and no statement reads them.
+
 Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
 `normalized_events` for its registry root role branch, installed by the normalized-events
 baseline and `20261005120000_normalized_events_address_root_permission_idx.sql` and changing no
@@ -1020,6 +1062,66 @@ of them. Its key order lets `DISTINCT ON` read it without a sort. Without it the
 drops every row that is not a role change.
 `apps/api/src/tests/v2_registry_role_counts_index.rs` checks that both statements read the
 index under custom and generic plans and return what the unindexed read returns.
+
+History pages filtered by one record key (`/v1/events`, name history and address history with
+`record_key`) that no name, registration or address anchors read two arms per chain of their
+window (`crates/storage/src/history/record_key_source.rs`): the key's `RecordChanged` rows and
+the chain's `RecordVersionChanged` rows, each in page order and each stopped after one page.
+A `resolver` or `contract_address` scope is the emitter equality inside both arms. Two indexes
+on `normalized_events` serve the `RecordChanged` arm. The normalized-events baseline and
+`20261111120000_normalized_events_record_history_indexes.sql` install them:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_record_key_history_idx` | the `RecordChanged` arm of an unscoped page: activated, canonical `RecordChanged` rows by chain and the first 256 characters of `after_state ->> 'record_key'`, newest block first |
+| `normalized_events_record_emitter_key_history_idx` | the `RecordChanged` arm of a page scoped by an emitter: the same rows by chain, lowercased emitting address and key prefix, newest block first |
+
+Both indexes key on `left(after_state ->> 'record_key', 256)`, at most 1,024 bytes, because a
+whole key could pass the largest entry a btree index holds and the chain permits such keys:
+`setText` takes the key as a `string` with no length check and emits it whole in `TextChanged`
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f).
+Stored keys longer than the indexed prefix exist. The arm matches the prefix in its index
+condition and the whole key on the row, so two keys that share their first 256 characters are
+told apart. The arm has every equality the read carries
+in its index condition, so it reads at most one page of entries, and one probe for a key with
+no write on the chain. The lineage, namespace, window and duplicate conditions still drop some
+rows inside the arm, before its limit. A scoped read needs the emitter-led index. The key index
+would walk every write of a common key looking for one emitter, and
+`normalized_events_emitter_history_idx` would walk every event of a large resolver looking for
+one key.
+
+The `RecordVersionChanged` arm reads `normalized_events_projection_idx` with the kind, the
+canonical states and the chain in its index condition, and sorts the chain's record-version
+resets. It reads at most the chain's `RecordVersionChanged` events and no `RecordChanged` row,
+scoped or not, so its cost grows with the chain's record-version resets.
+
+Pages on the record arms are sent unprepared, scoped or not, so each is planned with its own
+values, and anchored pages keep their prepared statements. The planner's choice of the
+emitter-led index for a scoped arm does not rest on the values: PostgreSQL uses no statistics
+from the expressions of a partial index, so each expression equality gets the same default
+selectivity whatever the key or emitter, and the emitter-led index matches three equalities
+where the key index matches two. Extended statistics on either expression, or a change to the
+indexes' predicates, would change that estimate. Either one means reading the scoped plans
+again. On a table with no statistics at all the two can tie, which the tests record.
+
+The `include=total_count` count of a `record_key` read scoped by an emitter reads the same
+arms. Each arm is an ordered scan of its index that returns at most the count's cap plus one
+row, and the count is the capped sum. The arm's limit applies after its own namespace, lineage
+and duplicate conditions, so the scan also reads the rows those conditions drop. Rows read per
+arm are bounded by the cap plus one plus those dropped rows, for any key and any emitter, and
+`history/record_key_plan_tests.rs` pins the cap plus 17 on its fixture. A bitmap over the
+plain statement could not stop at the cap, and the emitter's own index read in order walks
+every event of a large emitter looking for a rare key. Without
+a key the count keeps the plain statement, which for `kind=RecordChanged` can read the
+emitter's `RecordChanged` rows through the emitter-led index in order and stop at the cap.
+
+Without the indexes the arms return the same rows and walk the chain's events in page order.
+`history/record_key_plan_tests.rs` checks each arm's driver and bound in unprepared and custom
+plans, and the rows against the plain statement with and without the indexes. It records the
+generic plans and the plans before `ANALYZE` as evidence only, since these pages are never
+prepared and served tables are analyzed. The
+indexes are advisory ([walk index set](#walk-index-set)). The prebuild is in
+[`ops/record-history-indexes/README.md`](../ops/record-history-indexes/README.md).
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
@@ -1119,11 +1221,19 @@ moves the citation without changing the holder; the earliest transfer in the ran
 address as its sender, which proves the address held the name at the bound. The three
 kinds of historical events are: a `RegistrationGranted` whose `registrant` is the address, a
 `TokenControlTransferred` whose `to` is the address, and an `AuthorityTransferred` whose `owner`
-is the address, each compared lowercased. One partial expression index per kind keys those rows
-by the lowercased value: `normalized_events_address_registrant_match_idx`,
-`normalized_events_address_token_holder_match_idx`, and
-`normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
-identical to the query text. Each candidate arm probes the name, resource, node, resolver/record
+is the address, each compared lowercased. The membership statement
+(`push_historical_address_matches_query` in `crates/storage/src/history/address_evidence.rs`)
+reads them through one subquery per key, `registrant`, `to` and `owner`. Each subquery holds only
+the key's lowercased match and the address length of its value, ends in `OFFSET 0`, and reads
+one partial expression index over every row whose value under the key is 42 characters long: `normalized_events_address_registrant_idx`,
+`normalized_events_address_to_idx`, and `normalized_events_address_owner_idx`. The event kind,
+visibility, canonicality, namespace, publication bound and arm filters all apply after the
+subqueries. PostgreSQL keeps no statistics on a partial index's expression and estimates every
+address alike, so a merged statement combined the address probes with
+`normalized_events_projection_idx` over every grant and transfer of the chain. The fence leaves
+the planner no such clause to combine. A row that holds the address under two keys comes from two
+subqueries and yields one anchor. The indexes' expressions and predicates must stay identical to
+the subqueries' text. Each candidate arm probes the name, resource, node, resolver/record
 key, or selected link through the corresponding index. A lateral planning boundary keeps event
 probes keyed by that address's evidence even at large cardinalities. The database may sort and
 spill all address-specific candidates before returning the first batch; this bounds API memory,
@@ -1413,6 +1523,9 @@ the observation block and the greatest preceding address range's close plus
 one. Retired ranges remain unchanged. This preservation does not change raw
 facts, normalized-event identity, or projection ownership.
 
+[Phase state](phase-state.md) names each state a `chain_phase_state` row can
+be in and lists every statement that moves a row, with the code line of each.
+
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing
 the retained range markers, source provenance, verification level, or content
@@ -1443,7 +1556,8 @@ earlier checkpoint is recorded as `failed` so ordinary phase execution can
 resume it. A saved Verify final checkpoint stays `failed` until current
 configuration and retained verification evidence pass the completed-Verify
 checks. A lock still held by another runner, or a lost lock connection during
-the state update, stops the new runner or refuses the redo. The update and lock use one database
+the state update, refuses the redo. A supervised runner runs that chain again
+with backoff until the lock is free. The update and lock use one database
 connection. If the client cannot tell whether PostgreSQL committed the update
 before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
@@ -1490,8 +1604,8 @@ backoff. Until the retry takes the lock again, the lock is free.
 A redo that starts in that gap wins. It settles the row and runs. While it
 runs, the supervisor's Live retry fails with `InvalidTransition`, which is not
 retried, so that chain's supervisor stops. Other chains keep running, and the
-process exits nonzero once every chain has stopped. Restart the supervisor
-after the redo finishes.
+runner stays up until it is stopped. Restart the runner after the redo
+finishes.
 
 The lost attempt's head publication can still commit while that redo runs.
 When it replaces readable blocks, it stamps a required redo on Interpret,
@@ -1522,8 +1636,7 @@ depends on the redo:
   have completed. Until then it is refused because Project is not completed.
   The completion error says so.
 - A supervisor's own required redo refused at completion stops that chain.
-  The next supervisor start reruns the required redo. No operator action is
-  needed.
+  Restart the runner. That start reruns the required redo.
 
 Project is treated differently at completion. A Project redo that a stamp
 overtook after its last progress write still completes on one condition.
@@ -2065,7 +2178,10 @@ candidate, where the generator records `hash =
 keccak256(name)`.[^graph-ens-rainbow-table][^graph-ens-rainbow-hash]
 
 Authority stays split between the two tables. `ens_names` is an unverified
-staging store: every operator-loaded row is only a claim. `label_preimages`
+staging store: every operator-loaded row is only a claim. The API also stages
+there each label a name request proves
+([name inputs](api-v1.md#name-inputs)), and the import checks those rows like
+any other. `label_preimages`
 remains the verified store: a candidate becomes a preimage row only when it is
 exactly one DNS label and re-hashes — keccak256 of the raw label bytes — to the
 row's recorded hash. A rejected candidate leaves no trace beyond the import's
@@ -2086,7 +2202,13 @@ fills a table the importer never reads, and the run reports zero scanned rows
 rather than failing — the phase table exists, it is just empty. Load the dump's
 rows into `bigname_phase.ens_names` without letting the rest of the dump run
 against that table: `\copy` the data section, or extract the dump's `COPY`
-statement and retarget only that. Do not rewrite the dump's schema
+statement and retarget only that. A `COPY` into the table fails on the first
+hash it already holds, and API hosts may already have staged label candidates
+there. Setting `BIGNAME_API_LABEL_STAGING_PER_SECOND=0` stops new candidates
+but keeps those already staged. So whenever the table may hold candidates, copy
+into a temporary table and insert from it with `ON CONFLICT DO NOTHING`. Copy
+directly only when staging is `0` on every API host and the table is still empty
+after that. Do not rewrite the dump's schema
 qualification globally, because the same rewrite also redirects the dump's
 `DROP TABLE`
 (upstream: .refs/ens_rainbow/src/main.rs:L33 @ ens_rainbow@bc44492)
@@ -2620,6 +2742,13 @@ Interpret's adapter handles the Basenames Base families with its ENSv1 protocol
 code, so the loader applies the same name model and dependency rules to them. Before
 interpreting, the adapter decodes the batch's logs without interpreting them
 and lists every name (by namehash) and resource the logs can touch.
+For a name a log carries, that is the name and each of its parents, hashed in
+one pass from the root, so listing costs time linear in the log's bytes. A
+dot-separated name of more than 128 labels is observed as no name
+([architecture](architecture.md#normalization-and-preimage-observation)), so it
+lists none of its nodes. An ENSv2 resolver's DNS-encoded name of more than 128
+labels lists only its own node, the one interpreting it can read. The name a
+declared NameWrapper's `NameWrapped` carries has no such limit.
 Interpret adds the names whose registrar expiry plus the 90-day grace period
 falls inside the batch's time span (the Basenames Base registrar has the same
 grace period (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc)
@@ -3178,7 +3307,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows. Project also reads `normalized_events_v2_key_probe_idx`, in the `slots` and `chains` steps of `project:families.resolution_paths.prepare` ([table ownership](#table-ownership)) |
 
-The other 35 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 38 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
@@ -3199,16 +3328,30 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
+`normalized_events_address_to_idx`, `normalized_events_address_registrant_idx`,
+`normalized_events_address_owner_idx`,
 `normalized_events_address_root_permission_idx`, `normalized_events_registry_roles_idx`,
 `normalized_events_project_node_history_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 
+Two indexes on `normalized_events` are advisory, outside both sets:
+`normalized_events_record_key_history_idx` and
+`normalized_events_record_emitter_key_history_idx`, which serve history pages filtered by one
+record key ([table ownership](#table-ownership)). `drop.sql` leaves them, so Interpret keeps
+them current through a walk. An operator builds them with
+[`ops/record-history-indexes/install.sql`](../ops/record-history-indexes/README.md) before the
+schema-migration that adopts them. The phase runner never builds them. The API starts and
+serves without them, whatever `BIGNAME_API_WALK_INDEX_SET_CHECK` says, with a WARN at startup
+naming each one that is not in place. The reads they serve return the same rows without them,
+more slowly.
+
 A new index on `normalized_events` joins one list in the change that adds it: the drop list
-when Interpret does not read it, the kept set when Interpret does. The phase runner carries
-both lists, with `install.sql`'s statements and reviewed definitions, in
+when Interpret does not read it, the kept set when Interpret does, or the advisory list when it
+is an API read path that the runner must not build and whose absence must not stop the API.
+The phase runner carries the lists, with the statements and reviewed definitions, in
 `crates/storage/src/walk_index_set/constants.rs`, and
 `crates/storage/src/walk_index_set/tests.rs` fails until they match the scripts.
-`crates/interpret/src/load/walk_index_set_tests.rs` fails until the two lists together are
+`crates/interpret/src/load/walk_index_set_tests.rs` fails until the three lists together are
 every index the baseline defines on the table, and proves that Interpret, over ENSv1,
 Basenames and ENSv2 histories through either loader, scans `normalized_events` sequentially
 nowhere without the drop list and stores the same rows. That test shows each statement keeps
@@ -3227,6 +3370,12 @@ one, so a runner or API of the previous release still finds the names it expects
 by another relation stops Project instead. The
 [walk index set README](../ops/walk-index-set/README.md#the-phase-runners-rebuild) describes the
 rebuild, its log lines and its failures.
+
+The API reads the same state at startup and refuses to start while any of these indexes is
+missing, not valid and ready, or under a name another relation holds, unless
+`BIGNAME_API_WALK_INDEX_SET_CHECK=warn` (`apps/api/src/startup_preflight.rs`,
+[the API's startup check](../ops/walk-index-set/README.md#the-apis-startup-check)). It reads
+an index with another definition as found, as the runner does.
 
 ## Projection publication
 
@@ -3401,6 +3550,14 @@ instead of sorting every matching event; the remaining sort keys only order the
 events of one block. Anchored reads start from their anchor's own indexes. The
 older ascending `(chain_id, block_number)` index read backward puts events
 without a block first, so it cannot serve this order.
+
+A page with a `record_key` filter that no name, registration, or address
+anchors, scoped by `resolver` or `contract_address` or not, reads the key's
+writes through their own partial indexes instead, and the record-version resets
+through the kind index, one arm of each per chain of the window, each in the
+page order ([table ownership](#table-ownership)). So a rare or unknown key costs
+one index probe for its writes, and a window over several chains merges at most
+one page of writes per chain.
 
 A continued page built by the ordinary history page builder also bounds the
 scan at the cursor event's block, read in the same transaction that validates

@@ -33,8 +33,19 @@ impl Relation<'_> {
     pub(super) fn parent_spelling(self, surface: &str) -> String {
         match self {
             Self::Served => String::new(),
-            Self::Stored(_) => format!(
-                "
+            Self::Stored(_) => stored_spelling(surface, "spelling"),
+        }
+    }
+}
+
+/// The join, aliased `alias`, that spells the surface `surface` from its label hashes: each label
+/// from its chain-observed preimage when that is decoded and normalized, else `[labelhash]`, as
+/// `name`, with the labels it leaves as `[labelhash]` as `unhealed`, from the same `known` test of
+/// each label. A null surface spells a null name and no unhealed label. The child listing spells a
+/// stored parent with it, and the address listing family a stored name with no raw bytes.
+pub(crate) fn stored_spelling(surface: &str, alias: &str) -> String {
+    format!(
+        "
             LEFT JOIN LATERAL (
                 SELECT string_agg(CASE WHEN label.known THEN label.decoded_label
                                        ELSE '[' || substring(label.labelhash FROM 3) || ']' END,
@@ -52,10 +63,8 @@ impl Relation<'_> {
                       ON preimage.labelhash = lower(path.labelhash)
                      AND preimage.source_kind <> 'ens_rainbow_import'
                 ) label
-            ) spelling ON TRUE"
-            ),
-        }
-    }
+            ) {alias} ON TRUE"
+    )
 }
 
 /// The child's raw name from its label preimage: null for no preimage and for a decoded label

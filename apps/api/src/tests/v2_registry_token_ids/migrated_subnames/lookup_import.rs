@@ -1,5 +1,6 @@
 //! Node-only ABI observations are Project-produced before the actual operator label import.
-//! Imported spelling must be visible immediately without rebuilding prepared lookup components.
+//! A request that spells the label stages the candidate the import promotes. Imported spelling
+//! must be visible immediately without rebuilding prepared lookup components.
 use super::*;
 
 #[tokio::test]
@@ -63,9 +64,6 @@ async fn lookup_precomputation_uses_current_imported_spelling_without_republicat
         "the producer must have no spelling to persist"
     );
     let placeholder = format!("[{}].{NAME}", hex::encode(keccak256(LABEL_TO_IMPORT)));
-    let before = lookup_publication::assert_name_prepared_parity(&database, &name).await?;
-    assert_eq!(before["name"], placeholder);
-    assert_eq!(before["primary_address"], IMPORT_OWNER);
     let snapshot = lookup_publication::components(&database).await?;
     let marker: Value =
         sqlx::query_scalar("SELECT to_jsonb(m) FROM project_family_marker m WHERE chain_id=$1")
@@ -78,11 +76,44 @@ async fn lookup_precomputation_uses_current_imported_spelling_without_republicat
     let reverse_before = path_lookup(&database, request.clone()).await?;
     assert_eq!(reverse_before["data"][0]["records"][0]["name"], placeholder);
 
-    sqlx::query("INSERT INTO ens_names(hash,name) VALUES ($1,$2)")
-        .bind(format!("{:#x}", keccak256(LABEL_TO_IMPORT)))
-        .bind(LABEL_TO_IMPORT)
-        .execute(&database.pool)
+    // The plain spelling proves the label: name detail and lookup show it, an address input of
+    // the same batch too, and the API stages it (docs/api-v1.md, "Name inputs").
+    let before = lookup_publication::assert_name_prepared_parity(&database, &name).await?;
+    assert_eq!(before["name"], name);
+    assert_eq!(before["primary_address"], IMPORT_OWNER);
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let batch = lookup_on(
+        &state,
+        json!({"profile":"detail","inputs":[
+            {"name":name},
+            {"address":IMPORT_OWNER,"relation":"any","page_size":1}
+        ]}),
+    )
+    .await?;
+    assert_eq!(batch["data"][0]["record"]["name"], name, "{batch:#}");
+    assert_eq!(batch["data"][1]["records"][0]["name"], name, "{batch:#}");
+    assert_eq!(batch["meta"]["as_of"], reverse_before["meta"]["as_of"]);
+    state.label_staging.settled().await;
+    let staged: Vec<(String, String)> = sqlx::query_as("SELECT hash, name FROM ens_names")
+        .fetch_all(&database.pool)
         .await?;
+    assert_eq!(
+        staged,
+        [(
+            format!("{:#x}", keccak256(LABEL_TO_IMPORT)),
+            LABEL_TO_IMPORT.to_owned()
+        )]
+    );
+    // A staged candidate is not a preimage: it changes no prepared or served data.
+    assert_eq!(lookup_publication::components(&database).await?, snapshot);
+    assert_eq!(
+        path_lookup(&database, request.clone()).await?["data"][0]["records"][0]["name"],
+        placeholder
+    );
+
     let imported =
         bigname_storage::import_label_preimages_from_ens_names_table(&database.pool, None, None)
             .await?;
@@ -116,4 +147,20 @@ async fn lookup_precomputation_uses_current_imported_spelling_without_republicat
     assert_eq!(repeated.retained_row_count, 0);
     assert_eq!(lookup_publication::components(&database).await?, snapshot);
     database.cleanup().await
+}
+
+async fn lookup_on(state: &AppState, body: Value) -> Result<Value> {
+    let response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body)?))?,
+        )
+        .await?;
+    let status = response.status();
+    let payload = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "lookup: {payload:#}");
+    Ok(payload)
 }

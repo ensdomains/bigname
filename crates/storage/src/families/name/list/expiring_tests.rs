@@ -12,7 +12,7 @@ use super::*;
 use crate::families::id_index_plan_tests::{PLAN_MODES, with_database};
 
 const CHAIN: &str = "ethereum-sepolia";
-const ROWS: i64 = 3_000;
+pub(super) const ROWS: i64 = 3_000;
 const TIE: i64 = 1_850_000_000;
 const EXPIRY_INDEX: &str = "project_name_summary_expiry_idx";
 const AUTHORITY_INDEX: &str = "project_name_summary_authority_expiry_idx";
@@ -31,11 +31,23 @@ const AUTHORITY_INDEX: &str = "project_name_summary_authority_expiry_idx";
 /// Two more, ROWS + 8 and ROWS + 9, store no raw bytes and also share [`TIE`]: `tlknown.eth`,
 /// whose labels all have usable preimages, and a label with no preimage one label below
 /// `p.eth`. Each is listed under the name built from its label hashes.
+///
+/// Five more share [`TIE`]:
+/// - `k1`, `k2` and `k3` one label below `few.eth` (ROWS + 10 to ROWS + 12). `k3` stores its
+///   label hashes after the first in uppercase hex.
+/// - A shadow surface with no bytes one label below `few.eth` (ROWS + 13).
+/// - A surface with no bytes one label below `zz.eth` (ROWS + 15). Its label `zz` has no
+///   preimage, so it is served as `[dd…].[<labelhash of zz>].eth`.
+///
+/// Every surface's label hashes are its path, label by label ([`fixture_labelhash`]).
 pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
     raw_sql(include_str!("../../../../schema/baseline/07_labels.sql"))
         .execute(&mut *connection)
         .await?;
     let opaque = format!("[{}].eth", "ab".repeat(32));
+    let [eth, p, tlknown, few, zz, k4] =
+        ["eth", "p", "tlknown", "few", "zz", "k4"].map(fixture_labelhash);
+    let dd = format!("0x{}", "d".repeat(64));
     raw_sql(&format!(
         "INSERT INTO chain_lineage
              (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
@@ -56,7 +68,10 @@ pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()>
                  'deep.kid.{opaque}',
                  (SELECT string_agg(md5(i::text), '.') FROM generate_series(1, 200) i)
                      || '.eth'])
-             WITH ORDINALITY AS special(raw_name, position);
+             WITH ORDINALITY AS special(raw_name, position)
+         UNION ALL
+         VALUES ({ROWS} + 10, 'k1.few.eth', 1), ({ROWS} + 11, 'k2.few.eth', 1),
+                ({ROWS} + 12, 'k3.few.eth', 1);
          INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
              dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
              deactivation_reason, deactivated_at, chain_id, block_hash, block_number,
@@ -72,19 +87,29 @@ pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()>
          FROM fixture_name WHERE raw_name IS NOT NULL;
          INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
              normalized_under_version, source_kind, source_priority)
-         SELECT '0x' || repeat(digit, 64), convert_to(label, 'UTF8'), label, 'v1', true,
-                'fixture', 0
-         FROM (VALUES ('1', 'eth'), ('2', 'p'), ('3', 'tlknown')) known(digit, label);
-         INSERT INTO fixture_name VALUES ({ROWS} + 8, NULL, 1), ({ROWS} + 9, NULL, 1);
+         SELECT labelhash, convert_to(label, 'UTF8'), label, 'v1', true, 'fixture', 0
+         FROM (VALUES ('{eth}', 'eth'), ('{p}', 'p'), ('{tlknown}', 'tlknown'))
+             known(labelhash, label);
+         INSERT INTO fixture_name VALUES ({ROWS} + 8, NULL, 1), ({ROWS} + 9, NULL, 1),
+             ({ROWS} + 13, NULL, 1), ({ROWS} + 15, NULL, 1);
          INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
              normalizer_version, visibility_state, chain_id, block_hash, block_number,
              canonicality_state)
          SELECT 'ens:0x' || lpad(to_hex(n), 64, '0'), 'ens', '0x' || lpad(to_hex(n), 64, '0'),
                 path, 'v1', 'active', '{CHAIN}', 'block-1', 1, 'canonical'
          FROM (VALUES
-             ({ROWS} + 8, ARRAY['0x' || repeat('3', 64), '0x' || repeat('1', 64)]),
-             ({ROWS} + 9, ARRAY['0x' || repeat('c', 64), '0x' || repeat('2', 64),
-                                '0x' || repeat('1', 64)])) textless(n, path);
+             ({ROWS} + 8, ARRAY['{tlknown}', '{eth}']),
+             ({ROWS} + 9, ARRAY['0x' || repeat('c', 64), '{p}', '{eth}']),
+             ({ROWS} + 15, ARRAY['{dd}', '{zz}', '{eth}'])) textless(n, path);
+         INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
+             deactivation_reason, deactivated_at, chain_id, block_hash, block_number,
+             canonicality_state, preimage_event_identity)
+         SELECT 'ens:0x' || lpad(to_hex(n), 64, '0'), 'ens', '', '{{}}', '\\x00',
+                '0x' || lpad(to_hex(n), 64, '0'), ARRAY['{k4}', '{few}', '{eth}'], 'v1',
+                'shadow', 'byte_shadow', now(), '{CHAIN}', 'block-1', 1, 'canonical',
+                'fixture-preimage'
+         FROM (VALUES ({ROWS} + 13)) byte_shadow(n);
          INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
              zero_owner, expires_at, expiry_listable, public_authority, search_supported,
              resolver_listing_eligible, resolver_support_exempt, namehash)
@@ -98,12 +123,55 @@ pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()>
                 (ARRAY['ens_v0', 'ens_v1', 'ens_v2', NULL])[n % 4 + 1], FALSE, FALSE, FALSE,
                 '0x' || lpad(to_hex(n), 64, '0')
          FROM fixture_name;
-         ANALYZE name_surfaces; ANALYZE project_name_summary; ANALYZE chain_lineage;"
+         ANALYZE project_name_summary; ANALYZE chain_lineage;"
     ))
     .execute(&mut *connection)
     .await
     .context("failed to install the expiring selection fixture")?;
+    let named: Vec<(String, String)> =
+        sqlx::query_as("SELECT logical_name_id, raw_name FROM name_surfaces WHERE raw_name <> ''")
+            .fetch_all(&mut *connection)
+            .await?;
+    let (ids, paths): (Vec<String>, Vec<String>) = named
+        .into_iter()
+        .map(|(id, name)| {
+            let path = name.split('.').map(fixture_labelhash).collect::<Vec<_>>();
+            (id, path.join(","))
+        })
+        .unzip();
+    sqlx::query(
+        "UPDATE name_surfaces surface
+         SET raw_labels = string_to_array(surface.raw_name, '.'),
+             labelhashes = string_to_array(stored.path, ',')
+         FROM unnest($1::text[], $2::text[]) AS stored(id, path)
+         WHERE surface.logical_name_id = stored.id",
+    )
+    .bind(ids)
+    .bind(paths)
+    .execute(&mut *connection)
+    .await?;
+    raw_sql(
+        "UPDATE name_surfaces
+         SET labelhashes = labelhashes[1:1] || ARRAY(
+             SELECT '0x' || upper(substr(stored, 3))
+             FROM unnest(labelhashes[2:]) WITH ORDINALITY AS path(stored, position)
+             ORDER BY position)
+         WHERE raw_name = 'k3.few.eth';
+         ANALYZE name_surfaces;",
+    )
+    .execute(&mut *connection)
+    .await
+    .context("failed to store the fixture's label hash paths")?;
     Ok(())
+}
+
+/// The labelhash a label of a fixture name stands for, as Interpret stores it: `0x` and the
+/// lowercase hex of keccak256 of the label, or of the hash a bracketed label spells.
+pub(super) fn fixture_labelhash(label: &str) -> String {
+    format!(
+        "0x{}",
+        alloy_primitives::hex::encode(rendered::label_hash(label))
+    )
 }
 
 /// What the selection must return, read without its indexes or keyset: every readable,
@@ -168,9 +236,9 @@ fn prepared(name: &str, selection: &ExpiringSelection<'_>, limit: u64) -> Result
         }
     }
     if let Some(parent) = selection.parent {
-        let (one_below, deeper) = crate::name_current::parent_like_patterns(parent);
-        types.extend(["text", "text"]);
-        values.extend([literal(&one_below), literal(&deeper)]);
+        let path = super::measure::path_literal(parent);
+        types.extend(["text[]", "text[]"]);
+        values.extend([path.clone(), path]);
     }
     for bound in [selection.expires_after, selection.expires_before]
         .into_iter()
@@ -334,6 +402,8 @@ async fn expiring_selection_reads_the_selector_indexes_in_the_public_order() -> 
                     &[EXPIRY_INDEX, AUTHORITY_INDEX][..],
                     15,
                 ),
+                // With sorts off, these rows show the expiry path stays available to a parent.
+                // Which path a parent takes under its own statistics is in parent_tests.rs.
                 ("parent", None, Some("p.eth"), &[EXPIRY_INDEX][..], 15),
                 // The parent is a literal: `_` and `%` in it match only themselves.
                 (

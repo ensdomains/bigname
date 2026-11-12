@@ -1,4 +1,6 @@
 mod address_evidence;
+#[cfg(test)]
+mod address_evidence_plan_tests;
 pub use address_evidence::{HistoricalHistoryRelation, historical_history_relations};
 mod address_matches;
 mod address_walk;
@@ -41,6 +43,7 @@ mod query_plan;
 #[cfg(any(test, feature = "test-support"))]
 pub use query_plan::{explain_contract_event_count_for_test, explain_event_history_count_for_test};
 mod read_filter;
+mod record_key_source;
 mod redo;
 mod registration_identity;
 mod registry_handoffs;

@@ -1,4 +1,5 @@
 mod decode;
+mod listing;
 mod page;
 mod query;
 mod read;
@@ -9,6 +10,10 @@ mod resolves_to_page;
 mod source;
 mod types;
 mod walk;
+pub(crate) use listing::load_stored_current_anchors;
+pub use listing::{load_address_former_owner_page, load_address_names_listing_page};
+#[cfg(any(test, feature = "test-support"))]
+pub use listing::{load_composed_address_anchors, load_stored_address_anchors};
 pub use page::{
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations,
@@ -17,7 +22,10 @@ pub(crate) use page::{
     load_address_names_filtered_ids_from, load_address_names_page_entries_from,
     load_address_names_page_from,
 };
-pub(crate) use query::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
+pub(crate) use query::{
+    push_created_at_timestamp_expr, push_expires_at_timestamp_expr, push_migration_proof,
+    push_registered_at_timestamp_expr,
+};
 pub(crate) use read::load_address_names_current_at_bound;
 pub(crate) use read::push_address_names_current_query;
 pub use read::{
