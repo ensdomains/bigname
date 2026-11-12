@@ -4905,9 +4905,11 @@ For a registrar lease first identified by a later readable observation, registra
   events and the contract emitted one. It finds the next such bucket by
   seeking the address's next bucket and the contract's next event in turn, so
   the buckets it reads grow with whichever of the two has fewer, not with the
-  address's history. The walk stops only at a full page or at the end of those
-  buckets, and it returns no continuation before either. Every other anchor
-  combination reads as before.
+  address's history. A contract with many events in another namespace and
+  none in the requested one costs at most one bucket probe per bucket it
+  emitted in, not one per bucket of the address. The walk stops only at a full
+  page or at the end of those buckets, and it returns no continuation before
+  either. Every other anchor combination reads as before.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can

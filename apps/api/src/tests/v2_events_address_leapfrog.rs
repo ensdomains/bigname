@@ -338,8 +338,9 @@ async fn events_address_contract_ties_unchanged() -> Result<()> {
 
 /// An ENSv1 name of the address points to a resolver that a basenames manifest also admits on
 /// the same chain, and that resolver wrote a basenames record for the name's node. With that
-/// resolver as `contract_address` and `namespace=ens`, both sides of the walk keep to ens rows:
-/// the page and its total hold the name's ens events and not the basenames write.
+/// resolver as `contract_address` and `namespace=ens`, the page and its total hold the name's ens
+/// events and not the basenames write, and the walk probes no more buckets than the resolver
+/// emitted in.
 #[tokio::test]
 async fn events_address_contract_keeps_to_the_requested_namespace() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -378,8 +379,10 @@ async fn events_address_contract_keeps_to_the_requested_namespace() -> Result<()
     for order in ["desc", "asc"] {
         let query =
             format!("address={ADDRESS}&contract_address={RESOLVER}&namespace=ens&order={order}");
-        let (rows, _) = walk_three_ways(&database, &query, 200).await?;
+        let (rows, pages) = walk_three_ways(&database, &query, 200).await?;
         assert_eq!(rows.len(), seeded.len(), "{query}: {rows:?}");
+        // The resolver emitted in buckets 0 and 2 only.
+        assert!(pages[0][0] <= 2, "{query}: buckets probed: {pages:?}");
         assert!(
             !rows.contains(&hkw_id("leapfrog-basenames-write")),
             "{query}: {rows:?}"
@@ -521,6 +524,8 @@ async fn events_address_unrelated_contract_leapfrogs_the_address_buckets() -> Re
 
 /// A cursor without a position names its row only by identity. On a contract that emitted no
 /// event no row can be it, so the read refuses the cursor before reading the address's history.
+/// The route cannot send such a cursor: `history_keyset::resolve_on` gives every legacy cursor
+/// its row's position first. So this test calls the storage read directly.
 #[tokio::test]
 async fn events_address_identity_cursor_on_a_silent_contract_reads_no_history() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
