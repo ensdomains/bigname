@@ -10,10 +10,11 @@
 //!
 //! The fixture is small, so sequential scans are off to stand in for a large `normalized_events`.
 //! The plan test checks every cell in custom and generic plans, on the lineage as built and again
-//! with 200,000 more lineage rows. On the larger lineage it also runs each cell with
-//! `EXPLAIN (ANALYZE, BUFFERS)` and requires no temp blocks. It then plans each cell with nested
-//! loops disabled. That leaves a plain lineage join only a hash or merge over the whole table,
-//! the plan that mainnet's estimates chose, while the keyed lookup still has its nested loop.
+//! with 200,000 more lineage rows. On the larger lineage the planner already prefers to hash or
+//! merge the whole lineage table for a plain lineage join, and each cell also runs under
+//! `EXPLAIN (ANALYZE, BUFFERS)` with no temp blocks allowed. It then plans each cell with nested
+//! loops disabled. That leaves a plain lineage join only a hash or merge, while the keyed lookup
+//! still has its nested loop.
 //!
 //! Two other texts sit beside this file: the statement before this change, and this change with
 //! the plain lineage join and the previous Basenames family predicate. Each must still fail the
@@ -407,7 +408,8 @@ async fn check_default_plans(
                 outline(&previous),
                 outline(&plain)
             );
-            let mut cell_failures = event_read_failures(&now);
+            let folded = cell.ids.is_empty() && mode == "force_custom_plan";
+            let mut cell_failures = event_read_failures(&now, folded);
             cell_failures.extend(lineage_failures(&now));
             cell_failures.extend(probes_failures(&now));
             if basenames_probes(&now).is_empty() {
@@ -423,7 +425,7 @@ async fn check_default_plans(
             }
             if lineage == Lineage::Bulked {
                 let analyzed = explain(connection, mode, "map_now", &literals, true).await?;
-                cell_failures.extend(event_read_failures(&analyzed));
+                cell_failures.extend(event_read_failures(&analyzed, folded));
                 cell_failures.extend(lineage_failures(&analyzed));
                 cell_failures.extend(temp_failures(&analyzed));
                 let executed = basenames_probes(&analyzed)
@@ -436,10 +438,13 @@ async fn check_default_plans(
                          control and lease arms"
                     ));
                 }
-                println!(
-                    "{label}: the plain lineage join reads the lineage whole: {}",
-                    lineage_read_whole(&plain)
-                );
+                if !lineage_read_whole(&plain) {
+                    cell_failures.push(
+                        "the plain lineage join probes the bulked lineage, so this cell proves \
+                         nothing about the hash"
+                            .to_owned(),
+                    );
+                }
             }
             failures.extend(prefixed(&label, cell_failures, &now));
         }
@@ -614,7 +619,13 @@ fn index_condition(node: &Value) -> &str {
 
 /// Every `normalized_events` read is an index seek whose condition names a statement key, and
 /// none goes through an index keyed by the address of an event's new holder.
-fn event_read_failures(plan: &Value) -> Vec<String> {
+///
+/// A request for one lease's controls passes no resource ids. A custom plan folds the anchors'
+/// `resource_id = ANY('{}')` arm to false, and false implies every partial index predicate, so
+/// the planner may give that arm a bitmap over any small partial index, with no condition. That
+/// arm is outside this change, so `folded_empty_array` admits a bitmap index read with no
+/// condition and nothing else.
+fn event_read_failures(plan: &Value, folded_empty_array: bool) -> Vec<String> {
     let mut failures = Vec::new();
     let mut indexes = Vec::new();
     for (node, _) in nodes(plan) {
@@ -637,6 +648,9 @@ fn event_read_failures(plan: &Value) -> Vec<String> {
     for node in indexes {
         let index = node["Index Name"].as_str().unwrap_or("?");
         let condition = index_condition(node);
+        if folded_empty_array && condition.is_empty() && node_type(node) == "Bitmap Index Scan" {
+            continue;
+        }
         if index.starts_with("normalized_events_address_")
             || !STATEMENT_KEYS.iter().any(|key| condition.contains(key))
         {
