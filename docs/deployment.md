@@ -6265,7 +6265,7 @@ A release that adds an index to the drop list is deployed in this order:
 
 The build that stores each parent's listed children (TYR-455) adds the child listing family,
 `project_child_listing`, and its counts, `project_child_listing_count`
-(see [owned key families](projections.md#owned-key-families)). Project derives a listed child's
+(see [child listing](projections.md#child-listing)). Project derives a listed child's
 row from the children relation at every publication, journals it with the other families, and
 keeps each parent's count and each (parent, label registry) count from the same diff. The
 composition pass derives every parent's rows in a children stream after the names stream.
@@ -6288,9 +6288,14 @@ composition pass derives every parent's rows in a children stream after the name
   and writes only those it spells further, journalling nothing and moving no count. Interpret's
   redo never removes a label from `label_preimages`, so a row the undone block healed keeps its
   healed name, as a rebuild at that block spells it.
-- A label first learned on another chain reaches the stored name at this chain's next block.
-  An imported label reaches it only when its row is derived again for another reason
-  (TYR-373/374). Served names heal at read time.
+- A label first learned on another chain reaches the stored name at this chain's next block
+  once the watermark below has caught up to that chain's finalized block (its safe block when
+  finalized is unset). Until then each block reads about 1,000 of that chain's observations
+  above the watermark, rounded up to whole blocks, so a label can wait about (the observations
+  above the watermark / 1,000) blocks of this chain. A label only the rainbow-table import
+  spells keeps its placeholder in the stored name until a chain observes its preimage: the
+  stored spelling reads chain-observed preimages only, so deriving the row again or a rebuild
+  does not spell it (TYR-339 moves it to the imported form). Served names heal at read time.
 - Each chain keeps, per other chain, the highest block whose preimage observations its family step
   has read (`project_child_preimage_watermark`), journalled with its block. The watermark never
   passes the other chain's finalized block (its safe block when finalized is unset), so a reorg of
@@ -6315,6 +6320,9 @@ composition pass derives every parent's rows in a children stream after the name
   row in one statement and journals every changed row. Above 100,000 rows the runner logs a
   `WARN` naming the chain, block, parent and row count, so a large undo journal can be traced to
   its block.
+- The subnames page, the registry labels page and the child counts read the stored rows.
+  Without the listing and count tables, as without their grant, the API still starts and only
+  those routes fail (next item).
 - The readers need `SELECT` on the listing and count tables. Before restarting an existing API
   role, apply the grant below on the primary and let it replay on any serving standby. Fresh role
   setup above already includes it. An API role without it still starts, and logs one `WARN` at
@@ -6328,8 +6336,24 @@ composition pass derives every parent's rows in a children stream after the name
   GRANT SELECT ON bigname_phase.project_child_listing, bigname_phase.project_child_listing_count
       TO bigname_api;
   ```
-- The subname and label lists and their totals read the stored rows and counts instead of
-  composing children at read.
+- Wire changes:
+  - The `name` sort, and every tie, orders the stored name byte by byte (C collation), where
+    the database collation ordered it before. Names whose byte order differs from that
+    collation's, such as ones with hyphens or non-ASCII characters, can change places.
+  - `order=desc` is the exact reverse of `order=asc`. Children with equal timestamps used to
+    run by name ascending in a descending page, and children with equal names by child
+    identity ascending. Both now run descending.
+  - `q` matches the stored name. It differs from the served name for a label that the
+    rainbow-table import alone spells, until a chain observes its preimage (TYR-339), and
+    for one another chain observed while this chain's watermark for that chain lags behind
+    its finalized block (its safe block when finalized is unset), for about (the observations
+    above the watermark / 1,000) blocks of this chain. Such a child serves healed but sorts
+    and matches by its placeholder.
+  - A name longer than 2,000 bytes sorts by its first 500 characters, then child identity.
+  - A cursor issued before the change is still accepted. It resumes at its last row's position
+    in the new order, so rows the old order placed differently can be skipped or repeated, and
+    one whose last row was such a long name or an import-healed name resumes from a different
+    position. A client walking a list across the release restarts from the first page.
 - The children relation moves from the reader sources to the composition sources, and the
   family step is in `crates/project/src`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The
@@ -6397,8 +6421,9 @@ families. The composition pass derives every row in the names stream.
   observation derives again, by the `unhealed_labelhashes` GIN index, only the rows that still
   spell one of its labels as `[labelhash]`, from this chain or, through the same watermark
   (`project_child_preimage_watermark`), from another chain. An undo keeps a healed name, as a
-  rebuild at the restored block spells it. An imported label reaches the stored name only when
-  its row is derived again for another reason (TYR-373/374).
+  rebuild at the restored block spells it. A label only the rainbow-table import spells keeps
+  its placeholder in the stored name until a chain observes its preimage, because the stored
+  spelling reads chain-observed preimages only (TYR-339).
 - The address-names route reads the stored listing for the ownership relations and
   `relation=former_owner`, and the address events read takes its current anchors from it. A page
   reads about as many names as it returns. The total counts stored rows, so a name a reorg has

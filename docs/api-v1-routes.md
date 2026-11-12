@@ -1922,7 +1922,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `include_expired=true|false`, `include=counts`, `cursor`, `page_size`, and
   optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
-  `q` applies prefix matching to the served `name` under exactly the rules
+  `q` applies prefix matching to the child's name under exactly the rules
   documented for `q` on `GET /v1/addresses/{address}/names`: the whole value is
   normalized as an ENSIP-15 name prefix (`q=AL` matches `alpha.parent.eth`),
   one trailing dot marks a label boundary (`q=alpha.` matches
@@ -1931,7 +1931,23 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   prefix (the default) or substring matching exactly as on
   `GET /v1/addresses/{address}/names`, so `q=o&match=contains` matches
   `carol.parent.eth` and `two.parent.eth`. The comparison is byte-wise against
-  the served name, so a [non-name form](glossary.md#non-name-form) row matches
+  the child's stored name. The stored name spells each label from a preimage a
+  chain observed and leaves any other label as its `[labelhash]` placeholder,
+  while the served `name` also uses the proof-checked rainbow import. A child
+  whose stored name keeps a placeholder its served name spells matches, and
+  sorts, by the placeholder. A label only the rainbow import spells keeps its
+  placeholder in the stored name until a chain observes its preimage: deriving
+  the row again for another reason, or a rebuild, does not spell it. TYR-339
+  moves stored names and sort keys to the imported form. A label first observed
+  on another chain reaches the stored name at this chain's next block once this
+  chain's watermark for that chain, the highest of its blocks this chain has
+  read observations from, has reached that chain's finalized block (its safe
+  block when finalized is unset). Until then each block of this chain reads
+  about 1,000 observations above the watermark, in whole blocks of that chain.
+  So after that chain's finalized block moves past more observations above the
+  watermark, or after an Interpret redo of that chain alone, a label can wait
+  about (the observations above the watermark / 1,000) blocks of this chain.
+  A [non-name form](glossary.md#non-name-form) row matches
   only a prefix, or with `match=contains` a substring, of its placeholder or
   escaped text.
   `sort` defaults to `name` and `order` to `asc`. `expires_at` and
@@ -1939,9 +1955,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   same way `GET /v1/addresses/{address}/names` reads them; a child with no
   current name row or no such timestamp is the smallest value: it sorts before
   every dated row ascending and after every dated row descending. Ties, and the
-  whole `name` sort, break
-  by served name and then by child identity. Any other `sort` or `order` value
-  returns `400 invalid_input`.
+  whole `name` sort, break by the stored name, compared byte by byte (the C
+  collation), and then by child identity. A stored name longer than 2,000 bytes
+  sorts by its first 500 characters. `order=desc` is the exact reverse of
+  `order=asc`, ties included: equal timestamps run by stored name and child
+  identity descending too. A child whose stored name keeps a placeholder the
+  served name spells serves its healed name and sorts by its placeholder. Any other `sort` or
+  `order` value returns `400 invalid_input`.
   `include_expired` defaults to `true`: the last ended registration remains
   listable until a later registration supersedes it, subject to the route's
   other eligibility rules. `include_expired=false` omits children whose
@@ -2085,11 +2105,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   and order. Cursors are bound to namespace, parent, `q`, `match=contains`
   when it narrows a `q`, `include_expired`, sort, and order; a cursor replayed under different controls returns
   `400 invalid_input`. Legacy publication and expiry evaluation fields are ignored.
-  `page.total_count` is the number of children the page's `q` and
-  `include_expired` controls admit, computed with the same child-name and
-  expiry predicates as its list, before the cursor, in the same statement as
-  the page. It is exact up to 10,000 children and `null` above: the count stops
-  after 10,001. The rows and cursors do not depend on it.
+  The cursor holds the last row's sort value, stored name key and child identity,
+  and the next page continues strictly after that position.
+  `page.total_count` is the parent's direct readable subname count, read from
+  the count Project stores for the parent, when the page admits every child,
+  that is when `q` is absent and `include_expired` is not `false`. A narrowed
+  page reports the filtered total, counted with the same child-name and
+  expiry predicates as its list, before the cursor; that count stops after
+  10,001. Either total is exact up to 10,000 children and `null` above. The
+  rows and cursors do not depend on either total.
 - Snapshot behavior: the parent, child rows and filtered count are read on one
   database snapshot of the captured publication, disclosed in `meta.as_of`. The
   cursor holds only its sort position and query filters; expiry uses each page's
@@ -3727,7 +3751,12 @@ introduces it rebuilds Project from full history before serving the option; see
   `400 invalid_input`, with or without `q`. A valid `match` without a nonempty
   `q` selects nothing and is ignored. The match mode applies before grouping,
   sorting, pagination and `page.total_count`.
-  `sort` defaults to `name`, ordered by the row's served name. `expires_at`,
+  `sort` defaults to `name`, ordered by the row's stored name, the same stored
+  name `q` compares with. A name with no raw bytes is stored with each label
+  spelled from a chain-observed preimage, so a label only the rainbow import
+  spells keeps its `[labelhash]` placeholder there until a chain observes its
+  preimage (TYR-339): such a row serves its healed name but sorts by the
+  placeholder. `expires_at`,
   `registered_at` and `created_at` order by the row's name timestamps as served
   on the row; `created_at` is the name's first observation, the block time of
   the earliest event attributed to the name, including an earlier registrar
@@ -3990,8 +4019,8 @@ introduces it rebuilds Project from full history before serving the option; see
   a later permissions request can alter grants. The 1,000-row cap bounds returned grant
   rows, not bytes or total database work. The name page maximum remains 200.
   `include=counts` adds `subname_count`, the row's
-  direct readable subname count (one bounded per-parent aggregate over the
-  page's names), and the same `record_count`; the two expansions combine as
+  direct readable subname count (read by key from the child counts Project
+  stores), and the same `record_count`; the two expansions combine as
   `include=counts,role_summary`. No `event_count` is offered, for the reason
   given on `GET /v1/names/{name}`. Any other `include` value returns
   `400 invalid_input`.
@@ -5502,10 +5531,13 @@ For a registrar lease first identified by a later readable observation, registra
   linked from a name — holds no servable labels here and returns an empty
   page: the child collection is projected under a parent name, and the root
   name has no child projection.
-- Pagination behavior: standard collection pagination by `display_name`
-  ascending. `page.total_count` is the exact number of labels the owner filter
-  admits, counted before paging; unfiltered, it is the same number as
-  `counts.labels` on the registry route whenever that count is not `null`. So `exclude_owner=<address>&page_size=1`
+- Pagination behavior: standard collection pagination by stored name
+  ascending, compared byte by byte, then by child identity, as the `name` sort
+  of `GET /v1/names/{name}/subnames` orders them. `page.total_count` is the
+  exact number of labels the owner filter admits, counted before paging;
+  unfiltered, it is read from the label count Project stores for the
+  registry's name, and equals `counts.labels` on the registry route whenever
+  that count is not `null`. So `exclude_owner=<address>&page_size=1`
   answers whether the registry holds any label that address does not own from
   `total_count` alone. The cursor binds the chain, the registry and the owner
   filter.
