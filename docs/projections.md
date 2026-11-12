@@ -2768,6 +2768,16 @@ The table is journalled and undone like every family. Schema-migration
 empty, and the projection content-hash rotation that ships with it rebuilds the
 families. No read serves it yet.
 
+A block counts a row in the row's own block range only, as the row stands when
+that block is applied, so the stored counts rely on Interpret never changing a
+stored row's `consumer_visibility` in place: its upsert's conflict clause
+updates only `canonicality_state` and `observed_at`, and refuses a row whose
+visibility differs
+(`crates/interpret/src/write/normalized.rs`), and a redo that re-derives a block
+forces Project's own undo and replay of it. A writer that updates visibility in
+place would have to touch the counter too
+(`crates/project/tests/families_event_counts_visibility_guard.rs`).
+
 ### Publication and resumption
 
 ProjectPhase invokes the family runner directly. One run applies or undoes at
