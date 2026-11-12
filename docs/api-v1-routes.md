@@ -5452,26 +5452,30 @@ For a registrar lease first identified by a later readable observation, registra
   [`GET /v1/permissions`](#get-v1permissions)) does not list the registry.
   `GET /v1/permissions?address=` returns those per-name grants. Resolver roles
   are not registry roles and are not listed either.
-- Only ENSv2 EAC role grants are listed, as stored. Two answers differ from
+- Only ENSv2 EAC role grants are listed, as stored. Three answers differ from
   `GET /v1/permissions?registry=`:
-  - A `WrapperRegistry` (a
-    [migration registry](glossary.md#migration-registry-wrapperregistry))
-    gives its parent registry's root roles to the parent name's current owner
-    and to that owner's operators on the parent registry, as described for
-    `GET /v1/permissions` above. Those accounts' rows on
-    `GET /v1/permissions?registry=` are derived, not EAC grants, so this route
-    does not list the `WrapperRegistry` for them. A root grant such an account
-    holds on the `WrapperRegistry` itself, which that read replaces with the
-    derived row, is listed here with its own powers. The parent registry
-    contract, which holds the `WrapperRegistry`'s root grant, lists it.
+  - `powers` are the roles granted to the holder on the registry's root
+    resource. They are not the holder's effective authority on the registry.
+  - For a registry that wraps a name, a `WrapperRegistry` (a
+    [migration registry](glossary.md#migration-registry-wrapperregistry)),
+    `GET /v1/permissions?registry=` may show different powers for the same
+    holder, derived from the parent name, and may show holders this route does
+    not list. That registry gives its parent registry's root roles to the
+    parent name's current owner and to that owner's operators on the parent
+    registry, as described for `GET /v1/permissions` above. Those rows are
+    derived, not EAC grants, so this route does not list the `WrapperRegistry`
+    for those accounts. A root grant such an account holds on the
+    `WrapperRegistry` itself is listed here with its own powers, while that
+    read shows the derived row in its place. The parent registry contract,
+    which holds the `WrapperRegistry`'s root grant, lists it.
   - A grant on a registry contract that no longer holds its address at the
     current publication is still listed, while
     `GET /v1/permissions?registry=` answers an empty page for that address.
     Read [`GET /v1/registries/{chain_id}/{address}`](#get-v1registrieschain_idaddress)
     for the registry itself.
-- Rows sort by chain and then by lowercase registry address, as bytes. Chains
-  sort by bigname's chain key; the order is stable across pages. The route does
-  not count the holder's whole list, so `page.total_count` is always `null`.
+- Rows are ordered by chain and then by lowercase registry address, and the
+  order is stable across pages. The cursor is opaque. The route does not count
+  the holder's whole list, so `page.total_count` is always `null`.
 - The answer reflects the current publication of every chain the request
   spans, read on one database snapshot; a chain whose publication is not
   servable returns `409 stale`. Pagination binds the holder, the `chain_id`
