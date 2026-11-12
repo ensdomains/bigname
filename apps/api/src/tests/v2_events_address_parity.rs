@@ -322,8 +322,10 @@ async fn events_address_walk_equals_the_sql_page_for_the_history_fixture() -> Re
 async fn events_address_cursor_crosses_a_bucket_boundary() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let events = seed_names(&database, 1).await?;
-    publish_bounded_membership_at(&database, 255).await?;
-    publish_bounded_membership_at(&database, 256).await?;
+    // Project follows one readable block at a time, so every block up to 256 needs lineage.
+    for block in BLOCK + 1..=256 {
+        publish_bounded_membership_at(&database, block).await?;
+    }
     let logical = bigname_storage::logical_name_id_for_name("ens", "walk-0000.eth");
     let renewal = |identity: &str, block: i64| {
         address_fixture_event(
