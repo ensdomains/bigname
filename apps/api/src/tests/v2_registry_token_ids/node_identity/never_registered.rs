@@ -76,6 +76,12 @@ fn name_of(label: &[u8]) -> String {
     spelling(&[label, b"eth"])
 }
 
+/// A name below `eth` as the name, subnames and lookup routes serve it to a request that spells
+/// `eth` bracketed, which proves that label (docs/api-v1.md, "Name inputs").
+fn shown_of(labels: &[&[u8]]) -> String {
+    format!("{}.eth", spelling(labels))
+}
+
 /// No registration, control or authority field, on any record that carries the name's status.
 fn assert_no_registration(record: &Value) {
     assert_eq!(record["status"], "unregistered", "{record:#}");
@@ -143,7 +149,7 @@ async fn lookup_serves_a_never_registered_name_as_unregistered() -> Result<()> {
         assert_eq!(response.status(), StatusCode::OK);
         let lookup: Value = read_json(response).await?;
         let record = &lookup["data"][0]["record"];
-        assert_eq!(record["name"], name_of(b"plain"), "{profile}: {lookup:#}");
+        assert_eq!(record["name"], shown_of(&[b"plain"]), "{profile}: {lookup:#}");
         assert_no_registration(record);
     }
     database.cleanup().await
@@ -195,7 +201,7 @@ async fn a_never_registered_search_row_names_no_owner_or_authority() -> Result<(
 async fn the_children_of_a_never_registered_name_stay_listed() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed(&database).await?;
-    let child = spelling(&[b"child", b"parent", b"eth"]);
+    let child = shown_of(&[b"child", b"parent"]);
     let subnames = get(
         &database,
         &format!(
