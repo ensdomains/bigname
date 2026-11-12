@@ -392,6 +392,9 @@ async fn a_reorg_between_two_runs_of_a_pass_continues_or_restarts_it() -> Result
             fixture.marker().await?.1.as_deref() == Some(sibling(TARGET).as_str()),
             "{case}: on the new branch"
         );
+        // The listing oracles, on the publication the resumed pass left.
+        fixture.assert_child_listing(CHAIN).await?;
+        fixture.assert_address_listing(CHAIN).await?;
         let resumed = fixture.exact().await?;
         let off = FamilyOptions::new(CONTENT_HASH)
             .with_max_blocks_per_run(u64::MAX)
