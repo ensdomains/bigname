@@ -238,7 +238,7 @@ pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) {
         Err(_) => {
             // sqlx's return to the pool waits for the reply still due on this connection, with no
             // limit, which would hold the pool's one slot.
-            conn.close_on_drop();
+            // Red: the cancel connection is kept with its reply still due.
             tracing::warn!(pid, reason = "no reply from the server", "{CANCEL_FAILED}");
         }
     }
