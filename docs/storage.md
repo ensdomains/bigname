@@ -1201,7 +1201,8 @@ a new bound on that name's lifecycle evidence.
 The legacy full-selector reader remains in use for unpaged/diagnostic storage calls and for a
 `GET /v1/events` read that combines `address` with a `name`, `registration_id` or `resolver`
 anchor. A `GET /v1/events` read that `address` alone anchors uses this bounded reader, with its
-`contract_address`, `from_block` and `to_block` applied inside the walk.
+`namespace`, `contract_address`, `from_block` and `to_block` applied to every event inside the
+walk.
 The three indexes cover only activated rows in readable canonicality states, so an anchor read
 that drops either condition cannot use them and falls back to a broad scan, such as
 `normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the

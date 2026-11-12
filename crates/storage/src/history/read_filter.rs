@@ -70,6 +70,7 @@ impl EventHistoryReadFilter {
             .contract_address
             .as_ref()
             .map(|address| address.to_ascii_lowercase());
+        self.namespace = options.namespace.clone();
         self
     }
 

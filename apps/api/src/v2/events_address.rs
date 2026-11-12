@@ -61,6 +61,8 @@ pub(super) async fn get_address_events(
     options.from_block = params.from_block;
     options.to_block = params.to_block;
     options.contract_address = params.contract_address.clone();
+    // An attributed record write can come from a resolver admitted under another namespace.
+    options.namespace = Some(namespace.to_owned());
     let summary_mode = events_summary_mode(params, true);
 
     let storage_page = bigname_storage::load_address_history_page_for_relations_on(
