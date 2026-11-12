@@ -148,10 +148,13 @@ pub async fn load_registry_permission_registration_map(
         return Ok(BTreeMap::new());
     }
     let mut conn = db.into().acquire().await?;
+    // Plan each page for its own array. A cached prepared statement may switch to a generic
+    // plan after five executions, and that plan fits no particular page.
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(&registry_permission_registration_map_sql())
         .bind(resource_ids)
         .bind(registration_id)
         .bind(serde_json::to_value(publication_block_bounds)?)
+        .persistent(false)
         .fetch_all(&mut *conn)
         .await
         .context("failed to resolve published registry permission registrations")?;
@@ -167,6 +170,13 @@ pub async fn load_registry_permission_registration_map(
     Ok(mapping)
 }
 
+/// Every `normalized_events` read in this statement seeks a key the statement supplies, and
+/// every `chain_lineage` read is one primary-key probe per event row, whatever the planner
+/// estimates. `eligible` reads its row's lineage through a correlated lookup that ends in
+/// `LIMIT 1`, so it cannot be pulled up into a join the planner could hash. It is the text of
+/// `lineage_probe_at_block("JOIN", "lineage", "ne")` in `history/lineage.rs` on
+/// `hotfix/reconcile-2026-10`, copied here because this branch has no such helper. Call the
+/// helper once it does. `eligible` is not materialized, so every use below inherits the probe.
 fn registry_permission_registration_map_sql() -> String {
     // Select a batch of page resources, or controls of the explicitly requested lease. The
     // reverse lookup is only a candidate restriction; the latest-grant check below still
@@ -175,7 +185,7 @@ fn registry_permission_registration_map_sql() -> String {
     let same_grant = registry_permission_same_node("candidate", "grant_event");
     let node_candidates = registry_permission_node_candidates();
     let anchor_identity = registry_permission_token_identity("anchor");
-    let authority_candidates = registry_permission_authority_candidates(node_candidates);
+    let authority_candidates = registry_permission_authority_candidates();
     format!(
         r#"WITH eligible AS NOT MATERIALIZED (
             SELECT ne.*,
@@ -186,9 +196,14 @@ fn registry_permission_registration_map_sql() -> String {
                     ne.after_state ->> 'node', ne.after_state #>> '{{grant_source,node}}',
                     ne.after_state #>> '{{revocation_source,node}}')), ne.logical_name_id) AS node_key
             FROM bigname_phase.normalized_events ne
-            JOIN bigname_phase.chain_lineage lineage
-              ON lineage.chain_id = ne.chain_id AND lineage.block_hash = ne.block_hash
-             AND lineage.block_number = ne.block_number
+            JOIN LATERAL (
+                SELECT lineage.canonicality_state
+                FROM bigname_phase.chain_lineage lineage
+                WHERE lineage.chain_id = ne.chain_id
+                  AND lineage.block_hash = ne.block_hash
+                  AND lineage.block_number = ne.block_number
+                LIMIT 1
+            ) lineage ON TRUE
             WHERE ne.block_number <= ($3::jsonb ->> ne.chain_id)::bigint
               AND ne.consumer_visibility = 'activated'
               AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -222,6 +237,9 @@ fn registry_permission_registration_map_sql() -> String {
         SELECT DISTINCT control.resource_id, lease.resource_id AS registration_id
         FROM candidates candidate
         JOIN LATERAL (
+            WITH probes AS MATERIALIZED (
+{node_candidates}
+            )
             SELECT authority.resource_id, authority.after_state, authority.event_kind
             FROM ({authority_candidates}) authority
             WHERE {same_authority}
@@ -277,22 +295,24 @@ fn registry_permission_same_node(left: &str, right: &str) -> String {
     )
 }
 
-// Seed each probe from the requested resource's indexed history. ENS direct nodes use the
-// exact expression and literal predicate of normalized_events_v1_direct_node_probe_idx.
-// Legacy logical-name evidence uses the name-history index; its final identity check still
-// rejects conflicting direct nodes. Basenames remains admitted through its family branch.
+// Seed each probe from the requested resource's indexed history. Each direct node key is its own
+// equality on the exact expression and literal family predicate of
+// normalized_events_v1_direct_node_probe_idx (ENS) or
+// normalized_events_basenames_direct_node_probe_idx (Basenames), so each key is one index seek.
+// Legacy logical-name evidence uses the name-history index. Its final identity check still
+// rejects conflicting direct nodes.
 fn registry_permission_node_candidates() -> &'static str {
-    r"SELECT probe.* FROM eligible probe
+    r"SELECT probe.* FROM unnest(candidate.node_keys) AS wanted(node_key)
+       JOIN eligible probe ON probe.node_key = wanted.node_key
        WHERE NOT candidate.basenames
          AND probe.chain_id = candidate.chain_id AND probe.namespace = candidate.namespace
          AND probe.source_family LIKE 'ens\_v1\_%'
-         AND probe.node_key = ANY(candidate.node_keys)
        UNION
-       SELECT probe.* FROM eligible probe
+       SELECT probe.* FROM unnest(candidate.node_keys) AS wanted(node_key)
+       JOIN eligible probe ON probe.node_key = wanted.node_key
        WHERE candidate.basenames
          AND probe.chain_id = candidate.chain_id AND probe.namespace = candidate.namespace
-         AND probe.source_family LIKE 'basenames\_%'
-         AND probe.node_key = ANY(candidate.node_keys)
+         AND probe.source_family LIKE 'basenames\_base\_%'
        UNION
        SELECT probe.* FROM eligible probe
        WHERE probe.chain_id = candidate.chain_id AND probe.namespace = candidate.namespace
@@ -336,7 +356,9 @@ fn registry_permission_token_identity(epoch: &str) -> String {
     )
 }
 
-fn registry_permission_authority_candidates(node_candidates: &str) -> String {
+// Both branches read the candidate's `probes`, evaluated once per candidate, so the token branch
+// filters that set and never looks up normalized_events by event kind alone.
+fn registry_permission_authority_candidates() -> String {
     let columns = "resource_id,after_state,event_kind,namespace,chain_id,source_family,block_number,log_index,normalized_event_id,logical_name_id";
     let direct_columns = columns
         .split(',')
@@ -351,9 +373,9 @@ fn registry_permission_authority_candidates(node_candidates: &str) -> String {
     let same_log = registry_permission_same_raw_log("token", "epoch");
     let identity = registry_permission_token_identity("epoch");
     format!(
-        "SELECT {direct_columns}, probe.node FROM ({node_candidates}) probe
+        "SELECT {direct_columns}, probe.node FROM probes probe
          UNION ALL
-         SELECT {epoch_columns}, recovered.node FROM ({node_candidates}) token
+         SELECT {epoch_columns}, recovered.node FROM probes token
          JOIN eligible epoch ON {same_log}
          JOIN LATERAL ({identity}) recovered ON recovered.node = token.node
          WHERE token.event_kind = 'TokenControlTransferred'
