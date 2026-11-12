@@ -260,6 +260,43 @@ async fn committed_reads_send_no_cancel_and_one_more_statement_each() -> Result<
     db.cleanup().await
 }
 
+/// A read nested on the snapshot, as a route's savepoint is, keeps sqlx's transaction depth: it
+/// opens a savepoint, not a second transaction.
+#[tokio::test]
+async fn read_nested_on_a_snapshot_opens_a_savepoint() -> Result<()> {
+    let db = database("read_cancel_savepoint").await?;
+    let requests =
+        StatementCounter::connect_with_pool_options(db.pool(), serving_pool_options(1)).await?;
+    let cancels = StatementCounter::connect_with_pool_options(
+        db.pool(),
+        PgPoolOptions::new().max_connections(1),
+    )
+    .await?;
+    register_cancel_pool(requests.pool(), cancels.pool().clone());
+    let (read, sent) = requests
+        .count(async {
+            let mut snapshot = crate::begin_read_snapshot(requests.pool()).await?;
+            let mut nested = sqlx::Connection::begin(&mut *snapshot).await?;
+            sqlx::query("SELECT 1").execute(&mut *nested).await?;
+            nested.rollback().await?;
+            snapshot.commit().await?;
+            anyhow::Ok(())
+        })
+        .await;
+    read?;
+    let statements = sent.statements();
+    let begins = statements.iter().filter(|s| s.trim() == "BEGIN").count();
+    let savepoints = statements
+        .iter()
+        .filter(|s| s.trim_start().starts_with("SAVEPOINT"))
+        .count();
+    assert_eq!((begins, savepoints), (1, 1), "{statements:?}");
+
+    requests.close().await;
+    cancels.close().await;
+    db.cleanup().await
+}
+
 #[tokio::test]
 async fn full_pool_whose_reads_are_dropped_mid_statement_serves_the_next_read() -> Result<()> {
     let db = database("read_cancel_full_pool").await?;
@@ -420,30 +457,38 @@ async fn read_dropped_while_the_cancel_connection_is_busy_gives_up_after_the_wai
     db.cleanup().await
 }
 
-/// A cancel pool whose first `pg_cancel_backend` answers only after `LATE_REPLY`, as on a loaded
-/// server. Its sessions find the function in `late` ahead of `pg_catalog`.
-async fn late_cancel_pool(db: &TestDatabase) -> Result<PgPool> {
-    sqlx::raw_sql(
+/// A cancel pool whose first `pg_cancel_backend` takes `delay_secs` before it runs, as on a
+/// loaded server. Its sessions find the function in `late` ahead of `pg_catalog`, and run under
+/// `statement_timeout` when it is given.
+async fn late_cancel_pool(
+    db: &TestDatabase,
+    delay_secs: u32,
+    statement_timeout: Option<&str>,
+) -> Result<PgPool> {
+    sqlx::raw_sql(&format!(
         "CREATE SCHEMA late;
          CREATE SEQUENCE late.calls;
          CREATE FUNCTION late.pg_cancel_backend(pid integer) RETURNS boolean
          LANGUAGE plpgsql AS $$
          BEGIN
              IF nextval('late.calls') = 1 THEN
-                 PERFORM pg_catalog.pg_sleep(5);
+                 PERFORM pg_catalog.pg_sleep({delay_secs});
              END IF;
              RETURN pg_catalog.pg_cancel_backend(pid);
          END
-         $$;",
-    )
+         $$;"
+    ))
     .execute(db.pool())
     .await?;
-    let options = db
+    let mut options = db
         .pool()
         .connect_options()
         .as_ref()
         .clone()
         .options([("search_path", "late, pg_catalog")]);
+    if let Some(statement_timeout) = statement_timeout {
+        options = options.options([("statement_timeout", statement_timeout)]);
+    }
     Ok(PgPoolOptions::new()
         .max_connections(1)
         .test_before_acquire(false)
@@ -451,85 +496,80 @@ async fn late_cancel_pool(db: &TestDatabase) -> Result<PgPool> {
         .await?)
 }
 
-async fn wait_until_logged(logs: &Logs, text: &str, within: Duration) -> Result<()> {
-    let deadline = Instant::now() + within;
-    while !logs.text().contains(text) {
-        if Instant::now() >= deadline {
-            bail!("nothing logged {text:?}");
-        }
-        tokio::time::sleep(STEP).await;
-    }
-    Ok(())
-}
-
-/// The cancel was sent but its reply is late, so it may still arrive. The dropped read's
-/// connection is closed, and the read that runs when the late cancel lands is not touched.
-#[tokio::test]
-async fn read_whose_cancel_reply_is_late_closes_its_connection_instead_of_reusing_it() -> Result<()>
-{
-    let db = database("read_cancel_late_reply").await?;
+async fn late_cancel_setup(
+    name: &str,
+    delay_secs: u32,
+    statement_timeout: Option<&str>,
+) -> Result<(TestDatabase, PgPool, PgPool)> {
+    let db = database(name).await?;
     let pool = serving_pool_options(1)
         .connect_with(db.pool().connect_options().as_ref().clone())
         .await?;
-    let cancels = late_cancel_pool(&db).await?;
+    let cancels = late_cancel_pool(&db, delay_secs, statement_timeout).await?;
     register_cancel_pool(&pool, cancels.clone());
+    Ok((db, pool, cancels))
+}
+
+/// The cancel was sent and its reply is late. The read's connection stays out of the pool until
+/// the reply, so the cancel cannot reach the next read on it.
+#[tokio::test]
+async fn read_whose_cancel_reply_is_late_keeps_its_connection_until_the_reply() -> Result<()> {
+    let (db, pool, cancels) = late_cancel_setup("read_cancel_late_reply", 3, None).await?;
     let mut snapshot = crate::begin_read_snapshot(&pool).await?;
     let pid = backend_pid(&mut snapshot).await?;
     let logs = Logs::default();
     let _capture = logs.capture();
     drop(snapshot);
 
-    let mut next = timeout(3 * CANCEL_WAIT, pool.acquire())
-        .await
-        .context("the pool never handed out a connection")??;
-    let next_pid = backend_pid(&mut next).await?;
+    let early = timeout(Duration::from_secs(2), pool.acquire()).await;
     ensure!(
-        next_pid != pid,
-        "the connection whose cancel may still arrive went back to the pool"
+        early.is_err(),
+        "the connection went back to the pool before its cancel was answered"
     );
-    // The late cancel lands while this statement runs.
-    sqlx::raw_sql("SELECT pg_sleep(5)")
+    let mut next = timeout(Duration::from_secs(5), pool.acquire())
+        .await
+        .context("the connection never came back after the reply")??;
+    let (next_pid, _) = server_state(db.pool(), &mut next).await?;
+    assert_eq!(next_pid, pid);
+    sqlx::raw_sql("SELECT pg_sleep(1)")
         .execute(&mut *next)
         .await
         .context("the read after the late cancel failed")?;
     drop(next);
     let logged = logs.text();
-    assert_eq!(logged.matches(CANCEL_FAILED).count(), 1, "{logged}");
-    assert!(
-        logged.contains("timed out waiting for the cancel reply"),
-        "{logged}"
-    );
+    assert!(!logged.contains(CANCEL_FAILED), "{logged}");
 
     pool.close().await;
     cancels.close().await;
     db.cleanup().await
 }
 
-/// A late reply leaves the cancel connection with a reply still due. It is closed, so the next
-/// cancel goes out at once on a new connection.
+/// The cancel connection's `statement_timeout` ends a cancel the server is slow to run. The drop
+/// warns once, and its connection returns once the server has answered.
 #[tokio::test]
-async fn cancel_after_a_late_reply_goes_out_on_a_new_connection_within_the_wait() -> Result<()> {
-    let db = database("read_cancel_after_late_reply").await?;
-    let pool = serving_pool_options(1)
-        .connect_with(db.pool().connect_options().as_ref().clone())
-        .await?;
-    let cancels = late_cancel_pool(&db).await?;
-    register_cancel_pool(&pool, cancels.clone());
+async fn cancel_that_reaches_its_own_statement_timeout_warns_and_returns_the_connection()
+-> Result<()> {
+    let (db, pool, cancels) = late_cancel_setup("read_cancel_own_timeout", 3, Some("1s")).await?;
+    let mut snapshot = crate::begin_read_snapshot(&pool).await?;
+    let pid = backend_pid(&mut snapshot).await?;
     let logs = Logs::default();
     let _capture = logs.capture();
-    drop(crate::begin_read_snapshot(&pool).await?);
-    wait_until_logged(
-        &logs,
-        "timed out waiting for the cancel reply",
-        3 * CANCEL_WAIT,
-    )
-    .await?;
+    drop(snapshot);
 
-    let pid = drop_mid_statement(&pool, LONG, DROP_AFTER).await?;
-    wait_until_not_active(db.pool(), pid, Instant::now() + FREED_WITHIN).await?;
-    acquire_by(&pool, Instant::now() + FREED_WITHIN).await?;
+    let early = timeout(Duration::from_millis(500), pool.acquire()).await;
+    ensure!(
+        early.is_err(),
+        "the connection went back to the pool before the server answered its cancel"
+    );
+    let mut next = timeout(Duration::from_secs(3), pool.acquire())
+        .await
+        .context("the connection never came back after the cancel timed out")??;
+    let (next_pid, _) = server_state(db.pool(), &mut next).await?;
+    assert_eq!(next_pid, pid);
+    drop(next);
     let logged = logs.text();
     assert_eq!(logged.matches(CANCEL_FAILED).count(), 1, "{logged}");
+    assert!(logged.contains("statement timeout"), "{logged}");
 
     pool.close().await;
     cancels.close().await;
@@ -631,6 +671,10 @@ async fn cancel_from_a_role_without_superuser_ends_that_roles_own_statement() ->
     .fetch_one(db.pool())
     .await?;
     assert_eq!(cancel_sessions, 1);
+    let cancel_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&cancels)
+        .await?;
+    assert_eq!(cancel_timeout, "5s");
     composed_read(&pool).await?;
 
     pool.close().await;

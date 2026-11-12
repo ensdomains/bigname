@@ -26,11 +26,12 @@
 //! returns its connection only once the statement ends. The request pool therefore has a cancel
 //! pool of one connection (`cancel_reads_on_drop`). A read snapshot dropped before it ends sends
 //! `pg_cancel_backend` for its backend through it, and only then gives its connection back
-//! (`crate::ReadSnapshot`). The cancel waits at most `CANCEL_WAIT` for that connection and the
-//! reply together. Past that, or on an error, it logs a warning and the statement runs on as it
-//! would without the cancel. A cancel that was sent but not answered may still reach the server
-//! later, so the read's connection and the cancel connection are then closed, not reused.
-//! PostgreSQL ignores a cancel that reaches a backend between statements. The cancel needs no privilege beyond the role the request pool connects as, and it
+//! (`crate::ReadSnapshot`). The cancel waits at most `CANCEL_WAIT` for that connection. Past
+//! that, or on an error, nothing was sent: it logs a warning and the statement runs on as it would
+//! without the cancel. Once sent, a cancel can reach the server however late, so the read keeps its
+//! connection until the reply. The cancel connection's own `statement_timeout`,
+//! `CANCEL_STATEMENT_TIMEOUT`, bounds that on the server. PostgreSQL ignores a cancel that reaches
+//! a backend between statements. The cancel needs no privilege beyond the role the request pool connects as, and it
 //! works on a hot standby. See the PostgreSQL documentation, "Server Signaling Functions" and
 //! "Hot Standby", "Administrator's Overview".
 
@@ -138,9 +139,17 @@ fn ended_by_server(error: sqlx::Error) -> Result<bool, sqlx::Error> {
     }
 }
 
-/// How long a dropped read waits for its cancel: for the cancel connection and the
-/// `pg_cancel_backend` reply together.
+/// How long a dropped read waits for the cancel connection.
 pub(crate) const CANCEL_WAIT: Duration = Duration::from_secs(1);
+
+/// The `statement_timeout` of the cancel connection, which ends a cancel the server is slow to
+/// run. A dropped read holds its connection no longer than this once its cancel is sent, which
+/// is less than the request pool's own statement timeout it would be held for without a cancel.
+pub(crate) const CANCEL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a sent cancel waits for its reply when the server never answers, as on a dead
+/// socket.
+const CANCEL_REPLY_BACKSTOP: Duration = Duration::from_secs(20);
 
 /// What is logged when a dropped read's statement could not be cancelled.
 pub(crate) const CANCEL_FAILED: &str = "could not cancel the statement of a dropped read; it runs \
@@ -153,13 +162,19 @@ static CANCEL_POOLS: Mutex<Vec<(PgPool, PgPool)>> = Mutex::new(Vec::new());
 
 /// Makes every read snapshot begun on `requests` cancel its statement when it is dropped before
 /// it ends (`crate::ReadSnapshot`). The cancels go through a pool of one connection with the
-/// request pool's connect options and `application_name`, opened on first use.
+/// request pool's connect options, `application_name` and [`CANCEL_STATEMENT_TIMEOUT`], opened
+/// on first use.
 pub fn cancel_reads_on_drop(requests: &PgPool, application_name: &str) {
+    // The later `statement_timeout` in the startup options is the one the session takes.
     let options = requests
         .connect_options()
         .as_ref()
         .clone()
-        .application_name(application_name);
+        .application_name(application_name)
+        .options([(
+            "statement_timeout",
+            format!("{}ms", CANCEL_STATEMENT_TIMEOUT.as_millis()),
+        )]);
     // A dead cancel connection fails the cancel itself, so no ping goes ahead of it.
     let cancels = PgPoolOptions::new()
         .max_connections(1)
@@ -191,17 +206,14 @@ fn same_pool(left: &PgPool, right: &PgPool) -> bool {
 /// Asks the server to cancel the statement backend `pid` is running, if any. The caller still
 /// holds that backend's connection, so the pid cannot belong to another request.
 ///
-/// Returns whether that connection may go back to the pool. It may not when the cancel was sent
-/// but its reply did not come: the server can still run the cancel once the connection serves
-/// another request. The cancel connection is closed then as well, since its reply is still due and
-/// the pool would wait for it before handing the connection to the next cancel.
-pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) -> bool {
-    let deadline = tokio::time::Instant::now() + CANCEL_WAIT;
-    let mut conn = match tokio::time::timeout_at(deadline, cancels.acquire()).await {
+/// Only the wait for the cancel connection is bounded here. Once the cancel is sent the server
+/// may run it however late its reply, so the caller must keep the connection until the reply.
+pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) {
+    let mut conn = match tokio::time::timeout(CANCEL_WAIT, cancels.acquire()).await {
         Ok(Ok(conn)) => conn,
         Ok(Err(error)) => {
             tracing::warn!(pid, %error, "{CANCEL_FAILED}");
-            return true;
+            return;
         }
         Err(_) => {
             tracing::warn!(
@@ -209,37 +221,21 @@ pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) -> bool {
                 reason = "timed out waiting for the cancel connection",
                 "{CANCEL_FAILED}"
             );
-            return true;
+            return;
         }
     };
-    let replied = tokio::time::timeout_at(
-        deadline,
+    let replied = tokio::time::timeout(
+        CANCEL_REPLY_BACKSTOP,
         sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
             .bind(pid)
             .fetch_one(&mut *conn),
     )
     .await;
     match replied {
-        Ok(Ok(true)) => true,
-        Ok(Ok(false)) => {
-            tracing::warn!(pid, reason = "no such backend", "{CANCEL_FAILED}");
-            true
-        }
-        Ok(Err(error)) => {
-            conn.close_on_drop();
-            tracing::warn!(pid, %error, closed = true, "{CANCEL_FAILED}");
-            false
-        }
-        Err(_) => {
-            conn.close_on_drop();
-            tracing::warn!(
-                pid,
-                reason = "timed out waiting for the cancel reply",
-                closed = true,
-                "{CANCEL_FAILED}"
-            );
-            false
-        }
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => tracing::warn!(pid, reason = "no such backend", "{CANCEL_FAILED}"),
+        Ok(Err(error)) => tracing::warn!(pid, %error, "{CANCEL_FAILED}"),
+        Err(_) => tracing::warn!(pid, reason = "no reply from the server", "{CANCEL_FAILED}"),
     }
 }
 

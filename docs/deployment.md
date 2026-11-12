@@ -1722,13 +1722,13 @@ The cancel goes out before the request's connection returns to the pool, so it
 cannot reach another request's statement. A cancelled statement costs its
 connection, which the pool replaces on the next acquire. A cancel that reaches a
 backend between statements, as for a request that answered without its commit,
-is ignored. The cancel waits at most one second for its connection and the
-server's reply. Past that, or on an error, the API logs a warning and the
-statement runs to its end, as it would without the cancel. A cancel that was
-sent but not answered in time may still reach the server, so the API then
-closes both the request's connection and the cancel connection rather than
-reuse them. The cancel needs no privilege beyond the API role's own, and it
-works on a hot standby.
+is ignored. The cancel waits at most one second for its connection. Past that,
+or on an error, the API logs a warning and the statement runs to its end, as it
+would without the cancel. Once a cancel is sent, the request's connection
+stays out of the pool until the server answers, since the cancel could
+otherwise reach the next request on that connection. The cancel connection's
+own `statement_timeout` of 5 seconds bounds that wait. The cancel needs no
+privilege beyond the API role's own, and it works on a hot standby.
 
 ### Database connection budget
 
