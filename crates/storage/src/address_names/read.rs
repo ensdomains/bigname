@@ -90,7 +90,7 @@ async fn load_address_names_current_internal(
     include_noncanonical: bool,
     published: Option<&BTreeMap<String, i64>>,
 ) -> Result<Vec<AddressNameCurrentRow>> {
-    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let mut snapshot = crate::begin_read_snapshot(pool).await?;
     let (composed, _) = crate::families::records::compose_address_name_rows(
         &mut snapshot,
         address,

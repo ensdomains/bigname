@@ -1,6 +1,6 @@
 use crate::AppState;
-use bigname_storage::NameCurrentRow;
-use sqlx::{PgConnection, PgPool, Postgres, Transaction, types::time::OffsetDateTime};
+use bigname_storage::{NameCurrentRow, ReadSnapshot};
+use sqlx::{PgConnection, PgPool, types::time::OffsetDateTime};
 use tracing::error;
 
 use super::support::{
@@ -18,7 +18,7 @@ pub(crate) struct CollectionSnapshot {
     evaluated_at: OffsetDateTime,
     namespace: Option<String>,
     pool: PgPool,
-    reads: Option<Transaction<'static, Postgres>>,
+    reads: Option<ReadSnapshot>,
     served: bool,
     captured_at: std::time::Instant,
 }
@@ -152,7 +152,7 @@ impl CollectionSnapshot {
         namespace: Option<&str>,
         namespaces: PublicNamespaceSet,
         captured_at: std::time::Instant,
-        reads: Option<Transaction<'static, Postgres>>,
+        reads: Option<ReadSnapshot>,
     ) -> V2Result<Self> {
         if namespaces.is_empty()
             || namespaces
