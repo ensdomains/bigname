@@ -3420,8 +3420,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 35 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 52, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 38 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 55, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -6904,6 +6904,51 @@ The two indexes are advisory ([walk index set](storage.md#walk-index-set)). The 
 never builds them, and `ops/walk-index-set/drop.sql` leaves them in place. The API starts and
 serves without them, with a WARN at startup naming each one that is not in place, and a page
 with `record_key` then walks the chain's events as before.
+
+## Address membership probes keyed inside a planning fence
+
+`GET /v1/events?address=…`, `GET /v1/diagnostics/events?address=…` and the address history walker
+first list the names and resources an address held in the past
+([table ownership](storage.md#table-ownership)). Before this build that statement estimated every
+address at PostgreSQL's default selectivity, because the planner keeps no statistics on a partial
+index's expression. Against that estimate it combined the address probes with
+`normalized_events_projection_idx` over every grant and transfer of the chain on each call. The
+statement now reads each address key, `registrant`, `to` and `owner`, through its own subquery that
+holds only the key's match and the address length of its value, and applies every other filter
+afterwards. Three new
+partial indexes, one per key, serve those subqueries.
+
+- The rows are the same for every route and flag combination. No response changes.
+- It rotates the [projection content hash](glossary.md#projection-content-hash), because the
+  statement is built in a hashed composition file
+  (`crates/storage/src/history/address_evidence.rs`). The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not move.
+- The rotation is formal. Project's publication statement in the same file is unchanged, so the
+  full-range Project redo rewrites `project_address_history_anchor` and every other projected row
+  to the same values. The release that carries the change redoes Project anyway, so it adds no
+  redo of its own.
+- It adds schema-migration `20261112150000_normalized_events_address_key_indexes.sql` and no
+  table, manifest or setting. The manifest-authority fingerprint and the compiled watch plan are
+  unchanged, so stamp no Ingest redo.
+
+The indexes join the drop list of the [walk index set](storage.md#walk-index-set), so a redo
+that drops the set builds them in its finish step, three more builds than before, and a database
+promoted from that redo's seed needs no hand build. The API refuses to start without them unless
+`BIGNAME_API_WALK_INDEX_SET_CHECK=warn`, because without them each probe reads
+`normalized_events` sequentially, so all three must be valid on every database an API reads
+before that API takes the build.
+
+On a database that takes the build without such a redo:
+
+1. Build the three indexes with `ops/address-key-indexes/install.sql`, as its
+   [README](../ops/address-key-indexes/README.md) describes. The runner and the API keep running
+   while it builds, and the previous image does not read them.
+2. Apply the schema-migrations. The schema-migration adopts the prebuilt indexes by name and
+   reviewed definition, and refuses a populated table without them.
+3. Swap the image under the release's re-derivation boundary.
+
+The earlier kind-partial `normalized_events_address_*_match_idx` indexes stay installed until a
+later build drops them.
 
 ## Partial index for the resolvers of a role holder
 

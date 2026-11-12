@@ -990,6 +990,25 @@ populated upgrades must first use the [concurrent installer](../ops/history-regi
 No facts, memberships, markers or hash inputs change, so this addition requires no Interpret
 or Project reset and an existing rebuild can continue from its recorded progress.
 
+The historical address membership statement (`push_historical_address_matches_query` in
+`crates/storage/src/history/address_evidence.rs`), which `/v1/events?address=`,
+`/v1/diagnostics/events?address=` and the address history walker send, reads three read-only
+indexes on `normalized_events`. The normalized-events baseline and
+`20261112150000_normalized_events_address_key_indexes.sql` install them, and populated upgrades
+require the [concurrent prebuild](../ops/address-key-indexes/README.md):
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_address_registrant_idx` | the `registrant` probe: rows whose `registrant` value is 42 characters long, by the lowercased value |
+| `normalized_events_address_to_idx` | the `to` probe, which the token holder and ENSv2 controller arms share: rows whose `to` value is 42 characters long, by the lowercased value |
+| `normalized_events_address_owner_idx` | the `owner` probe of the registry owner arm: rows whose `owner` value is 42 characters long, by the lowercased value |
+
+Their predicates name no event kind, visibility or canonicality state, so one probe text serves
+every flag combination, diagnostics included, and the statement applies those filters after the
+probes. They change no rows, hash inputs, catalogue encoding or phase markers and require no
+replay. The earlier kind-partial `normalized_events_address_*_match_idx` indexes stay installed
+and no statement reads them.
+
 Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
 `normalized_events` for its registry root role branch, installed by the normalized-events
 baseline and `20261005120000_normalized_events_address_root_permission_idx.sql` and changing no
@@ -1218,11 +1237,19 @@ moves the citation without changing the holder; the earliest transfer in the ran
 address as its sender, which proves the address held the name at the bound. The three
 kinds of historical events are: a `RegistrationGranted` whose `registrant` is the address, a
 `TokenControlTransferred` whose `to` is the address, and an `AuthorityTransferred` whose `owner`
-is the address, each compared lowercased. One partial expression index per kind keys those rows
-by the lowercased value: `normalized_events_address_registrant_match_idx`,
-`normalized_events_address_token_holder_match_idx`, and
-`normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
-identical to the query text. Each candidate arm probes the name, resource, node, resolver/record
+is the address, each compared lowercased. The membership statement
+(`push_historical_address_matches_query` in `crates/storage/src/history/address_evidence.rs`)
+reads them through one subquery per key, `registrant`, `to` and `owner`. Each subquery holds only
+the key's lowercased match and the address length of its value, ends in `OFFSET 0`, and reads
+one partial expression index over every row whose value under the key is 42 characters long: `normalized_events_address_registrant_idx`,
+`normalized_events_address_to_idx`, and `normalized_events_address_owner_idx`. The event kind,
+visibility, canonicality, namespace, publication bound and arm filters all apply after the
+subqueries. PostgreSQL keeps no statistics on a partial index's expression and estimates every
+address alike, so a merged statement combined the address probes with
+`normalized_events_projection_idx` over every grant and transfer of the chain. The fence leaves
+the planner no such clause to combine. A row that holds the address under two keys comes from two
+subqueries and yields one anchor. The indexes' expressions and predicates must stay identical to
+the subqueries' text. Each candidate arm probes the name, resource, node, resolver/record
 key, or selected link through the corresponding index. A lateral planning boundary keeps event
 probes keyed by that address's evidence even at large cardinalities. The database may sort and
 spill all address-specific candidates before returning the first batch; this bounds API memory,
@@ -3299,7 +3326,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows. Project also reads `normalized_events_v2_key_probe_idx`, in the `slots` and `chains` steps of `project:families.resolution_paths.prepare` ([table ownership](#table-ownership)) |
 
-The other 35 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 38 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_history_account_owner_idx`,
 `normalized_events_history_account_subject_idx`, `normalized_events_history_reverse_address_idx`,
 `normalized_events_history_registrar_lease_idx`, `normalized_events_registry_token_idx`,
@@ -3320,6 +3347,8 @@ these: `normalized_events_history_account_owner_idx`,
 `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
+`normalized_events_address_to_idx`, `normalized_events_address_registrant_idx`,
+`normalized_events_address_owner_idx`,
 `normalized_events_address_root_permission_idx`, `normalized_events_registry_roles_idx`,
 `normalized_events_project_node_history_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
