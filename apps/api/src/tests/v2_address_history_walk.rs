@@ -4,6 +4,8 @@
 use super::*;
 #[path = "v2_address_history_catalogue.rs"]
 mod catalogue;
+#[path = "v2_events_address_walk.rs"]
+mod events_address;
 use std::sync::{Arc, Mutex};
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::prelude::*;
