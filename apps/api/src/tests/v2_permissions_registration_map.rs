@@ -134,8 +134,12 @@ async fn check_address_pages(database: &TestDatabase) -> Result<()> {
 
     let mut resources = owned.clone();
     resources.extend(&small);
-    let names =
-        bigname_storage::load_current_names_by_resource_ids(&database.pool, &resources).await?;
+    let names = bigname_storage::load_current_names_by_resource_ids(
+        &database.pool,
+        &resources,
+        &[CHAIN.to_owned()],
+    )
+    .await?;
     assert!(
         names.is_empty(),
         "the page resources must have no current name: {:?}",
