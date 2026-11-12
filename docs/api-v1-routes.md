@@ -1922,7 +1922,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `include_expired=true|false`, `include=counts`, `cursor`, `page_size`, and
   optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
-  `q` applies prefix matching to the served `name` under exactly the rules
+  `q` applies prefix matching to the child's name under exactly the rules
   documented for `q` on `GET /v1/addresses/{address}/names`: the whole value is
   normalized as an ENSIP-15 name prefix (`q=AL` matches `alpha.parent.eth`),
   one trailing dot marks a label boundary (`q=alpha.` matches
@@ -1931,14 +1931,21 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   prefix (the default) or substring matching exactly as on
   `GET /v1/addresses/{address}/names`, so `q=o&match=contains` matches
   `carol.parent.eth` and `two.parent.eth`. The comparison is byte-wise against
-  the child's stored name, the spelling its row had when it was last derived.
-  A label first learned on another chain reaches the stored name at this chain's
-  next block. The stored name is the served name except for a label the
-  proof-checked rainbow import alone spells, until its row is derived again for
-  another reason, or one that only an Interpret redo of another chain revealed,
-  for about (that chain's `PreimageObserved` rows / 1,000) blocks of this chain.
-  Such a child matches by its placeholder.
-  So a [non-name form](glossary.md#non-name-form) row matches
+  the child's stored name. The stored name spells each label from a preimage a
+  chain observed and leaves any other label as its `[labelhash]` placeholder,
+  while the served `name` also uses the proof-checked rainbow import. A child
+  whose stored name keeps a placeholder its served name spells matches, and
+  sorts, by the placeholder. A label only the rainbow import spells keeps its
+  placeholder in the stored name until a chain observes its preimage: deriving
+  the row again for another reason, or a rebuild, does not spell it. TYR-339
+  moves stored names and sort keys to the imported form. A label first observed
+  on another chain reaches the stored name at this chain's next block once this
+  chain has read that chain's observations up to that chain's finalized block.
+  Until then each block of this chain reads about 1,000 of them, in whole blocks
+  of that chain. So after that chain's finalized block moves past more unread
+  observations, or after an Interpret redo of that chain alone, a label can wait
+  about (the unread observations / 1,000) blocks of this chain.
+  A [non-name form](glossary.md#non-name-form) row matches
   only a prefix, or with `match=contains` a substring, of its placeholder or
   escaped text.
   `sort` defaults to `name` and `order` to `asc`. `expires_at` and

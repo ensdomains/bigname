@@ -2639,15 +2639,27 @@ subnames page, the registry labels page and the child counts read rows through i
 compose no child at read. A row holds the child's served fields, its stored name, the sort keys
 and the label registry, and is composed by the children relation
 (`crates/storage/src/families/topology/listing.rs`) at the block Project publishes. The stored
-name spells a label from chain-observed preimages only. A label first learned on another chain
-reaches the stored name at this chain's next block. An imported label reaches it only when its
-row is derived again for another reason (TYR-373/374). Served names heal at read time. The
-rainbow-table import has no block, so the row keeps its placeholder and the reader spells the
-label at read (`crates/storage/src/families/topology/listing_page.rs`). The family step reads
-each other chain's new observations past a journalled watermark
+name spells a label from chain-observed preimages only. The stored relation and the stored
+parent spelling both skip `label_preimages` rows whose `source_kind` is `ens_rainbow_import`
+(`crates/storage/src/families/topology/children.rs:87`,
+`crates/storage/src/families/topology/children/spelling.rs:64`). The rainbow-table import has no
+block, so a row that read it would differ between a block-by-block run and a rebuild. A label
+only the import spells therefore keeps its placeholder in the stored name, in `display_key` and
+in `q` matching, however often its row is derived again, until a chain observes its preimage.
+The reader spells it at read (`crates/storage/src/families/topology/listing_page.rs`), so
+served names heal. TYR-339 moves stored names and sort keys to the imported form.
+
+A label observed on this chain derives again, at that block, the rows that hold it. The family
+step reads each other chain's new observations past a journalled watermark
 (`project_child_preimage_watermark`) and derives again the rows that hold one of their labels.
-After an Interpret redo of that chain alone, a label only the redo revealed waits about (that
-chain's `PreimageObserved` rows / 1,000) blocks of this chain.
+Once the watermark has reached the other chain's finalized block (its safe block when finalized
+is unset), a step reads every newer observation, so a label first observed there reaches the
+stored name at this chain's next block. Until then a step reads about 1,000 observations,
+rounded up to whole blocks of the other chain (`SOURCE_EVENTS` and `CUTOFF`,
+`crates/project/src/families/derived/children/sources.rs:52` and `:75`). When that chain's
+finalized block moves past more unread observations than one step reads, in ordinary catch-up
+or after an Interpret redo of that chain alone, a label waits about (the unread observations /
+1,000) blocks of this chain.
 
 `display_key` is the stored name in C collation, or its first 500 characters when it is longer
 than 2,000 bytes. `expires_key` and `registered_key` are the child's name summary timestamps in
