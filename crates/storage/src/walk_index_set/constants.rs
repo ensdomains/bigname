@@ -505,3 +505,18 @@ pub const ADVISORY: &[DroppedIndex] = &[
         definition: r#"CREATE INDEX normalized_events_record_emitter_key_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((raw_fact_ref ->> 'emitting_address'::text)), "left"((after_state ->> 'record_key'::text), 256), block_number DESC NULLS LAST) WHERE ((event_kind = 'RecordChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))"#,
     },
 ];
+
+/// The advisory indexes on Project-owned `project_grant`: API read paths that no walk drops.
+/// An operator builds them with `ops/resolver-role-holder-index/install.sql` before the
+/// schema-migration that adopts them, Project keeps them current like the table's other indexes,
+/// and the API starts and serves without them, with a WARN naming each one that is not in place.
+/// Each holds the statement and the definition of that install script.
+pub const PROJECT_GRANT_ADVISORY: &[DroppedIndex] = &[DroppedIndex {
+    name: "project_grant_resolver_role_holder_idx",
+    create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_resolver_role_holder_idx
+    ON bigname_phase.project_grant (subject COLLATE "C", scope COLLATE "C")
+    WHERE scope_kind = 'resolver'
+      AND NOT revoked
+      AND grant_source ->> 'source_event' = 'EACRolesChanged'"#,
+    definition: r#"CREATE INDEX project_grant_resolver_role_holder_idx ON bigname_phase.project_grant USING btree (subject COLLATE "C", scope COLLATE "C") WHERE ((scope_kind = 'resolver'::text) AND (NOT revoked) AND ((grant_source ->> 'source_event'::text) = 'EACRolesChanged'::text))"#,
+}];

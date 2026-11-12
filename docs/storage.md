@@ -749,6 +749,22 @@ Family indexes serve these concrete readers:
   `20261103130000_project_resolver_link_order_index.sql` adds the index.
   `crates/storage/src/families/topology/collections_tests.rs` checks the plan under both plan
   modes and compares every page with the statement it replaced.
+- The role-holder page (`storage:families.topology.resolvers_by_role_holder`, for
+  `GET /v1/resolvers?role_holder=`) reads `project_grant_resolver_role_holder_idx`,
+  `(subject COLLATE "C", scope COLLATE "C")` over the grants with scope kind `resolver`, not
+  revoked, whose grant source is an `EACRolesChanged` log. Its index condition carries the
+  holder and the page's scope range, so the page reads only the holder's live ENSv2 EAC
+  resolver grants from the cursor. It never reads the derived ENSv1 and Basenames resolver
+  authority rows, which share the scope kind and far outnumber them. The statement carries the
+  index predicate as literals, so the index qualifies under generic plans too. Schema-migration
+  `20261112140000_project_grant_resolver_role_holder_index.sql` adopts the index. It is
+  advisory: an operator prebuilds it with
+  [`ops/resolver-role-holder-index/install.sql`](../ops/resolver-role-holder-index/README.md),
+  the phase runner never builds it, and the API starts and serves without it, with a WARN at
+  startup. Without it the page returns the same rows and reads every grant of the holder
+  through `project_grant_subject_resource_idx`.
+  `crates/storage/src/families/topology/role_holder_tests.rs` checks the plan under both plan
+  modes.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
   the registry operator read will use and no reader uses yet:
   `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
