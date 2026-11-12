@@ -44,6 +44,7 @@ pub use query_plan::{
     explain_stored_event_count_for_test,
 };
 mod read_filter;
+mod record_key_source;
 mod redo;
 mod registration_identity;
 mod registry_handoffs;

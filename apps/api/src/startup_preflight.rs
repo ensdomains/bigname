@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use bigname_lookup::{ChainRpcUrls, RpcChainCheckError, verify_chain_rpc_url};
-use bigname_storage::walk_index_set::{IndexState, load_drop_list_state};
+use bigname_storage::walk_index_set::{IndexState, load_advisory_state, load_drop_list_state};
 use sqlx::PgPool;
 
 use crate::cli::WalkIndexSetCheck;
@@ -122,6 +122,62 @@ pub(crate) async fn ensure_walk_index_set(
             Ok(unusable.len())
         }
     }
+}
+
+/// Warns, naming each one, when an advisory index (`docs/storage.md`, Walk index set) is not a
+/// valid, ready index on `normalized_events` with the reviewed definition. It never refuses: the
+/// reads that use an advisory index return the same rows without it, more slowly. A catalog
+/// read that fails only warns too. Returns how many are not in place.
+pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
+    let statuses = match pool.acquire().await {
+        Ok(mut connection) => load_advisory_state(&mut connection).await,
+        Err(error) => Err(error),
+    };
+    let statuses = match statuses {
+        Ok(Some(statuses)) => statuses,
+        Ok(None) => return 0,
+        Err(error) => {
+            tracing::warn!(
+                service = "api",
+                error = %error,
+                "the API could not read the state of the advisory normalized_events indexes \
+                 and serves without checking them"
+            );
+            return 0;
+        }
+    };
+    let mut missing = 0;
+    for status in &statuses {
+        let index = status.index.name;
+        let state = match &status.state {
+            IndexState::Present { .. } => {
+                if let Some(found) = status.other_definition() {
+                    tracing::warn!(
+                        service = "api",
+                        index,
+                        found,
+                        expected = status.index.definition,
+                        "an advisory normalized_events index has another definition than this \
+                         build expects, and the API reads it as found"
+                    );
+                }
+                continue;
+            }
+            IndexState::Missing => "missing".to_owned(),
+            IndexState::Invalid => "not valid and ready".to_owned(),
+            IndexState::Foreign { held_by } => format!("held by {held_by}"),
+        };
+        missing += 1;
+        tracing::warn!(
+            service = "api",
+            index,
+            state = %state,
+            "an advisory normalized_events index is not in place, so the API serves the reads \
+             it speeds up without it and they may exceed BIGNAME_API_DB_STATEMENT_TIMEOUT_MS; \
+             build it with ops/record-history-indexes/install.sql"
+        );
+    }
+    missing
 }
 
 /// Warns, naming the table, when the API role cannot read the stored event counts

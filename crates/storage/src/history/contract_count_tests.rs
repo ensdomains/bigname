@@ -65,6 +65,7 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                 ("explicit-missing-kind", None, &["RecordVersionChanged"][..], 0),
             ] {
                 // The registry overview's `counts.events` statement, plus the feed's record key.
+                // With a key, the capped count reads each record arm in order up to the cap.
                 let kinds: Vec<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
                 let filter = EventHistoryReadFilter {
                     record_key: key.map(str::to_owned),
@@ -82,6 +83,36 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                 count_query.reset();
                 push_history_count_query(&mut count_query, &filter, true, None);
                 let count_plan = explain_page(&mut connection, count_query, mode).await?;
+                if key.is_some() {
+                    let mut capped = QueryBuilder::<Postgres>::new("");
+                    push_history_count_query(&mut capped, &filter, true, Some(101));
+                    let total: i64 = capped.build_query_scalar().fetch_one(&mut *connection).await?;
+                    assert_eq!(total, count.min(101));
+                    capped.reset();
+                    push_history_count_query(&mut capped, &filter, true, Some(101));
+                    let plan = explain_page(&mut connection, capped, mode).await?;
+                    let encoded = plan.to_string();
+                    ensure!(!encoded.contains("Bitmap"), "capped count {mode:?} reads a bitmap: {plan}");
+                    let mut scans = Vec::new();
+                    resolver_page_scans(&plan[0]["Plan"], &mut scans);
+                    for scan in &scans {
+                        let condition = scan["Index Cond"].as_str().unwrap_or_default();
+                        if condition.contains("(event_kind = 'RecordVersionChanged'::text)") {
+                            // The reset arm: this fixture holds no reset.
+                            continue;
+                        }
+                        ensure!(
+                            scan["Node Type"] == "Index Scan"
+                                && scan["Index Name"] == "normalized_events_record_emitter_key_history_idx"
+                                && condition.contains("emitting_address")
+                                && condition.contains("\"left\"("),
+                            "capped count {mode:?}: the arm must be an ordered scan by emitter and key prefix: {plan}"
+                        );
+                        let read = scan["Actual Rows"].as_f64().unwrap_or(0.0)
+                            * scan["Actual Loops"].as_f64().unwrap_or(1.0);
+                        ensure!(read <= 117.0, "capped count {mode:?} read {read} rows: {plan}");
+                    }
+                }
                 let mut page = QueryBuilder::<Postgres>::new("");
                 push_history_page_query(&mut page, &filter, true, None, false, 21);
                 let page_plan = explain_page(&mut connection, page, mode).await?;
@@ -91,6 +122,31 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                         "mode": format!("{mode:?}"), "case": case, "operation": label,
                         "record_key": key, "kinds": kinds, "expected_count": count, "plan": plan,
                     }));
+                    if key.is_some() {
+                        // A key page and a key count read the record arms
+                        // (`record_key_plan_tests.rs`): the write arm through the emitter and
+                        // the key, the page one page at most, the count the key's rows.
+                        let mut scans = Vec::new();
+                        resolver_page_scans(&plan[0]["Plan"], &mut scans);
+                        let visited: f64 = scans
+                            .iter()
+                            .map(|scan| {
+                                (scan["Actual Rows"].as_f64().unwrap_or(0.0)
+                                    + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                                    * scan["Actual Loops"].as_f64().unwrap_or(1.0)
+                            })
+                            .sum();
+                        let encoded = plan.to_string();
+                        ensure!(
+                            !kinds.iter().any(|kind| kind == "RecordChanged")
+                                || encoded
+                                    .contains("normalized_events_record_emitter_key_history_idx"),
+                            "{label} {mode:?}: {plan}"
+                        );
+                        let ceiling = if label == "page" { 100.0 } else { 12000.0 };
+                        ensure!(visited <= ceiling, "{label} {mode:?} read too much: {plan}");
+                        continue;
+                    }
                     let mut scans = Vec::new();
                     page_scans(&plan[0]["Plan"], &mut scans);
                     ensure!(scans.len() == 1, "{label} {mode:?}: {plan}");
@@ -101,7 +157,15 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                         + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
                         * scan["Actual Loops"].as_f64().unwrap_or(1.0);
                     let encoded = plan.to_string();
-                    ensure!(encoded.contains("normalized_events_emitter_history_idx") || (count == 0 && visited == 0.0), "{label} {mode:?}: {plan}");
+                    // A count of record events may read the emitter's `RecordChanged` rows
+                    // through the emitter-led record index instead of the emitter's whole
+                    // history, with or without a key. The planner picks between them, and
+                    // `record_key_count_cells_match_the_old_statement_and_record_their_driver`
+                    // records each count cell's driver.
+                    let driven = encoded.contains("normalized_events_emitter_history_idx")
+                        || (label == "count"
+                            && encoded.contains("normalized_events_record_emitter_key_history_idx"));
+                    ensure!(driven || (count == 0 && visited == 0.0), "{label} {mode:?}: {plan}");
                     ensure!(visited <= 12000.0, "{label} scanned unrelated history: {plan}");
                     eprintln!("contract {label} {mode:?} case={case}: count={count}; principal_event_rows_visited={visited}; execution_ms={}; shared_hit_blocks={}", plan[0]["Execution Time"], plan[0]["Plan"]["Shared Hit Blocks"]);
                 }

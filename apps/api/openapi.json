@@ -135,7 +135,7 @@
             "name": "record_key",
             "in": "query",
             "required": false,
-            "description": "Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes.",
+            "description": "Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets.",
             "schema": {
               "type": "string"
             }
@@ -1278,7 +1278,7 @@
             "name": "record_key",
             "in": "query",
             "required": false,
-            "description": "Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes.",
+            "description": "Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets.",
             "schema": {
               "type": "string"
             }
@@ -2361,7 +2361,7 @@
             "name": "record_key",
             "in": "query",
             "required": false,
-            "description": "Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes.",
+            "description": "Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets.",
             "schema": {
               "type": "string"
             }
