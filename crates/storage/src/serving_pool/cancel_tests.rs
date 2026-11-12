@@ -485,7 +485,8 @@ async fn late_cancel_pool(
         .connect_options()
         .as_ref()
         .clone()
-        .options([("search_path", "late, pg_catalog")]);
+        // No space: the startup options are split on whitespace.
+        .options([("search_path", "late,pg_catalog")]);
     if let Some(statement_timeout) = statement_timeout {
         options = options.options([("statement_timeout", statement_timeout)]);
     }
