@@ -1349,9 +1349,9 @@ async fn a_manifest_sync_before_the_pass_rebuilds_under_the_new_set() -> Result<
 }
 
 // The input revision moves between two chunks of the pass, two chunks of names on three workers
-// or the catalogue build's first two partitions: the next chunk's fence refuses it and the run
-// stops with an error, the committed chunks stay, and the next run rebuilds from the start under
-// the new revision. In the names stream the move lands with the record's count of the first
+// or the first two partitions of the catalogue build, the event count stream or the leads stream:
+// the next chunk's fence refuses it and the run stops with an error, the committed chunks stay,
+// and the next run rebuilds from the start under the new revision. In the names stream the move lands with the record's count of the first
 // chunk, and a worker that read the revision before it commits under it.
 #[tokio::test]
 async fn a_revision_that_moves_between_two_chunks_stops_the_run() -> Result<()> {
@@ -1363,6 +1363,16 @@ async fn a_revision_that_moves_between_two_chunks_stops_the_run() -> Result<()> 
         (
             3,
             "NEW.compose_stream = 3 AND OLD.compose_stream = 3 AND NEW.compose_cursor IS NOT NULL
+             AND OLD.compose_cursor IS NULL",
+        ),
+        (
+            6,
+            "NEW.compose_stream = 6 AND OLD.compose_stream = 6 AND NEW.compose_cursor IS NOT NULL
+             AND OLD.compose_cursor IS NULL",
+        ),
+        (
+            7,
+            "NEW.compose_stream = 7 AND OLD.compose_stream = 7 AND NEW.compose_cursor IS NOT NULL
              AND OLD.compose_cursor IS NULL",
         ),
     ] {
