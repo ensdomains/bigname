@@ -4901,13 +4901,13 @@ For a registrar lease first identified by a later readable observation, registra
   and its `include=total_count` stays exact and uncapped. `contract_address`
   applies inside that walk. A contract that emitted no event at all returns the
   empty page without walking the address's history. Otherwise the walk visits
-  the address's catalogue buckets in order and stops only at a full page or at
-  the end of the address's history. It returns no continuation before either.
-  So when a contract emitted events but few or none of the address's, the walk
-  reads every bucket of the address's history and only the whole-request
-  deadline bounds it. A large holder can then only answer `408
-  request_timeout`, with no partial page. Every other anchor combination reads
-  as before.
+  only the catalogue buckets, 256-block ranges, in which both the address has
+  events and the contract emitted one. It finds the next such bucket by
+  seeking the address's next bucket and the contract's next event in turn, so
+  the buckets it reads grow with whichever of the two has fewer, not with the
+  address's history. The walk stops only at a full page or at the end of those
+  buckets, and it returns no continuation before either. Every other anchor
+  combination reads as before.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can

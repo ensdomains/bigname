@@ -13,7 +13,7 @@ use super::{
 use crate::{
     families::name::FamilyPublicationUnavailable,
     history::{
-        EventHistoryReadFilter, HistoryCataloguePublicationFence, HistoryCursor,
+        EventHistoryReadFilter, HistoryCataloguePublicationFence, HistoryCursor, HistoryOrder,
         HistoryPageOptions, catalogue_contract as contract, keyset::HistoryKeyset,
     },
 };
@@ -148,6 +148,7 @@ pub(super) async fn collect(
     if output.complete() || filter.match_no_events {
         return Ok(());
     }
+    let mut lead = Side::Address;
     // A legacy row-only cursor is checked against its exact bucket and all membership reasons.
     // Applying its identity inside each limited probe prevents a prefix from hiding it.
     let mut bucket = if let Some(identity) = identity {
@@ -167,7 +168,7 @@ pub(super) async fn collect(
             block / contract::BUCKET_BLOCKS
         }))
     } else {
-        seek(connection, read, filter, None).await?
+        seek(connection, read, filter, None, &mut lead).await?
     };
     let mut internal_cursor: Option<HistoryCursor> = None;
     while let Some(current) = bucket {
@@ -206,7 +207,7 @@ pub(super) async fn collect(
         if batch.events == limit {
             internal_cursor = batch.last;
         } else {
-            bucket = seek(connection, read, filter, Some(current)).await?;
+            bucket = seek(connection, read, filter, Some(current), &mut lead).await?;
             // A new bucket already lies after the last complete event. Keep the original
             // public keyset; it is harmless there and avoids fabricating a bucket cursor.
             internal_cursor = None;
@@ -215,7 +216,85 @@ pub(super) async fn collect(
     Ok(())
 }
 
+/// The side of the contract leapfrog that found the bucket the walk last probed.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Side {
+    Address,
+    Emitter,
+}
+
+/// The next bucket after `after` that can hold a row, or the first one.
+///
+/// With `contract_address`, a bucket holds a row only if the address has a source there and the
+/// contract emitted an event there. The address side seeks without the emitter filter, so each
+/// of its probes stops at its source's next readable row. The emitter side seeks the contract's
+/// own index. Each seek starts at or past the other side's bucket and moves strictly on, and the
+/// first bucket both reach is returned. So the seeks grow with the sparser side's buckets, not
+/// with the address's. Every bucket skipped lacks one side, so it holds no row of the page.
 async fn seek(
+    connection: &mut PgConnection,
+    read: &AddressRead<'_>,
+    filter: &EventHistoryReadFilter,
+    after: Option<i64>,
+    lead: &mut Side,
+) -> Result<Option<i64>> {
+    let Some(emitter) = filter
+        .contract_address
+        .as_deref()
+        .filter(|_| seams::contract_leapfrog())
+    else {
+        return address_seek(connection, read, filter, after).await;
+    };
+    let unfiltered = EventHistoryReadFilter {
+        contract_address: None,
+        ..filter.clone()
+    };
+    // The side that found the last probed bucket leads again: it is the one that jumped there.
+    let (mut found, mut side) = match (after, *lead) {
+        (Some(after), Side::Emitter) => {
+            let next = match filter.order {
+                HistoryOrder::Desc if after == contract::NULL_BUCKET => return Ok(None),
+                HistoryOrder::Desc => after - 1,
+                HistoryOrder::Asc => after + 1,
+            };
+            (
+                emitter_seek(connection, emitter, filter, next).await?,
+                Side::Emitter,
+            )
+        }
+        _ => (
+            address_seek(connection, read, &unfiltered, after).await?,
+            Side::Address,
+        ),
+    };
+    while let Some(bucket) = found {
+        let other = match side {
+            Side::Address => emitter_seek(connection, emitter, filter, bucket).await?,
+            Side::Emitter => {
+                // The address seek is strictly after its bound, so the bound is the bucket
+                // before this one in page order.
+                let bound = match filter.order {
+                    HistoryOrder::Desc => Some(bucket + 1),
+                    HistoryOrder::Asc if bucket == contract::NULL_BUCKET => None,
+                    HistoryOrder::Asc => Some(bucket - 1),
+                };
+                address_seek(connection, read, &unfiltered, bound).await?
+            }
+        };
+        if other == Some(bucket) {
+            *lead = side;
+            return Ok(Some(bucket));
+        }
+        found = other;
+        side = match side {
+            Side::Address => Side::Emitter,
+            Side::Emitter => Side::Address,
+        };
+    }
+    Ok(None)
+}
+
+async fn address_seek(
     connection: &mut PgConnection,
     read: &AddressRead<'_>,
     filter: &EventHistoryReadFilter,
@@ -230,4 +309,109 @@ async fn seek(
         .fetch_one(connection)
         .await
         .context("failed to seek an address-history catalogue bucket")
+}
+
+/// The contract's nearest bucket at or past `bucket` in page order.
+async fn emitter_seek(
+    connection: &mut PgConnection,
+    emitter: &str,
+    filter: &EventHistoryReadFilter,
+    bucket: i64,
+) -> Result<Option<i64>> {
+    let mut query = QueryBuilder::<Postgres>::new("");
+    push_emitter_seek_query(&mut query, emitter, filter, bucket);
+    seams::count("catalogue_bucket_seeks", 1);
+    seams::count("catalogue_emitter_seeks", 1);
+    query
+        .build_query_scalar()
+        .persistent(false)
+        .fetch_one(connection)
+        .await
+        .context("failed to seek the requested contract's next event")
+}
+
+/// The contract's nearest bucket at or past `bucket`, by the leading keys of
+/// `normalized_events_emitter_history_idx` and the terms that index is partial on, bounded by the
+/// read's blocks. Rows without a block are the null bucket, last when descending and first when
+/// ascending. Namespace, chain, visibility and every other filter stay in the bucket probes, so
+/// a bucket found here may hold no row, but no bucket that holds one is passed.
+pub(super) fn push_emitter_seek_query<'a>(
+    query: &mut QueryBuilder<'a, Postgres>,
+    emitter: &'a str,
+    filter: &EventHistoryReadFilter,
+    bucket: i64,
+) {
+    let null = bucket == contract::NULL_BUCKET;
+    match filter.order {
+        HistoryOrder::Desc if null => {
+            query.push("SELECT ");
+            push_emitter_null(query, emitter);
+        }
+        HistoryOrder::Desc => {
+            query.push("SELECT COALESCE(");
+            push_emitter_block(query, emitter, filter, bucket);
+            query.push(", ");
+            push_emitter_null(query, emitter);
+            query.push(")");
+        }
+        HistoryOrder::Asc if null => {
+            query.push("SELECT COALESCE(");
+            push_emitter_null(query, emitter);
+            query.push(", ");
+            push_emitter_block(query, emitter, filter, 0);
+            query.push(")");
+        }
+        HistoryOrder::Asc => {
+            query.push("SELECT ");
+            push_emitter_block(query, emitter, filter, bucket);
+        }
+    }
+}
+
+fn push_emitter_rows<'a>(query: &mut QueryBuilder<'a, Postgres>, emitter: &'a str) {
+    query
+        .push(" FROM normalized_events ne WHERE lower(ne.raw_fact_ref ->> 'emitting_address') = ")
+        .push_bind(emitter)
+        .push(" AND ne.raw_fact_ref ->> 'emitting_address' IS NOT NULL AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')");
+}
+
+fn push_emitter_null<'a>(query: &mut QueryBuilder<'a, Postgres>, emitter: &'a str) {
+    query.push(format!("(SELECT {}::bigint", contract::NULL_BUCKET));
+    push_emitter_rows(query, emitter);
+    query.push(" AND ne.block_number IS NULL LIMIT 1)");
+}
+
+/// The contract's nearest positioned bucket at or past `bucket`, which is not the null bucket.
+fn push_emitter_block<'a>(
+    query: &mut QueryBuilder<'a, Postgres>,
+    emitter: &'a str,
+    filter: &EventHistoryReadFilter,
+    bucket: i64,
+) {
+    query.push(format!(
+        "(SELECT ne.block_number / {}",
+        contract::BUCKET_BLOCKS
+    ));
+    push_emitter_rows(query, emitter);
+    let start = bucket.saturating_mul(contract::BUCKET_BLOCKS);
+    let direction = match filter.order {
+        HistoryOrder::Desc => {
+            query
+                .push(" AND ne.block_number <= ")
+                .push_bind(start.saturating_add(contract::BUCKET_BLOCKS - 1));
+            "DESC NULLS LAST"
+        }
+        HistoryOrder::Asc => {
+            query.push(" AND ne.block_number >= ").push_bind(start);
+            "ASC NULLS FIRST"
+        }
+    };
+    let (minimum, maximum) = catalogue_source::block_window(filter);
+    if let Some(minimum) = minimum {
+        query.push(" AND ne.block_number >= ").push_bind(minimum);
+    }
+    if let Some(maximum) = maximum {
+        query.push(" AND ne.block_number <= ").push_bind(maximum);
+    }
+    query.push(format!(" ORDER BY ne.block_number {direction} LIMIT 1)"));
 }

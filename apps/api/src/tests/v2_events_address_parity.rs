@@ -512,9 +512,9 @@ async fn events_address_other_anchors_keep_the_sql_page() -> Result<()> {
     database.cleanup().await
 }
 
-/// A contract that emitted events, but none that involve the address, with no block window. The
-/// emitter probe finds its events, so the walk visits every catalogue bucket of the address and
-/// returns the empty page only at the end of its history. The buckets it visited are recorded.
+/// A contract that emitted an event, but none that involve the address, in the address's only
+/// catalogue bucket, with no block window. The emitter probe finds its event, so the walk probes
+/// that bucket and returns the empty page. The buckets it visited are recorded.
 #[tokio::test]
 async fn events_address_contract_without_the_addresss_events_walks_every_bucket() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

@@ -1202,6 +1202,10 @@ The legacy full-selector reader remains in use for unpaged/diagnostic storage ca
 `GET /v1/events` read that combines `address` with a `name`, `registration_id` or `resolver`
 anchor. A `GET /v1/events` read that `address` alone anchors uses this bounded reader, with its
 `contract_address`, `from_block` and `to_block` applied inside the walk.
+With `contract_address`, the walk's bucket seek (`history/address_walk/catalogue.rs`) alternates
+the address's next bucket, sought without the emitter filter, with the contract's next block on
+`normalized_events_emitter_history_idx`, bounded by the read's blocks, and probes only a bucket
+both reach.
 The three indexes cover only activated rows in readable canonicality states, so an anchor read
 that drops either condition cannot use them and falls back to a broad scan, such as
 `normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the

@@ -261,3 +261,130 @@ fn collect_scans(node: &Value, scans: &mut Vec<Value>) {
         collect_scans(child, scans);
     }
 }
+
+/// The contract side of the `contract_address` walk reads the emitter's own index with the
+/// emitter and the block bound in its index condition, and sorts nothing, in both orders and
+/// for the null bucket, under a forced generic plan and after six runs of a prepared statement.
+#[tokio::test]
+async fn emitter_seek_keeps_its_index_under_a_generic_plan() -> Result<()> {
+    const EMITTER: &str = "0x0000000000000000000000000000000000000021";
+    let database = bigname_test_support::TestDatabase::create(
+        bigname_test_support::TestDatabaseConfig::new("catalogue_emitter_seek_plan"),
+    )
+    .await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        super::plan_tests::install(&mut connection, 32, 3_200).await?;
+        // Ninety-seven emitters share the fixture's events, so the planner sees a selective key.
+        sqlx::raw_sql(
+            "UPDATE normalized_events SET raw_fact_ref = jsonb_build_object('emitting_address',
+                 '0x' || lpad(to_hex(normalized_event_id % 97), 40, '0'));
+             ANALYZE normalized_events",
+        )
+        .execute(&mut *connection)
+        .await?;
+        for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
+            let filter = EventHistoryReadFilter {
+                order,
+                ..Default::default()
+            };
+            for bucket in [0, 5, crate::history::catalogue_contract::NULL_BUCKET] {
+                for (mode, runs) in [("force_generic_plan", 1), ("auto", 6)] {
+                    let label = format!("{order:?} bucket {bucket} {mode}");
+                    let plan = prepared_emitter_plan(
+                        &mut connection,
+                        EMITTER,
+                        &filter,
+                        bucket,
+                        mode,
+                        runs,
+                    )
+                    .await?;
+                    let mut scans = Vec::new();
+                    collect_scans(&plan[0]["Plan"], &mut scans);
+                    collect_nodes(&plan[0]["Plan"], &mut scans);
+                    ensure!(
+                        scans.iter().all(|node| node["type"] != "Seq Scan"
+                            && node["type"] != "Sort"
+                            && node["type"] != "Bitmap Heap Scan"),
+                        "{label}: {scans:?}"
+                    );
+                    let reads = scans
+                        .iter()
+                        .filter(|scan| scan["relation"] == "normalized_events")
+                        .collect::<Vec<_>>();
+                    ensure!(!reads.is_empty(), "{label}: {scans:?}");
+                    for read in reads {
+                        let condition = read["condition"].as_str().unwrap_or_default();
+                        ensure!(
+                            read["index"] == "normalized_events_emitter_history_idx"
+                                && condition.contains("emitting_address")
+                                && condition.contains("block_number"),
+                            "{label}: {scans:?}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+fn collect_nodes(node: &Value, nodes: &mut Vec<Value>) {
+    nodes.push(json!({"type":node["Node Type"]}));
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        collect_nodes(child, nodes);
+    }
+}
+
+/// `EXPLAIN (ANALYZE)` of the emitter seek as a prepared statement in `mode`, after `runs - 1`
+/// executions.
+async fn prepared_emitter_plan(
+    connection: &mut PgConnection,
+    emitter: &str,
+    filter: &EventHistoryReadFilter,
+    bucket: i64,
+    mode: &str,
+    runs: usize,
+) -> Result<Value> {
+    use sqlx::{Arguments, Execute};
+
+    let mut transaction = connection.begin().await?;
+    sqlx::query(&format!("SET LOCAL plan_cache_mode = {mode}"))
+        .execute(&mut *transaction)
+        .await?;
+    let mut query = QueryBuilder::<Postgres>::new("");
+    super::catalogue::push_emitter_seek_query(&mut query, emitter, filter, bucket);
+    sqlx::raw_sql(&format!("PREPARE emitter_seek AS {}", query.sql()))
+        .execute(&mut *transaction)
+        .await?;
+    let mut built = query.build();
+    let arguments = built
+        .take_arguments()
+        .map_err(anyhow::Error::from_boxed)?
+        .unwrap_or_default();
+    // EXECUTE takes no protocol parameters, so PostgreSQL renders each bound value as a quoted
+    // literal for it.
+    let placeholders = (1..=arguments.len())
+        .map(|index| format!("quote_nullable(${index})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let literals: Vec<String> =
+        sqlx::query_scalar_with(&format!("SELECT ARRAY[{placeholders}]"), arguments)
+            .persistent(false)
+            .fetch_one(&mut *transaction)
+            .await?;
+    let execute = format!("EXECUTE emitter_seek({})", literals.join(", "));
+    for _ in 1..runs {
+        sqlx::raw_sql(&execute).execute(&mut *transaction).await?;
+    }
+    let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {execute}"))
+        .persistent(false)
+        .fetch_one(&mut *transaction)
+        .await?;
+    transaction.rollback().await?;
+    Ok(plan)
+}

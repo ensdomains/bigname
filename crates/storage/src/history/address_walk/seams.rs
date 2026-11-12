@@ -58,6 +58,17 @@ mod scoped {
             .unwrap_or((256, 1_024))
     }
 
+    pub(super) fn contract_leapfrog() -> bool {
+        WORKING_SET
+            .try_with(|stats| {
+                stats
+                    .lock()
+                    .expect("address-history metrics lock")
+                    .contract_leapfrog
+            })
+            .unwrap_or(true)
+    }
+
     pub(super) fn change(kind: &'static str, before: usize, after: usize) {
         let _ = WORKING_SET.try_with(|stats| {
             let mut stats = stats.lock().expect("address-history metrics lock");
@@ -112,6 +123,17 @@ pub(super) fn cache_capacity() -> usize {
     #[cfg(not(any(test, feature = "test-support")))]
     {
         1_024
+    }
+}
+
+pub(super) fn contract_leapfrog() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        scoped::contract_leapfrog()
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        true
     }
 }
 
