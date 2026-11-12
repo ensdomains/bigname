@@ -367,13 +367,24 @@ async fn a_never_registered_name_resolves_through_its_2017_resolver() -> Result<
     let namehash = format!("{pointed:#x}");
     // What the name resolves to.
     let row = detail(&database, &[b"pointed", b"eth"]).await?;
-    assert_eq!(row["resolver"]["address"], format!("{resolver:#x}"), "{row:#}");
+    assert_eq!(
+        row["resolver"]["address"],
+        format!("{resolver:#x}"),
+        "{row:#}"
+    );
     assert_eq!(row["records"]["addresses"]["60"], HOLDER, "{row:#}");
     let resolves = holder_names(&database, "resolves_to").await?;
     let listed = named(&resolves, &namehash);
     assert_eq!(listed.len(), 1, "{resolves:#}");
-    let bound = get(&database, &format!("/v1/resolvers/1/{resolver:#x}?page_size=100")).await?;
-    assert!(bound.to_string().contains(&name_of(b"pointed")), "{bound:#}");
+    let bound = get(
+        &database,
+        &format!("/v1/resolvers/1/{resolver:#x}?page_size=100"),
+    )
+    .await?;
+    assert!(
+        bound.to_string().contains(&name_of(b"pointed")),
+        "{bound:#}"
+    );
     // What it serves as a name with no registration.
     assert_no_registration(&row);
     for field in ["owner", "manager", "authority"] {
@@ -416,7 +427,11 @@ async fn a_never_registered_name_with_no_resolver_resolves_to_nothing() -> Resul
     assert!(stored.serving_resource_id.is_none(), "{stored:#?}");
     let resolves = holder_names(&database, "resolves_to").await?;
     assert!(named(&resolves, &namehash).is_empty(), "{resolves:#}");
-    let bound = get(&database, &format!("/v1/resolvers/1/{resolver:#x}?page_size=100")).await?;
+    let bound = get(
+        &database,
+        &format!("/v1/resolvers/1/{resolver:#x}?page_size=100"),
+    )
+    .await?;
     assert!(!bound.to_string().contains(&name_of(b"plain")), "{bound:#}");
     database.cleanup().await
 }
@@ -488,8 +503,18 @@ async fn a_registered_2017_record_serves_the_current_registry_pointer() -> Resul
     assert_eq!(row["resolver"], Value::Null, "{row:#}");
     assert_eq!(row["records"]["addresses"]["60"], Value::Null, "{row:#}");
     let resolves = holder_names(&database, "resolves_to").await?;
-    assert!(named(&resolves, &format!("{pointed:#x}")).is_empty(), "{resolves:#}");
-    let bound = get(&database, &format!("/v1/resolvers/1/{resolver:#x}?page_size=100")).await?;
-    assert!(!bound.to_string().contains(&name_of(b"pointed")), "{bound:#}");
+    assert!(
+        named(&resolves, &format!("{pointed:#x}")).is_empty(),
+        "{resolves:#}"
+    );
+    let bound = get(
+        &database,
+        &format!("/v1/resolvers/1/{resolver:#x}?page_size=100"),
+    )
+    .await?;
+    assert!(
+        !bound.to_string().contains(&name_of(b"pointed")),
+        "{bound:#}"
+    );
     database.cleanup().await
 }
