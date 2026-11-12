@@ -134,7 +134,7 @@ pub(crate) async fn ensure_walk_index_set(
 /// Returns how many are not in place.
 pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
     let mut missing = 0;
-    let tables: [(&str, fn(&str) -> &'static str); 2] = [
+    let tables: [(&str, InstallScript); 2] = [
         (
             "normalized_events",
             |_| "ops/record-history-indexes/install.sql",
@@ -154,6 +154,9 @@ pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
     missing
 }
 
+/// The install script that builds an advisory index, by index name.
+type InstallScript = fn(&str) -> &'static str;
+
 /// The install script of a `project_grant` advisory index.
 fn project_grant_install(index: &str) -> &'static str {
     PROJECT_GRANT_ADVISORY_INSTALL
@@ -164,7 +167,7 @@ fn project_grant_install(index: &str) -> &'static str {
 
 fn warn_on(
     table: &str,
-    install: fn(&str) -> &'static str,
+    install: InstallScript,
     statuses: Result<Option<Vec<IndexStatus>>, sqlx::Error>,
 ) -> usize {
     let statuses = match statuses {
