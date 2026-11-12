@@ -3095,15 +3095,17 @@ introduces it rebuilds Project from full history before serving the option; see
   supplied, and `address` then restricts the permission subject. An explicit or
   name-implied `namespace` filters registrations before pagination; an
   address-only request without `namespace` continues to span all namespaces.
-  For the limited solo beta, address-only operator discovery retains a known
-  scalability limitation: a small page can still scan or sort an owner's
-  resource keys, and sparse namespace eligibility or cursor filtering can
-  require many eligibility lookups. The accepted optimization reduces payload
-  work in measured finite cases; it does not establish a production latency
-  SLO, a cold-cache guarantee, or a bound for arbitrary owner sizes. Issue #861
-  remains open for scalability. Name or explicit registration filters select
-  one resource and avoid this broad discovery branch. This limitation does not
-  change which rows are eligible or the cursor ordering.
+  An address-only page reads the address's grant keys in key order, at most
+  64 keys per round. For rows whose resource has no current name, the lookup of
+  the registration a registry-only grant stands for seeks each candidate
+  name's node, lease and block by key. A page's cost therefore grows with its
+  rows and does not depend on which names share the page. One cost remains
+  open under issue #861: an explicit `namespace` filter checks each candidate
+  resource's namespace with one lookup, so a sparse namespace can need many
+  lookups for one page. None of this is a production latency SLO or a
+  cold-cache guarantee. Name or explicit registration filters select one
+  resource and avoid this broad discovery branch. None of this changes which
+  rows are eligible or the cursor ordering.
   An explicit namespace must be public; an unknown value returns `404 not_found`
   before cursor decoding.
   Direct rows and effective registry-operator rows share the namespace
