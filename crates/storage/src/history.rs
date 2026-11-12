@@ -1,4 +1,6 @@
 mod address_evidence;
+#[cfg(test)]
+mod address_evidence_plan_tests;
 pub use address_evidence::{HistoricalHistoryRelation, historical_history_relations};
 mod address_matches;
 mod address_walk;
