@@ -2498,3 +2498,6 @@ mod ens_v2_operators_real;
 
 #[path = "v2_permissions_wrapper_registry_real.rs"]
 mod wrapper_registry_real;
+
+#[path = "v2_permissions_registration_map.rs"]
+mod registration_map;
