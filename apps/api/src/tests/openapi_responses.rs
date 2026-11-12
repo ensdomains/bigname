@@ -1,7 +1,7 @@
 use super::*;
 
 // The existing family conformance fixture captures fourteen product operations
-// and six diagnostics. These six complete the selected OpenAPI surface.
+// and six diagnostics. These seven complete the selected OpenAPI surface.
 const ADDITIONAL_OPENAPI_OPERATIONS: &[&str] = &[
     "GET /v1/names",
     "GET /v1/registries/{chain_id}/{address}",
@@ -9,6 +9,7 @@ const ADDITIONAL_OPENAPI_OPERATIONS: &[&str] = &[
     "GET /v1/resolvers/{chain_id}/{address}/links",
     "GET /v1/resolvers/{chain_id}/{address}/roles",
     "GET /v1/resolvers/{chain_id}/{address}/records",
+    "GET /v1/resolvers",
 ];
 
 #[tokio::test]
@@ -205,6 +206,12 @@ async fn openapi_additional_operations_have_nonempty_response_captures() -> Resu
         );
         captured.push(ADDITIONAL_OPENAPI_OPERATIONS[index]);
     }
+    let held = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers?role_holder={V2_ADDRESS}&chain_id=1"),
+    )
+    .await?;
+    assert_non_empty_json(&held["data"], ADDITIONAL_OPENAPI_OPERATIONS[6], "data");
     database.cleanup().await?;
 
     let database = TestDatabase::new_migrated().await?;
@@ -225,6 +232,7 @@ async fn openapi_additional_operations_have_nonempty_response_captures() -> Resu
     );
     captured.push(ADDITIONAL_OPENAPI_OPERATIONS[5]);
     database.cleanup().await?;
+    captured.push(ADDITIONAL_OPENAPI_OPERATIONS[6]);
     assert_eq!(captured, ADDITIONAL_OPENAPI_OPERATIONS);
     Ok(())
 }
