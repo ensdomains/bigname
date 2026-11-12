@@ -118,11 +118,11 @@ pub async fn load_current_normalized_names(
 pub async fn load_current_names_by_resource_ids(
     db: impl Into<crate::ReadDb<'_>>,
     resource_ids: &[Uuid],
-    _chain_ids: &[String],
+    chain_ids: &[String],
 ) -> Result<BTreeMap<Uuid, NameCurrentRow>> {
     if resource_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
 
-    crate::families::name::load_family_names_by_resource_ids(db, resource_ids).await
+    crate::families::name::load_family_names_by_resource_ids(db, resource_ids, chain_ids).await
 }
