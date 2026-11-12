@@ -5434,8 +5434,9 @@ For a registrar lease first identified by a later readable observation, registra
 - Tier: product read. The collection lists the ENSv2 registries on which one
   address holds registry root roles: Enhanced Access Control (EAC) roles
   granted on the registry's root resource (EAC resource 0), the rows that
-  `GET /v1/permissions` shows with `grant_scope.kind` `root`. It reads the
-  other way from
+  `GET /v1/permissions` shows with `grant_scope.kind` `root`.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L53-L54 @ ens_v2_sepolia_20261001@07e55a05)
+  It reads the other way from
   [`GET /v1/permissions?registry=`](#get-v1permissions), which lists the root
   holders of one registry, but it does not depend on that route's registry
   resolution. It lists the stored root grants, as described below, so for a
@@ -5472,14 +5473,20 @@ For a registrar lease first identified by a later readable observation, registra
     [migration registry](glossary.md#migration-registry-wrapperregistry)),
     `GET /v1/permissions?registry=` may show different powers for the same
     holder, derived from the parent name, and may show holders this route does
-    not list. That registry gives its parent registry's root roles to the
-    parent name's current owner and to that owner's operators on the parent
-    registry, as described for `GET /v1/permissions` above. Those rows are
-    derived, not EAC grants, so this route does not list the `WrapperRegistry`
-    for those accounts. A root grant such an account holds on the
-    `WrapperRegistry` itself is listed here with its own powers, while that
-    read shows the derived row in its place. The parent registry contract,
-    which holds the `WrapperRegistry`'s root grant, lists it.
+    not list. That registry grants its root roles to its parent registry
+    contract when it is initialized. For the parent name's current owner, and
+    for an account that owner approved as an operator on the parent registry,
+    its root role check returns the roles the parent registry contract holds
+    there, in place of the account's own, as described for
+    `GET /v1/permissions` above.
+    (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L145 @ ens_v2_sepolia_20261001@07e55a05)
+    (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+    `GET /v1/permissions?registry=` shows those accounts derived rows, which
+    are not EAC grants, so this route does not list the `WrapperRegistry` for
+    them. A root grant such an account holds on the `WrapperRegistry` itself is
+    listed here with its own powers, although the contract does not use it,
+    and that read shows the derived row in its place. The parent registry
+    contract, which holds the `WrapperRegistry`'s root grant, lists it.
   - A grant on a registry contract that no longer holds its address at the
     current publication is still listed, while
     `GET /v1/permissions?registry=` answers an empty page for that address.
