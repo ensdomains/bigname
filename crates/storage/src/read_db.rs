@@ -158,9 +158,9 @@ impl Drop for ReadSnapshot {
             return;
         };
         runtime.spawn(async move {
-            crate::serving_pool::cancel_statement(&cancels, pid).await;
-            // Only now may the connection go back to the pool.
+            // Red: the connection goes back before the cancel is sent.
             drop(transaction);
+            crate::serving_pool::cancel_statement(&cancels, pid).await;
         });
     }
 }
