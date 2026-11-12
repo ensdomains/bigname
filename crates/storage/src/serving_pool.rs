@@ -234,7 +234,8 @@ pub(crate) enum CancelOutcome {
 /// lingering session at a time. A stall that outlasts the backstop adds one per backstop interval
 /// until the server recovers.
 pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) -> CancelOutcome {
-    let mut conn = match tokio::time::timeout(CANCEL_WAIT, cancels.acquire()).await {
+    // Red: the wait for the cancel connection is not bounded by `CANCEL_WAIT`.
+    let mut conn = match tokio::time::timeout(CANCEL_WAIT * 20, cancels.acquire()).await {
         Ok(Ok(conn)) => conn,
         Ok(Err(error)) => {
             tracing::warn!(pid, %error, "{CANCEL_FAILED}");
