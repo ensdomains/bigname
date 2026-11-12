@@ -9,6 +9,9 @@
 //! | the same after alpha's parent name lapses by path expiry | the same rows on both routes |
 //! | `ROOT_HOLDERS[0]` once alpha's instance retired | still alpha; `/v1/permissions?registry=` is empty |
 //! | `PAGER`, root grants at three addresses, one stored in upper case | lower-case rows in byte order, one per page |
+//!
+//! The `chain_id` filter's answers on an unserved, unknown, unpublished and served chain are
+//! the last test's table.
 use super::*;
 
 const PAGER: &str = "0x00000000000000000000000000000000000003f0";
@@ -281,5 +284,64 @@ async fn registries_by_role_holder_page_by_cursor_and_refuse_malformed_requests(
             .is_some_and(|message| message.starts_with("role_holder is required")),
         "{body}"
     );
+    database.cleanup().await
+}
+
+/// How a `chain_id` filter is answered on the `ens`-only registry fixture:
+///
+/// | Chain | State | Answer |
+/// | --- | --- | --- |
+/// | Base (8453), a known chain no public namespace serves | nothing indexed, published, rebuilding | `400`, naming it as not served |
+/// | 99999, not a supported chain | the same | `400` |
+/// | Ethereum (1), served | published | `200` |
+/// | Ethereum (1), served | rebuilding, so no publication is servable | `409 stale` |
+#[tokio::test]
+async fn registries_by_role_holder_refuse_an_unserved_chain_before_any_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let route = |chain: &str| {
+        format!(
+            "/v1/registries?role_holder={}&chain_id={chain}",
+            ROOT_HOLDERS[0]
+        )
+    };
+    for state in ["nothing indexed", "published", "rebuilding"] {
+        match state {
+            "published" => seed_registry_root_holders(&database).await?,
+            "rebuilding" => {
+                sqlx::query(
+                    "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'",
+                )
+                .execute(&database.pool)
+                .await?;
+            }
+            _ => {}
+        }
+        let (status, body) = registries_response(&database, &route("8453")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{state}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_input", "{state}: {body}");
+        assert_eq!(
+            body["error"]["message"], "chain_id names a chain this deployment does not serve",
+            "{state}: {body}"
+        );
+        let (status, body) = registries_response(&database, &route("99999")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{state}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_input", "{state}: {body}");
+        if state == "nothing indexed" {
+            continue;
+        }
+        let (status, body) = registries_response(&database, &route("1")).await?;
+        if state == "published" {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                body["data"],
+                json!([{"chain_id":1, "address":ALPHA_REGISTRY, "grant_count":1,
+                        "powers":["admin_registrar", "registrar"]}]),
+                "{body}"
+            );
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"]["code"], "stale", "{body}");
+        }
+    }
     database.cleanup().await
 }

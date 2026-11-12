@@ -5430,9 +5430,10 @@ For a registrar lease first identified by a later readable observation, registra
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Tier: product read. The collection lists the ENSv2 registries on which one
-  address holds registry root roles: Enhanced Access Control (EAC) roles on
-  the registry's root resource (EAC resource 0), which apply to the whole
-  registry. It reads the other way from
+  address holds registry root roles: Enhanced Access Control (EAC) roles
+  granted on the registry's root resource (EAC resource 0), the rows that
+  `GET /v1/permissions` shows with `grant_scope.kind` `root`. It reads the
+  other way from
   [`GET /v1/permissions?registry=`](#get-v1permissions), which lists the root
   holders of one registry, but it does not depend on that route's registry
   resolution. It lists the stored root grants, as described below, so for a
@@ -5443,7 +5444,10 @@ For a registrar lease first identified by a later readable observation, registra
   collection never lists every registry. `chain_id` keeps one chain's
   registries; a supported chain this deployment does not serve returns
   `400 invalid_input` with `chain_id names a chain this deployment does not
-  serve`. `cursor` and `page_size` (default 50, maximum 200) page the list.
+  serve`, decided before any publication is read, so it is never the
+  retryable `409 stale`. A served chain whose publication is unavailable
+  returns `409 stale`. `cursor` and `page_size` (default 50, maximum 200) page
+  the list.
   Other query parameters, `at` and `finality` included, are rejected.
 - Each row is `{chain_id, address, grant_count, powers}` for one registry
   address at which the holder holds at least one current root grant.

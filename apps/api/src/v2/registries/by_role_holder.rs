@@ -20,9 +20,7 @@ use crate::{
         collection_snapshot::CollectionSnapshot,
         cursor::invalid_cursor_error,
         list_cursor::{ListCursor, ListPosition},
-        name_rows_error, parse_numeric_chain_id, permission_powers_value,
-        resolvers::resolver_namespace,
-        slug_to_numeric,
+        name_rows_error, parse_numeric_chain_id, permission_powers_value, slug_to_numeric,
         support::parse_evm_address,
     },
 };
@@ -116,23 +114,13 @@ pub(crate) async fn get_registries(
         .read(params.cursor.as_deref(), &POSITION)?
         .map(|position| cursor_position(&position))
         .transpose()?;
-    let namespace = params
-        .chain
-        .map(|(_, slug)| resolver_namespace(slug))
-        .transpose()?;
-    let mut snapshot = CollectionSnapshot::capture_for_namespace(&state, None, namespace).await?;
-    let served: Vec<String> = snapshot.block_bounds().into_keys().collect();
+    let mut snapshot = match params.chain {
+        Some((_, slug)) => CollectionSnapshot::capture_for_chain(&state, slug).await?,
+        None => CollectionSnapshot::capture_for_namespace(&state, None, None).await?,
+    };
     let chains = match params.chain {
-        Some((_, slug)) if !served.iter().any(|chain| chain == slug) => {
-            return Err(snapshot
-                .refuse(
-                    &state,
-                    V2Error::invalid_input("chain_id names a chain this deployment does not serve"),
-                )
-                .await);
-        }
         Some((_, slug)) => vec![slug.to_owned()],
-        None => served,
+        None => snapshot.block_bounds().into_keys().collect(),
     };
     let limit = i64::try_from(params.page_size.saturating_add(1))
         .map_err(|_| V2Error::invalid_input("page_size is too large"))?;
