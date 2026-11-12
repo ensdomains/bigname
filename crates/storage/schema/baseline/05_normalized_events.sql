@@ -435,6 +435,33 @@ CREATE INDEX IF NOT EXISTS normalized_events_emitter_history_idx
     WHERE raw_fact_ref ->> 'emitting_address' IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+-- History pages filtered by one record key read a write arm per chain
+-- (crates/storage/src/history/record_key_source.rs): the key's writes on one chain, and the
+-- key's writes by one emitter on one chain, each in page order. The key is indexed by its first
+-- 256 characters, so a key of any length can be written, and the arm compares the whole key on
+-- the row. Keep them identical to ops/record-history-indexes/install.sql and
+-- migrations/20261111120000_normalized_events_record_history_indexes.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_record_key_history_idx
+    ON normalized_events (
+        chain_id,
+        left(after_state ->> 'record_key', 256),
+        block_number DESC NULLS LAST
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX IF NOT EXISTS normalized_events_record_emitter_key_history_idx
+    ON normalized_events (
+        chain_id,
+        lower(raw_fact_ref ->> 'emitting_address'),
+        left(after_state ->> 'record_key', 256),
+        block_number DESC NULLS LAST
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_ens_v1_record_node_resolver_idx
     ON normalized_events (
         chain_id,
