@@ -112,11 +112,20 @@ pub(super) async fn refresh(
     Ok((resources, written, undo))
 }
 
-const DISCOVER:&str="/* project:history.resolver_edges */ WITH pointers AS (
+/// Resolver source discovery at the block `$2` for the resources `$wanted` names, a `FROM` item
+/// with a `resource` column. `$head` ends with `WITH`, and `$select` is the select list and the
+/// rest of a `SELECT` over the `edges` CTE.
+macro_rules! discover_sql {
+    ($head:expr, $wanted:expr, $select:expr) => {
+        concat!(
+            $head,
+            " pointers AS (
     SELECT DISTINCT pointer.chain_id,pointer.resource_id,pointer.event_identity AS pointer_event_identity,
         pointer.block_number AS pointer_block_number,lower(surface.namehash) AS node,
         COALESCE(lower(pointer.after_state->>'resolver'),'') AS pointer_resolver
-    FROM unnest($3::uuid[]) wanted(resource)
+    FROM ",
+            $wanted,
+            "
     CROSS JOIN LATERAL (SELECT pointer.* FROM normalized_events pointer
         WHERE pointer.resource_id=wanted.resource AND pointer.chain_id=$1
           AND pointer.event_kind='ResolverChanged'
@@ -158,10 +167,28 @@ const DISCOVER:&str="/* project:history.resolver_edges */ WITH pointers AS (
                   AND lineage.block_number=link.block_number
                   AND lineage.canonicality_state IN ('canonical','safe','finalized'))))
         OFFSET 0) link
-) SELECT to_jsonb(edge) FROM edges edge";
+) SELECT ",
+            $select
+        )
+    };
+}
+pub(super) use discover_sql;
 
-const SHAPE:&str="/* project:history.edge_envelopes */
-    SELECT to_jsonb(fresh) FROM jsonb_populate_recordset(NULL::project_history_source_edge,$1) edge
+const DISCOVER: &str = discover_sql!(
+    "/* project:history.resolver_edges */ WITH",
+    "unnest($3::uuid[]) wanted(resource)",
+    "to_jsonb(edge) FROM edges edge"
+);
+
+/// The `FROM` clause of the bounds of the edges `$edges` names, a `FROM` item aliased `edge`,
+/// from their finished sources, with `$2` the event-kind bit of a link. The select list reads
+/// the lateral `fresh`.
+macro_rules! shape {
+    ($edges:expr) => {
+        concat!(
+            "FROM ",
+            $edges,
+            "
     LEFT JOIN project_history_source source ON source.chain_id=edge.chain_id
       AND source.source_kind=edge.source_kind AND source.source_key=edge.source_key
       AND source.resolver_address=edge.source_resolver
@@ -175,4 +202,18 @@ const SHAPE:&str="/* project:history.edge_envelopes */
         CASE WHEN bounds.first_bucket IS NULL THEN 'empty'::int8range
             ELSE int8range(bounds.first_bucket,bounds.last_bucket+1,'[)') END AS bucket_range,
         COALESCE(source.event_mask,0)|CASE WHEN linked.link_bucket IS NULL THEN 0 ELSE $2::bigint END AS event_mask,
-        COALESCE(source.key_bloom,B'0'::bit(256)) AS key_bloom) fresh";
+        COALESCE(source.key_bloom,B'0'::bit(256)) AS key_bloom) fresh"
+        )
+    };
+}
+pub(super) use shape;
+
+const SHAPE: &str = concat!(
+    "/* project:history.edge_envelopes */
+    SELECT to_jsonb(fresh) ",
+    shape!("jsonb_populate_recordset(NULL::project_history_source_edge,$1) edge")
+);
+
+#[cfg(test)]
+#[path = "edges_text_tests.rs"]
+mod edges_text_tests;

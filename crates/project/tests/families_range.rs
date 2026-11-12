@@ -737,7 +737,9 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
     pointers(&fixture, 10..=29).await?;
     follow(&fixture, 10, 30).await?;
     let incremental = fixture.exact().await?;
-    let options = in_ranges(30).with_max_blocks_per_run(5);
+    let options = in_ranges(30)
+        .with_max_blocks_per_run(5)
+        .with_compose_builder_partitions(1, 1);
     let mut mode = FamilyMode::Rebuild;
     let mut runs = 0;
     loop {
@@ -753,7 +755,10 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
         }
         ensure!(runs < 10, "the rebuild did not finish");
     }
-    assert_eq!(runs, 5, "21 work blocks at five a run");
+    assert_eq!(
+        runs, 7,
+        "20 work blocks, the composition pass's ten steps and the target, at five a run"
+    );
     assert_eq!(marker_state(&fixture).await?, "live");
     let rebuilt = fixture.exact().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
@@ -764,14 +769,18 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
 
 // Ranges double from one block only right after the reset: a run that resumes a rebuild starts
 // with a range as large as its budget. With a budget of eight, the first run commits [10],
-// [11, 12], [13 to 16] and [17]; the second commits [18 to 25] as one range.
+// [11, 12], [13 to 16] and [17]; the second commits [18 to 25] as one range. The third commits
+// [26 to 29] and the first four of the composition pass's thirteen steps, the fourth the next
+// eight, and the fifth the pass's end and the target.
 #[tokio::test]
 async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Result<()> {
     let fixture = Fixture::new("families_range_resume_size", 40).await?;
     pointers(&fixture, 10..=29).await?;
     follow(&fixture, 10, 30).await?;
     let incremental = fixture.exact().await?;
-    let options = in_ranges(30).with_max_blocks_per_run(8);
+    let options = in_ranges(30)
+        .with_max_blocks_per_run(8)
+        .with_compose_builder_partitions(1, 1);
     let first = fixture
         .apply_with(30, FamilyMode::Rebuild, &options)
         .await?;
@@ -789,9 +798,21 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
     assert_eq!(fixture.marker().await?.0, Some(25));
     let third = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
     assert_eq!(
-        (third.blocks, third.ranges),
-        (5, 1),
-        "[26 to 29], the composition pass at 29, then the target on its own"
+        (third.blocks, third.ranges, third.compose_chunks),
+        (4, 1, 4),
+        "[26 to 29], then the first four steps of the composition pass at 29"
+    );
+    let fourth = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
+    assert_eq!(
+        (fourth.blocks, fourth.ranges, fourth.compose_chunks),
+        (0, 0, 8),
+        "the next eight steps of the composition pass"
+    );
+    let fifth = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
+    assert_eq!(
+        (fifth.blocks, fifth.ranges, fifth.compose_chunks),
+        (1, 0, 1),
+        "the pass's end, then the target on its own"
     );
     assert_eq!(fixture.journalled_blocks().await?, vec![29, 30]);
     assert_eq!(marker_state(&fixture).await?, "live");
@@ -819,6 +840,28 @@ async fn a_range_cap_of_zero_counts_as_one_block() -> Result<()> {
     let off = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off);
     let outcome = rebuild_equal(&fixture, 14, &off).await?;
     assert_eq!((outcome.blocks, outcome.ranges), (5, 0));
+    fixture.cleanup().await
+}
+
+// The event cap's twin: `with_range_caps` counts a cap of zero events as one, and a zero set on
+// the field still gives every work block a range of its own, equal to the follow.
+#[tokio::test]
+async fn a_range_event_cap_of_zero_counts_as_one_event() -> Result<()> {
+    assert_eq!(in_ranges(14).with_range_caps(1024, 0).max_range_events, 1);
+    let fixture = Fixture::new("families_range_zero_event_cap", 20).await?;
+    pointers(&fixture, 10..=13).await?;
+    follow(&fixture, 10, 14).await?;
+    let mut options = in_ranges(14);
+    options.max_range_events = 0;
+    let outcome = rebuild_equal(&fixture, 14, &options).await?;
+    assert_eq!((outcome.blocks, outcome.ranges), (5, 4));
+    assert_eq!(fixture.journalled_blocks().await?, vec![13, 14]);
+    let outcome = rebuild_equal(&fixture, 14, &in_ranges(14)).await?;
+    assert_eq!(
+        (outcome.blocks, outcome.ranges),
+        (5, 3),
+        "the default cap ranges [10], [11, 12] and [13]"
+    );
     fixture.cleanup().await
 }
 
@@ -875,7 +918,12 @@ async fn ranges_stop_five_blocks_below_the_safe_block() -> Result<()> {
     pointers(&fixture, 10..=29).await?;
     fixture.heads(40, 25, 20).await?;
     follow(&fixture, 10, 30).await?;
-    rebuild_equal(&fixture, 30, &FamilyOptions::new(CONTENT_HASH)).await?;
+    rebuild_equal(
+        &fixture,
+        30,
+        &FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(u64::MAX),
+    )
+    .await?;
     let mut expected = vec![20];
     expected.extend(21..=30);
     assert_eq!(fixture.journalled_blocks().await?, expected);
@@ -889,8 +937,13 @@ async fn without_a_safe_block_ranges_stop_256_blocks_below_the_target() -> Resul
     for block in (10..=290).step_by(10) {
         fixture.resolver_changed(block, 1, 1, R1).await?;
     }
+    // One run, whatever the composition pass's partition count.
     let rebuilt = fixture
-        .apply_with(300, FamilyMode::Rebuild, &FamilyOptions::new(CONTENT_HASH))
+        .apply_with(
+            300,
+            FamilyMode::Rebuild,
+            &FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(u64::MAX),
+        )
         .await?;
     let mut expected = vec![40];
     expected.extend((50..=290).step_by(10));
@@ -914,7 +967,15 @@ async fn a_range_ends_before_the_block_past_its_event_cap() -> Result<()> {
     fixture.resolver_changed(17, 2, 5, R1).await?;
     filler(&fixture, 17).await?;
     follow(&fixture, 10, 30).await?;
-    let rebuilt = rebuild_equal(&fixture, 30, &in_ranges(30).with_range_caps(1024, 2)).await?;
+    // One run, whatever the composition pass's partition count.
+    let rebuilt = rebuild_equal(
+        &fixture,
+        30,
+        &in_ranges(30)
+            .with_range_caps(1024, 2)
+            .with_max_blocks_per_run(u64::MAX),
+    )
+    .await?;
     assert_eq!(rebuilt.ranges, 11);
     assert_eq!(
         fixture.journalled_blocks().await?,
@@ -966,7 +1027,9 @@ async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> 
     );
     // Six blocks change a path: 5, 7, 8, 9, 10 and 12. A rebuild in fewer than five ranges puts
     // two of them in one range.
-    let whole = rebuild_equal(&fixture, 12, &in_ranges(12)).await?;
+    // Each rebuild in one run, whatever the composition pass's partition count.
+    let one_run = |options: FamilyOptions| options.with_max_blocks_per_run(u64::MAX);
+    let whole = rebuild_equal(&fixture, 12, &one_run(in_ranges(12))).await?;
     ensure!(
         (1..5).contains(&whole.ranges),
         "the rebuild applied {} ranges, so no range is known to hold two path changes",
@@ -976,9 +1039,79 @@ async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> 
         in_ranges(12).with_range_caps(4, u64::MAX),
         in_ranges(12).with_range_caps(2, u64::MAX),
     ] {
-        let outcome = rebuild_equal(&fixture, 12, &options).await?;
+        let outcome = rebuild_equal(&fixture, 12, &one_run(options)).await?;
         ensure!(outcome.ranges > 0, "the rebuild applied no range");
     }
+    // Every event cap under every budget, each rebuild run after run as the runner continues one.
+    // Each partition of the pass's catalogue build is a run under a budget of one, so the build
+    // runs as one span and one key partition, 1 + 1 + 5 + 1 = 8 runs. The default 64 spans and 16
+    // partitions would take 1 + 64 + 5 * 16 + 1 = 146 of the 200 runs a rebuild may take.
+    // The child listing differs from the relation at each publication a run leaves before the
+    // children stream finished (`families_support/child_listing.rs`).
+    let mut unfinished = 0;
+    for events in [1, 2, families::MAX_RANGE_EVENTS, u64::MAX] {
+        for budget in [1, families::MAX_BLOCKS_PER_RUN, u64::MAX] {
+            let options = in_ranges(12)
+                .with_range_caps(families::MAX_RANGE_BLOCKS, events)
+                .with_max_blocks_per_run(budget)
+                .with_compose_builder_partitions(1, 1);
+            let (ranges, before_children) = rebuild_in_runs_equal(&fixture, 12, &options).await?;
+            ensure!(ranges > 0, "events {events}, budget {budget}: no range");
+            unfinished += before_children;
+        }
+    }
+    fixture.expect_listing_skips(unfinished);
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
+}
+
+/// Rebuild at `target` with `options`, one run after another until the marker reaches it, and
+/// require every family table and the marker (without its generation) as they stood before.
+/// Returns the ranges the runs applied and the runs that left a publication before the pass's
+/// children stream finished: still in the ranges, or in the names, leads or children stream.
+async fn rebuild_in_runs_equal(
+    fixture: &Fixture,
+    target: i64,
+    options: &FamilyOptions,
+) -> Result<(u64, usize)> {
+    let incremental = fixture.exact().await?;
+    let (mut mode, mut runs, mut ranges, mut unfinished) = (FamilyMode::Rebuild, 0, 0, 0);
+    loop {
+        let outcome = fixture.apply_with(target, mode.clone(), options).await?;
+        ensure!(
+            !outcome.reset || runs == 0,
+            "run {runs} restarted the rebuild"
+        );
+        let record = fixture.repair_record().await?.unwrap_or_default();
+        let before_children = match record["state"].as_str() {
+            Some("rebuilding") => record["composed_block"].is_null(),
+            Some("composing") => {
+                matches!(record["compose_stream"].as_i64(), None | Some(0 | 7 | 5))
+            }
+            _ => false,
+        };
+        // Its stored listing is empty until the children stream, so it differs from the relation
+        // once the relation lists a child.
+        if outcome.marker.is_some()
+            && before_children
+            && fixture.child_listing_composes_any(CHAIN).await?
+        {
+            unfinished += 1;
+        }
+        ranges += outcome.ranges;
+        runs += 1;
+        mode = FamilyMode::Normal;
+        if outcome.marker.as_ref().map(|marker| marker.number) == Some(target) {
+            break;
+        }
+        ensure!(runs < 200, "the rebuild did not finish");
+    }
+    let rebuilt = fixture.exact().await?;
+    for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
+        ensure!(
+            was == now,
+            "a rebuild in {runs} runs at {target} left {table} as {now}, not {was}"
+        );
+    }
+    Ok((ranges, unfinished))
 }

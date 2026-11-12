@@ -62,8 +62,8 @@ jobs and their aggregates are skipped there, and a skipped check satisfies the
 ruleset. Two queued pull requests that pass separately but break each other in
 those suites are not caught by the queue, and nothing reruns those suites on
 `main`. A later pull request's full run against the updated `main` may surface
-the break, in that unrelated pull request. Native event conditions keep the
-subsequent push from running the same tests and static checks again.
+the break, in that unrelated pull request. Conditions on the ref keep the
+subsequent push to `main` from running the same tests and static checks again.
 
 The main-branch follow-up still uploads the site and refreshes the shared Cargo
 and shutdown-image caches. A cache miss can compile dependencies or build an

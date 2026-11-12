@@ -27,6 +27,7 @@ use adaptive::AdaptiveInterpretArgs;
 #[path = "cli_families.rs"]
 mod families;
 use families::ProjectFamiliesArgs;
+pub use families::{redo_connections, run_connections};
 #[path = "cli_index_build.rs"]
 mod index_build;
 use index_build::IndexBuildArgs;

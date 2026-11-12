@@ -117,8 +117,14 @@ pub(crate) const COMPOSED: [&str; 16] = [
     "project_event_count",
 ];
 
-/// The composition pass's name work list (families/compose.rs), cleared with the families.
-pub(crate) const COMPOSE_NAME_WORK: &str = "project_compose_name_work";
+/// The composition pass's work tables, cleared with the families: its name work list
+/// (families/compose.rs), the catalogue build's keys and partial aggregates
+/// (history_catalogue/build) and the event count stream's span counts (compose_counts.rs).
+pub(crate) const COMPOSE_WORK: [&str; 3] = [
+    "project_compose_name_work",
+    "project_compose_history_work",
+    "project_compose_event_count_work",
+];
 
 /// The spec of a journalled table by name.
 pub(crate) fn spec(name: &str) -> &'static TableSpec {

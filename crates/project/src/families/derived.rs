@@ -11,7 +11,7 @@
 //! preimage spells further (`address_listing.rs`, `children.rs`).
 mod address_listing;
 pub(crate) use address_listing::{
-    derive_heals as heal_address_listing, pass_chunk as address_listing_pass_chunk,
+    derive_heals as heal_address_listing, lead_rank, pass_chunk as address_listing_pass_chunk,
     prepare as prepare_address_listing, stage as stage_address_listing,
 };
 mod children;

@@ -122,6 +122,44 @@ impl Fixture {
         Ok(())
     }
 
+    /// Whether the relation composes any listing row for `chain` at its family marker's block:
+    /// a publication whose stored listing is still empty differs from it exactly then.
+    pub async fn child_listing_composes_any(&self, chain: &str) -> Result<bool> {
+        let marker: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+            "SELECT current_block_number, extract(epoch FROM block_timestamp)::bigint
+             FROM project_family_marker WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((Some(number), Some(timestamp_seconds))) = marker else {
+            return Ok(false);
+        };
+        let parents: Vec<String> = sqlx::query_scalar(PARENTS)
+            .bind(chain)
+            .fetch_all(&self.pool)
+            .await?;
+        let block = ListingBlock {
+            chain_id: chain,
+            number,
+            timestamp_seconds,
+        };
+        let mut oracle = listing_rows(
+            "SELECT coalesce(jsonb_agg(to_jsonb(composed)
+                                       ORDER BY composed.child_logical_name_id), '[]')::text
+             FROM (",
+            block,
+            &parents,
+            None,
+        );
+        oracle.push(") composed");
+        let composed: String = oracle
+            .build_query_scalar::<String>()
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(composed != "[]")
+    }
+
     /// Whether the readers refuse `chain`'s publication with the structured refusal
     /// (`FamilyPublicationUnavailable`), matched by its kind. Any other error fails the check.
     async fn readers_refuse(&self, chain: &str) -> Result<bool> {
@@ -135,8 +173,8 @@ impl Fixture {
     /// Whether `chain`'s marker (in `state`) belongs to a rebuild whose composition pass has not
     /// finished the children stream: the marker is `bootstrap_pending` and the repair record is
     /// still applying ranges before its pass (`rebuilding` with no composed block) or composing
-    /// the names stream (0) or the children stream (4), which run first and second
-    /// (`families/compose.rs`, `Stream`).
+    /// the names stream (0), the leads stream (7) or the children stream (5), which run first,
+    /// second and third (`families/compose.rs`, `Stream`).
     async fn before_children_stream(&self, chain: &str, state: &str) -> Result<bool> {
         if state != "bootstrap_pending" {
             return Ok(false);
@@ -151,7 +189,7 @@ impl Fixture {
         Ok(match record {
             Some((record, _, composed)) if record == "rebuilding" => composed.is_none(),
             Some((record, stream, _)) if record == "composing" => {
-                matches!(stream, None | Some(0) | Some(4))
+                matches!(stream, None | Some(0) | Some(7) | Some(5))
             }
             _ => false,
         })

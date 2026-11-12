@@ -231,6 +231,133 @@ fn redo_takes_the_family_run_budget_and_keeps_every_family_failure_fatal() {
 }
 
 #[test]
+fn the_catalogue_build_flags_reach_the_family_settings() {
+    let redo = |flags: &[&str]| {
+        let mut args = vec![
+            "phase-runner",
+            "redo",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "1",
+            "--to-block",
+            "30",
+        ];
+        args.extend_from_slice(flags);
+        Cli::try_parse_from(args)
+    };
+    let families = |flags: &[&str]| {
+        let command = redo(flags)
+            .expect("build flags must parse")
+            .resolve()
+            .expect("build flags must resolve");
+        let ResolvedCommand::Redo {
+            project_families, ..
+        } = command
+        else {
+            panic!("expected redo command");
+        };
+        project_families
+    };
+    let defaults = families(&[]);
+    assert_eq!(
+        (
+            defaults.compose_block_spans,
+            defaults.compose_key_partitions,
+            defaults.compose_work_mem
+        ),
+        (
+            bigname_project::families::COMPOSE_BUILDER_BLOCK_SPANS,
+            bigname_project::families::COMPOSE_BUILDER_KEY_PARTITIONS,
+            None
+        )
+    );
+    let set = families(&[
+        "--project-families-compose-block-spans",
+        "3",
+        "--project-families-compose-key-partitions",
+        "32",
+        "--project-families-compose-work-mem",
+        "256MB",
+    ]);
+    assert_eq!(
+        (
+            set.compose_block_spans,
+            set.compose_key_partitions,
+            set.compose_work_mem.as_deref()
+        ),
+        (3, 32, Some("256MB"))
+    );
+    for flags in [
+        ["--project-families-compose-block-spans", "0"],
+        ["--project-families-compose-block-spans", "16385"],
+        ["--project-families-compose-block-spans", "40000"],
+        ["--project-families-compose-key-partitions", "0"],
+        ["--project-families-compose-key-partitions", "3"],
+        ["--project-families-compose-key-partitions", "32768"],
+    ] {
+        assert!(redo(&flags).is_err(), "{flags:?} must be refused");
+    }
+    let most = families(&["--project-families-compose-block-spans", "16384"]);
+    assert_eq!(most.compose_block_spans, 16384);
+}
+
+#[test]
+fn the_compose_workers_flag_reaches_the_family_settings_and_sizes_the_pools() {
+    configure_redo_source_endpoint();
+    let redo = |flags: &[&str]| {
+        let mut args = vec![
+            "phase-runner",
+            "redo",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "1",
+            "--to-block",
+            "30",
+        ];
+        args.extend_from_slice(flags);
+        Cli::try_parse_from(args)
+    };
+    let workers = |flags: &[&str]| {
+        let command = redo(flags)
+            .expect("the workers flag must parse")
+            .resolve()
+            .expect("the workers flag must resolve");
+        let ResolvedCommand::Redo {
+            project_families, ..
+        } = command
+        else {
+            panic!("expected redo command");
+        };
+        project_families.compose_workers
+    };
+    assert_eq!(workers(&[]), 1);
+    assert_eq!(
+        workers(&[]),
+        bigname_project::families::COMPOSE_WORKERS,
+        "the flag's default is the crate's"
+    );
+    assert_eq!(workers(&["--project-families-compose-workers", "3"]), 3);
+    assert!(
+        redo(&["--project-families-compose-workers", "0"]).is_err(),
+        "no workers is refused"
+    );
+    assert_eq!(run_connections(1, 1), 5);
+    assert_eq!(run_connections(2, 2), 8);
+    assert_eq!(run_connections(3, 3), 15);
+    assert_eq!(run_connections(0, 1), 4);
+    assert_eq!(redo_connections(1), 5);
+    assert_eq!(redo_connections(3), 7);
+}
+
+#[test]
 fn run_takes_the_family_run_budget_and_retries_family_failures() {
     configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
@@ -259,6 +386,110 @@ fn run_takes_the_family_run_budget_and_retries_family_failures() {
     assert_eq!(project_families.max_blocks_per_run, 10);
     assert!(project_families.retry_family_failures);
     assert!(project_families.require_hydration_url);
+}
+
+/// The family settings `run` or `redo` resolve with `extra` flags.
+fn family_settings(command: &str, extra: &[&str]) -> Result<FamilySettings, String> {
+    configure_redo_source_endpoint();
+    let mut args = vec![
+        "phase-runner",
+        command,
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+    ];
+    if command == "run" {
+        args.extend([
+            "--verification-database-url",
+            "postgres://phase-runner.invalid/verification",
+            "--chain",
+            "ethereum-mainnet",
+            "--source",
+            REDO_SOURCE,
+        ]);
+    } else {
+        args.extend([
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "1",
+            "--to-block",
+            "30",
+        ]);
+    }
+    args.extend_from_slice(extra);
+    let command = Cli::try_parse_from(args)
+        .map_err(|error| error.to_string())?
+        .resolve()
+        .map_err(|error| error.to_string())?;
+    match command {
+        ResolvedCommand::Run {
+            project_families, ..
+        }
+        | ResolvedCommand::Redo {
+            project_families, ..
+        } => Ok(project_families),
+        _ => Err("expected run or redo".to_owned()),
+    }
+}
+
+#[test]
+fn run_and_redo_default_both_family_knobs_to_the_crate_constants() {
+    for command in ["run", "redo"] {
+        let settings = family_settings(command, &[]).unwrap();
+        assert_eq!(
+            (settings.max_blocks_per_run, settings.max_range_events),
+            (
+                bigname_project::families::MAX_BLOCKS_PER_RUN,
+                bigname_project::families::MAX_RANGE_EVENTS
+            ),
+            "{command}"
+        );
+        let budget = family_settings(command, &["--project-families-max-blocks", "10"]).unwrap();
+        assert_eq!(
+            (budget.max_blocks_per_run, budget.max_range_events),
+            (10, bigname_project::families::MAX_RANGE_EVENTS),
+            "{command}: the budget leaves the range event cap at its default"
+        );
+    }
+}
+
+#[test]
+fn run_and_redo_take_the_range_event_cap_and_count_zero_as_one() {
+    for command in ["run", "redo"] {
+        for (value, expected) in [("4096", 4096), ("100000", 100_000), ("2", 2), ("0", 1)] {
+            let settings =
+                family_settings(command, &["--project-families-max-range-events", value]).unwrap();
+            assert_eq!(
+                (settings.max_range_events, settings.max_blocks_per_run),
+                (expected, bigname_project::families::MAX_BLOCKS_PER_RUN),
+                "{command} {value}: the cap leaves the budget at its default"
+            );
+        }
+        let both = family_settings(
+            command,
+            &[
+                "--project-families-max-blocks",
+                "5",
+                "--project-families-max-range-events",
+                "3",
+            ],
+        )
+        .unwrap();
+        assert_eq!((both.max_blocks_per_run, both.max_range_events), (5, 3));
+        for flag in [
+            "--project-families-max-range-events=x",
+            "--project-families-max-range-events=-1",
+        ] {
+            let error = family_settings(command, &[flag])
+                .expect_err("a range event cap is a non-negative integer");
+            assert!(
+                error.contains("invalid value")
+                    && error.contains("--project-families-max-range-events"),
+                "{command} {flag}: {error}"
+            );
+        }
+    }
 }
 
 #[test]

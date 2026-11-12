@@ -8,6 +8,7 @@ mod migration;
 mod normalized;
 mod reanchor;
 mod search;
+mod witness;
 
 use crate::Result;
 use bigname_adapters::schema_v2::BatchOutput;
