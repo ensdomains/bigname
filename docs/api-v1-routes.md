@@ -4932,10 +4932,10 @@ For a registrar lease first identified by a later readable observation, registra
   returns retryable `409 stale` while the address-history catalogue is not
   published for the captured publication, as address history does. It never
   falls back to reading the address's whole history. Like address history, it
-  reads its page on one read snapshot of the captured publication, so a
-  publication between admission and that snapshot, or a namespace manifest
-  change during the read, returns retryable `409 stale` to retry the same
-  request and cursor.
+  admits its publication and reads its page on one read snapshot, so a later
+  publication does not refuse it. A namespace manifest change during the read
+  returns retryable `409 stale`, and the same request and cursor can be
+  retried.
 - Replaces (v1): `GET /v1/events` compact event search.
 
 ### `GET /v1/resolvers`
