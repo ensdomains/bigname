@@ -5,7 +5,7 @@
 //! streams cut after their first partition, between two partitions and before their last. That a
 //! pass stopped at every run boundary of every stream resumes to the same rows is
 //! `a_pass_longer_than_a_run_continues_from_its_cursor` (families_compose.rs). The event count
-//! stream also resumes in a fresh process, after a partition that failed to commit, and after a
+//! stream also resumes on fresh sessions, after a partition that failed to commit, and after a
 //! reset that clears what it left. A reorg between two runs of one pass either restarts it or lets
 //! it continue.
 //! The history is `families_support/compose.rs`.
@@ -234,9 +234,9 @@ async fn fail_next_count_chunk(fixture: &Fixture) -> Result<()> {
 
 // R4. The event count stream's partials are rows of a permanent table, committed with the
 // partition's cursor on the repair record, so a stopped pass leaves both on the database and
-// nothing in the runner. A pass stopped after a span, then a partition that fails to commit
-// (the process dies inside it), is finished by a fresh process on new sessions and equals block
-// by block. A reset of a pass stopped inside the stream deletes the rows it left before anything
+// nothing in the runner. A pass stopped after a span, then a partition that fails to commit, is
+// finished on a fresh pool of new sessions, as a restarted runner would, and equals block by
+// block. A reset of a pass stopped inside the stream deletes the rows it left before anything
 // else runs, and the rebuild after it equals block by block. That a new pass's beginning deletes
 // a row an earlier pass left is `the_pass_counts_what_every_block_counts_over_many_runs`
 // (families_event_counts.rs).
@@ -289,9 +289,9 @@ async fn the_event_count_stream_resumes_in_a_fresh_process_and_a_reset_clears_it
     fresh.close().await;
     ensure!(
         !outcome.reset && fixture.marker().await?.0 == Some(TARGET),
-        "a fresh process resumed the pass: {outcome:?}"
+        "fresh sessions resumed the pass: {outcome:?}"
     );
-    require_equal(&fixture, &expected, "a fresh process").await?;
+    require_equal(&fixture, &expected, "fresh sessions").await?;
 
     skips += stop_at(&fixture, Cut::Step(6, "spans", 1)).await?;
     ensure!(
