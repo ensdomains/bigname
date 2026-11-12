@@ -4945,7 +4945,9 @@ For a registrar lease first identified by a later readable observation, registra
   value, returns `400 invalid_input` with `role_holder is required`: the
   collection never lists every resolver. `chain_id` keeps one chain's resolvers;
   a supported chain this deployment does not serve returns `400 invalid_input`
-  with `chain_id names a chain this deployment does not serve`. `cursor` and
+  with `chain_id names a chain this deployment does not serve`, decided before
+  any publication is read, so it is never the retryable `409 stale`. A served
+  chain whose publication is unavailable returns `409 stale`. `cursor` and
   `page_size` (default 50, maximum 200) page the list. Other query parameters,
   `at` and `finality` included, are rejected.
 - Each row is `{chain_id, address, grant_count, powers}` for one resolver on
@@ -4956,8 +4958,12 @@ For a registrar lease first identified by a later readable observation, registra
   [permission powers vocabulary](api-v1.md#permission-powers-vocabulary). A
   revoked grant counts toward neither, and a resolver whose grants to the
   holder are all revoked is absent.
-- Root grants are included. A role granted on the root resource applies to
-  every record on the resolver, and it counts in `grant_count` and `powers` like
+- Root grants are included. A role held on the root resource (resource `0`)
+  applies to every resource of the resolver, because each role check ORs the
+  account's root roles with its roles on the checked resource
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L191 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L452-L455 @ ens_v2@a971bd64).
+  This route counts the stored root grant in `grant_count` and `powers` like
   any other grant. The per-grant routes show which grant is the root one: on
   `GET /v1/permissions?address=` and on `/roles` each grant is its own row, and
   the root grant's row carries `"eac_resource": "0"`.
