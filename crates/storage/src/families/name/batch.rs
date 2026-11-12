@@ -484,7 +484,9 @@ pub(super) async fn load_chain(
             // The current registry reads the 2017 record's resolver while it has no record.
             let resource = decided.selection.resource_id.as_deref();
             resource.and_then(|resource| {
-                let token = readable.get(resource).is_some_and(|(token, _)| token.is_some());
+                let token = readable
+                    .get(resource)
+                    .is_some_and(|(token, _)| token.is_some());
                 ownerless_serving(name, own_pointer(resource, name), token, None)
             })
         } else if decided.selection.unsupported_reason.as_deref()
