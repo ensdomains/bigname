@@ -290,6 +290,7 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/topology/name_topology.rs",
     "crates/storage/src/families/topology/overview.rs",
     "crates/storage/src/families/topology/pointers.rs",
+    "crates/storage/src/families/topology/role_holder.rs",
 ];
 
 pub(crate) fn collect(

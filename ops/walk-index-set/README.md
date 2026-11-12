@@ -20,7 +20,7 @@ they are dropped refuses to start, unless `BIGNAME_API_WALK_INDEX_SET_CHECK=warn
 [The API's startup check](#the-apis-startup-check)).
 
 The [walk index set](../../docs/glossary.md#walk-index-set) is the 17 indexes Interpret keeps.
-`drop.sql` drops the other 35 before a from-zero walk or a full-history Interpret redo. Before
+`drop.sql` drops the other 38 before a from-zero walk or a full-history Interpret redo. Before
 Project runs, the phase runner rebuilds any of them that is missing, with the statements
 `install.sql` uses (see [The phase runner's rebuild](#the-phase-runners-rebuild)), and
 `install.sql` remains the way to rebuild them by hand.
@@ -49,7 +49,7 @@ the other's.
 The script checks this before the drops and again after them, and takes no phase lock, so
 nothing stops an Interpret redo completing while the drops run. Run it as the walk or redo
 starts, with Interpret's whole range still ahead. The one-hour timeout bounds each drop, not
-the script, so there is no fixed limit on the whole sequence. Allow for all 35 drops before
+the script, so there is no fixed limit on the whole sequence. Allow for all 38 drops before
 Interpret can complete. The second check sees only the state when it runs: if a chain meets
 the condition then, for example because its Project started during the drops and is still
 running, it fails after the receipt, naming the chains, and `psql` exits non-zero; run

@@ -3425,8 +3425,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 35 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 52, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 38 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 55, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -5375,15 +5375,13 @@ content hash, then check on Ethereum Mainnet that `GET /v1/names/coathup.eth` se
 `registered_at`, a `registration_id` and `ens_v1.expires_at`, and that
 `GET /v1/names/kaaboosd.eth` serves `active` with a `registered_at`.
 
-## Read indexes for history windows, search prefixes and `resolves_to`
+## Read indexes for history windows and `resolves_to`
 
-The build that adds four read-only btree indexes changes no stored row and no response
+The build that adds three read-only btree indexes changes no stored row and no response
 body. Each serves an API read that otherwise scans its whole table:
 
 - History, address-history and events pages with `from_timestamp` or `to_timestamp` map each
   bound to a block through `chain_lineage_timestamp_idx` on `chain_lineage`.
-- `GET /v1/search` with a raw-name prefix reads its matches as one range of
-  `name_surfaces_name_prefix_idx` on `name_surfaces`.
 - `relation=resolves_to` on `GET /v1/addresses/{address}/names` finds its candidate
   resources through `project_resource_pointer_namehash_resolver_idx` on
   `project_resource_pointer`, and the names that reach them through
@@ -5399,7 +5397,7 @@ serves.
 - It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
   watch plan are unchanged, so stamp no Ingest redo.
 
-Schema-migration `20261028120000_serving_read_indexes.sql` installs the four indexes. An
+Schema-migration `20261028120000_serving_read_indexes.sql` installs the three indexes. An
 index that already exists under its name, with the reviewed definition, is adopted without a
 build and without a lock on its table. This covers an index an operator created
 concurrently under the same name before the release. A missing index is built with an
@@ -5417,17 +5415,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_timestamp_idx
     ON bigname_phase.chain_lineage (chain_id, block_timestamp, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS project_resource_pointer_namehash_resolver_idx
     ON bigname_phase.project_resource_pointer (chain_id, namehash, resolver_address);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_name_prefix_idx
-    ON bigname_phase.name_surfaces (raw_name text_pattern_ops, namespace, namehash, logical_name_id)
-    WHERE visibility_state = 'active'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND octet_length(raw_name) <= 2000;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_pointer_resource_idx
     ON bigname_phase.project_registry_pointer (chain_id, resource_id);
 ```
 
 `IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
-invalid index. The schema-migration checks all four names before its own builds and again
+invalid index. The schema-migration checks all three names before its own builds and again
 after them. It refuses a name that is not an index, is on another table, is not valid and
 ready, or has another definition, and its error names the index. Check the same things
 yourself after each concurrent build, so the schema-migration does not stop inside the
@@ -5443,7 +5436,6 @@ WHERE c.relnamespace = 'bigname_phase'::regnamespace
   AND c.relname IN (
       'chain_lineage_timestamp_idx',
       'project_resource_pointer_namehash_resolver_idx',
-      'name_surfaces_name_prefix_idx',
       'project_registry_pointer_resource_idx');
 RESET search_path;
 ```
@@ -5455,7 +5447,6 @@ compares:
 ```text
 CREATE INDEX chain_lineage_timestamp_idx ON bigname_phase.chain_lineage USING btree (chain_id, block_timestamp, block_number)
 CREATE INDEX project_resource_pointer_namehash_resolver_idx ON bigname_phase.project_resource_pointer USING btree (chain_id, namehash, resolver_address)
-CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
 CREATE INDEX project_registry_pointer_resource_idx ON bigname_phase.project_registry_pointer USING btree (chain_id, resource_id)
 ```
 
@@ -6942,3 +6933,150 @@ The two indexes are advisory ([walk index set](storage.md#walk-index-set)). The 
 never builds them, and `ops/walk-index-set/drop.sql` leaves them in place. The API starts and
 serves without them, with a WARN at startup naming each one that is not in place, and a page
 with `record_key` then walks the chain's events as before.
+
+## Address membership probes keyed inside a planning fence
+
+`GET /v1/events?address=…`, `GET /v1/diagnostics/events?address=…` and the address history walker
+first list the names and resources an address held in the past
+([table ownership](storage.md#table-ownership)). Before this build that statement estimated every
+address at PostgreSQL's default selectivity, because the planner keeps no statistics on a partial
+index's expression. Against that estimate it combined the address probes with
+`normalized_events_projection_idx` over every grant and transfer of the chain on each call. The
+statement now reads each address key, `registrant`, `to` and `owner`, through its own subquery that
+holds only the key's match and the address length of its value, and applies every other filter
+afterwards. Three new
+partial indexes, one per key, serve those subqueries.
+
+- The rows are the same for every route and flag combination. No response changes.
+- It rotates the [projection content hash](glossary.md#projection-content-hash), because the
+  statement is built in a hashed composition file
+  (`crates/storage/src/history/address_evidence.rs`). The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not move.
+- The rotation is formal. Project's publication statement in the same file is unchanged, so the
+  full-range Project redo rewrites `project_address_history_anchor` and every other projected row
+  to the same values. The release that carries the change redoes Project anyway, so it adds no
+  redo of its own.
+- It adds schema-migration `20261112150000_normalized_events_address_key_indexes.sql` and no
+  table, manifest or setting. The manifest-authority fingerprint and the compiled watch plan are
+  unchanged, so stamp no Ingest redo.
+
+The indexes join the drop list of the [walk index set](storage.md#walk-index-set), so a redo
+that drops the set builds them in its finish step, three more builds than before, and a database
+promoted from that redo's seed needs no hand build. The API refuses to start without them unless
+`BIGNAME_API_WALK_INDEX_SET_CHECK=warn`, because without them each probe reads
+`normalized_events` sequentially, so all three must be valid on every database an API reads
+before that API takes the build.
+
+On a database that takes the build without such a redo:
+
+1. Build the three indexes with `ops/address-key-indexes/install.sql`, as its
+   [README](../ops/address-key-indexes/README.md) describes. The runner and the API keep running
+   while it builds, and the previous image does not read them.
+2. Apply the schema-migrations. The schema-migration adopts the prebuilt indexes by name and
+   reviewed definition, and refuses a populated table without them.
+3. Swap the image under the release's re-derivation boundary.
+
+The earlier kind-partial `normalized_events_address_*_match_idx` indexes stay installed until a
+later build drops them.
+
+## Partial index for the resolvers of a role holder
+
+The build that adds `project_grant_resolver_role_holder_idx` serves
+`GET /v1/resolvers?role_holder=` ([table ownership](storage.md#table-ownership)).
+
+- The page reads the holder's live ENSv2 EAC resolver grants through the new partial index, in
+  resolver order from the cursor. It reads no derived ENSv1 or Basenames resolver authority row.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the reader is a serving file, not a hashed one. No redo is needed. The change ships as an
+  image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order on every database the build is deployed to:
+
+1. Build the index with
+   [`ops/resolver-role-holder-index/install.sql`](../ops/resolver-role-holder-index/README.md),
+   concurrently and outside a transaction.
+2. Check it with the query in that README: one valid and ready index with the reviewed
+   definition.
+3. Apply schema-migration `20261112140000_project_grant_resolver_role_holder_index.sql`.
+4. Swap the image.
+
+The schema-migration adopts an index of the reviewed name that is valid and ready with the
+reviewed definition, without a build and without a lock, so it is a no-op on a database where
+the script already built it. An empty `project_grant` builds it directly. A populated table
+without it is refused, because an ordinary build would block writes to `project_grant` for the
+whole build. The schema-migration refuses a name that is not an index, an index on another
+table or one that is not valid and ready, and another definition. Its error names the index
+and, for another definition, prints the definition it found and the one it expects. The README
+gives the recovery steps. Then run the schema-migrations again.
+
+The index is advisory. The phase runner never builds it, and no walk drops it. The API starts
+and serves without it, with a WARN at startup when it is not in place, and the page then reads
+every grant of the holder.
+
+## The raw-name prefix index is dropped
+
+`name_surfaces_name_prefix_idx` is a `text_pattern_ops` index on `name_surfaces` that an
+operator may have built by hand to give a raw-name `LIKE` prefix a range. A prefix search now
+reads search documents, through the [prefix bucket indexes](#prefix-bucket-indexes-for-search)
+for a dense class and by id for any other. No statement reads this index, and every write to
+`name_surfaces` still maintains it.
+
+- Responses, their order and their cursors do not change.
+- Neither content hash rotates. The baselines and schema-migrations are inputs of neither. No
+  redo is needed.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261112160000_name_surfaces_drop_raw_prefix_index.sql` drops the index
+when it has the definition below, valid or not. A database without the name passes unchanged.
+The baseline does not define the index, and `20261028120000_serving_read_indexes.sql` no
+longer builds it.
+
+`DROP INDEX` takes an ACCESS EXCLUSIVE lock on `name_surfaces`. The drop only removes the
+index's catalog entry and its file, so the index's size does not matter, and the lock is held
+only until the schema-migration commits a moment later. To get the lock it first waits for
+every transaction that holds the table, and statements on the table queue behind it while it
+waits. Its own five-second `lock_timeout` bounds that wait. On a timeout it fails unrecorded,
+and a rerun is safe.
+
+Apply it with the release's other schema-migrations. With the phase runner, redo processes and
+API stopped, nothing holds the table and the drop does not wait. A database promoted from a
+redo's seed that already ran the schema-migration has no index left to drop. On a database that
+keeps serving while the schema-migrations run, drop the index concurrently first, as below.
+
+To drop it without that lock, read the index first, outside a transaction:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'name_surfaces_name_prefix_idx';
+RESET search_path;
+```
+
+No row means there is nothing to drop. Otherwise the definition must be exactly this line, which
+is the text the schema-migration compares:
+
+```text
+CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
+```
+
+Then confirm the three prefix bucket indexes are valid, and drop it. The schema-migration then
+finds no name and passes:
+
+```sql
+DROP INDEX CONCURRENTLY bigname_phase.name_surfaces_name_prefix_idx;
+```
+
+The schema-migration refuses anything else under the name, and drops nothing:
+
+- A relation that is not an index: find out what it is for, then remove or rename it.
+- An index with another definition: the error prints the definition it found and the one it
+  expects. Find out what the index serves, then rename it or drop it with
+  `DROP INDEX CONCURRENTLY`.
+
+Then run the schema-migrations again.

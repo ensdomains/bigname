@@ -85,6 +85,12 @@ BEGIN
              $def$CREATE INDEX normalized_events_address_token_holder_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE ((event_kind = 'TokenControlTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_address_registry_owner_match_idx',
              $def$CREATE INDEX normalized_events_address_registry_owner_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_address_to_idx',
+             $def$CREATE INDEX normalized_events_address_to_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE (length((after_state ->> 'to'::text)) = 42)$def$),
+            ('normalized_events_address_registrant_idx',
+             $def$CREATE INDEX normalized_events_address_registrant_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE (length((after_state ->> 'registrant'::text)) = 42)$def$),
+            ('normalized_events_address_owner_idx',
+             $def$CREATE INDEX normalized_events_address_owner_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE (length((after_state ->> 'owner'::text)) = 42)$def$),
             ('normalized_events_address_root_permission_idx',
              $def$CREATE INDEX normalized_events_address_root_permission_idx ON bigname_phase.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'RootPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_registry_roles_idx',
@@ -399,6 +405,18 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_registry_owner
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_to_idx
+    ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'to', '')))
+    WHERE length(after_state ->> 'to') = 42;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_registrant_idx
+    ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'registrant', '')))
+    WHERE length(after_state ->> 'registrant') = 42;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_owner_idx
+    ON bigname_phase.normalized_events (lower(COALESCE(after_state ->> 'owner', '')))
+    WHERE length(after_state ->> 'owner') = 42;
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_root_permission_idx
     ON bigname_phase.normalized_events (
         lower(after_state ->> 'subject'),
@@ -542,6 +560,9 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_address_registrant_match_idx'),
     to_regclass('bigname_phase.normalized_events_address_token_holder_match_idx'),
     to_regclass('bigname_phase.normalized_events_address_registry_owner_match_idx'),
+    to_regclass('bigname_phase.normalized_events_address_to_idx'),
+    to_regclass('bigname_phase.normalized_events_address_registrant_idx'),
+    to_regclass('bigname_phase.normalized_events_address_owner_idx'),
     to_regclass('bigname_phase.normalized_events_address_root_permission_idx'),
     to_regclass('bigname_phase.normalized_events_registry_roles_idx'),
     to_regclass('bigname_phase.normalized_events_project_node_history_idx'),

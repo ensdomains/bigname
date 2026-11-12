@@ -9,7 +9,7 @@ pub(super) fn lineage_probe(lineage: &str, row: &str) -> String {
 
 /// [`lineage_probe`] for a lookup whose join also compared the block number, with that join's
 /// kind: `JOIN` drops a row with no lineage row as the inner join did.
-pub(super) fn lineage_probe_at_block(join: &str, lineage: &str, row: &str) -> String {
+pub(crate) fn lineage_probe_at_block(join: &str, lineage: &str, row: &str) -> String {
     let block_number = format!(" AND {lineage}.block_number = {row}.block_number");
     probe(join, lineage, row, &block_number)
 }
