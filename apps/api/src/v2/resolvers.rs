@@ -12,6 +12,10 @@ pub(crate) use collections::{get_resolver_links, get_resolver_roles};
 mod records;
 pub(crate) use records::get_resolver_records;
 
+#[path = "resolvers/role_holder.rs"]
+mod role_holder;
+pub(crate) use role_holder::get_resolvers;
+
 use axum::{
     Json,
     extract::{Path, State},
