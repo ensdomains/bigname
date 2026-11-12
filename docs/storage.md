@@ -751,6 +751,22 @@ Family indexes serve these concrete readers:
   `20261103130000_project_resolver_link_order_index.sql` adds the index.
   `crates/storage/src/families/topology/collections_tests.rs` checks the plan under both plan
   modes and compares every page with the statement it replaced.
+- The role-holder page (`storage:families.topology.resolvers_by_role_holder`, for
+  `GET /v1/resolvers?role_holder=`) reads `project_grant_resolver_role_holder_idx`,
+  `(subject COLLATE "C", scope COLLATE "C")` over the grants with scope kind `resolver`, not
+  revoked, whose grant source is an `EACRolesChanged` log. Its index condition carries the
+  holder and the page's scope range, so the page reads only the holder's live ENSv2 EAC
+  resolver grants from the cursor. It never reads the derived ENSv1 and Basenames resolver
+  authority rows, which share the scope kind and far outnumber them. The statement carries the
+  index predicate as literals, so the index qualifies under generic plans too. Schema-migration
+  `20261112140000_project_grant_resolver_role_holder_index.sql` adopts the index. It is
+  advisory: an operator prebuilds it with
+  [`ops/resolver-role-holder-index/install.sql`](../ops/resolver-role-holder-index/README.md),
+  the phase runner never builds it, and the API starts and serves without it, with a WARN at
+  startup. Without it the page returns the same rows and reads every grant of the holder
+  through `project_grant_subject_resource_idx`.
+  `crates/storage/src/families/topology/role_holder_tests.rs` checks the plan under both plan
+  modes.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
   the registry operator read will use, two of which no reader uses yet:
   `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
@@ -1349,7 +1365,10 @@ the five indexes above, that the plan reads `normalized_events_project_node_hist
 `normalized_events_record_id_write_idx` and `normalized_events_record_id_link_idx`, each probe
 keyed by the pointer (its node, its resolver and record id, or its resolver and node), and that
 the mirror lookup, run over a non-empty walk, reads registry pointers
-through `normalized_events_project_v1_pointer_addressed_node_idx`.
+through `normalized_events_project_v1_pointer_addressed_node_idx`. That lookup reads the index
+key behind an `OFFSET 0` fence, with the readable filter, the order and the `LIMIT` outside it.
+`history/attribution/mirror_plan_tests.rs` checks it on a fixture where the unfenced lookup walks
+`normalized_events_chain_block_number_desc_idx`, and checks its rows against the unfenced lookup.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's
