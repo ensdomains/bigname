@@ -162,13 +162,8 @@ impl Drop for ReadSnapshot {
             return;
         };
         runtime.spawn(async move {
-            let mut transaction = transaction;
-            if crate::serving_pool::cancel_statement(&cancels, pid).await
-                == CancelOutcome::Unsettled
-            {
-                transaction.close_on_drop();
-            }
-            // Only now may the connection go back to the pool.
+            // Red: the drop path without the cancel.
+            let _ = (&cancels, pid, CancelOutcome::Settled);
             drop(transaction);
         });
     }
