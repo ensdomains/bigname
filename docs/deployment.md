@@ -6316,8 +6316,8 @@ composition pass derives every parent's rows in a children stream after the name
   `WARN` naming the chain, block, parent and row count, so a large undo journal can be traced to
   its block.
 - The subnames page, the registry labels page and the child counts read the stored rows.
-  The API startup preflight requires the listing and count tables, so an API of this build
-  refuses to start on a schema without them.
+  Without the listing and count tables, as without their grant, the API still starts and only
+  those routes fail (next item).
 - The readers need `SELECT` on the listing and count tables. Before restarting an existing API
   role, apply the grant below on the primary and let it replay on any serving standby. Fresh role
   setup above already includes it. An API role without it still starts, and logs one `WARN` at
