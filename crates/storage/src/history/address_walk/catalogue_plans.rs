@@ -385,6 +385,10 @@ async fn prepared_emitter_plan(
         .persistent(false)
         .fetch_one(&mut *transaction)
         .await?;
+    // A prepared statement belongs to the session, not the transaction.
+    sqlx::raw_sql("DEALLOCATE emitter_seek")
+        .execute(&mut *transaction)
+        .await?;
     transaction.rollback().await?;
     Ok(plan)
 }

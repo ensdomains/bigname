@@ -336,6 +336,61 @@ async fn events_address_contract_ties_unchanged() -> Result<()> {
     database.cleanup().await
 }
 
+/// An ENSv1 name of the address points to a resolver that a basenames manifest also admits on
+/// the same chain, and that resolver wrote a basenames record for the name's node. With that
+/// resolver as `contract_address` and `namespace=ens`, both sides of the walk keep to ens rows:
+/// the page and its total hold the name's ens events and not the basenames write.
+#[tokio::test]
+async fn events_address_contract_keeps_to_the_requested_namespace() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let seeded = seed_names(&database, 2).await?;
+    extend_lineage(&database).await?;
+    let manifest = declare_family_fixture_resolver(
+        &database.pool,
+        "basenames",
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        RESOLVER,
+    )
+    .await?;
+    let node = bigname_lookup::ens_namehash_hex("walk-0000.eth")?;
+    let mut write = emitted_by(
+        address_fixture_event(
+            "leapfrog-basenames-write",
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            block(2),
+            &hash(block(2)),
+            1_000,
+            json!({"source_event":"TextChanged", "node":node, "resolver":RESOLVER,
+                "record_key":"text:description", "record_family":"text",
+                "selector_key":"description", "value":"basenames"}),
+        ),
+        RESOLVER,
+    );
+    write.namespace = "basenames".into();
+    write.manifest_version = 1;
+    write.source_manifest_id = Some(manifest);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[write]).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", HEAD, &hash(HEAD)).await?;
+    for order in ["desc", "asc"] {
+        let query =
+            format!("address={ADDRESS}&contract_address={RESOLVER}&namespace=ens&order={order}");
+        let (rows, _) = walk_three_ways(&database, &query, 200).await?;
+        assert_eq!(rows.len(), seeded.len(), "{query}: {rows:?}");
+        assert!(
+            !rows.contains(&hkw_id("leapfrog-basenames-write")),
+            "{query}: {rows:?}"
+        );
+        let total = format!("/v1/events?{query}&page_size=200&include=total_count");
+        let (body, _) = walked(&database, &total, true).await?;
+        assert_eq!(body["page"]["total_count"], json!(seeded.len()), "{total}");
+    }
+    database.cleanup().await
+}
+
 /// A contract with events in every bucket and an address whose one name has events only in
 /// bucket 3: the walk probes that bucket alone, as it does without the leapfrog.
 #[tokio::test]
