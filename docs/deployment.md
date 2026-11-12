@@ -6289,13 +6289,13 @@ composition pass derives every parent's rows in a children stream after the name
   redo never removes a label from `label_preimages`, so a row the undone block healed keeps its
   healed name, as a rebuild at that block spells it.
 - A label first learned on another chain reaches the stored name at this chain's next block
-  once the watermark below has caught up to that chain's finalized block. Until then each block
-  reads about 1,000 of that chain's observations, rounded up to whole blocks, so a label can wait
-  about (the unread observations / 1,000) blocks of this chain. A label only the rainbow-table
-  import spells keeps its placeholder in the stored name until a chain observes its preimage:
-  the stored spelling reads chain-observed preimages only, so deriving the row again or a
-  rebuild does not spell it (TYR-339 moves it to the imported form). Served names heal at read
-  time.
+  once the watermark below has caught up to that chain's finalized block (its safe block when
+  finalized is unset). Until then each block reads about 1,000 of that chain's observations
+  above the watermark, rounded up to whole blocks, so a label can wait about (the observations
+  above the watermark / 1,000) blocks of this chain. A label only the rainbow-table import
+  spells keeps its placeholder in the stored name until a chain observes its preimage: the
+  stored spelling reads chain-observed preimages only, so deriving the row again or a rebuild
+  does not spell it (TYR-339 moves it to the imported form). Served names heal at read time.
 - Each chain keeps, per other chain, the highest block whose preimage observations its family step
   has read (`project_child_preimage_watermark`), journalled with its block. The watermark never
   passes the other chain's finalized block (its safe block when finalized is unset), so a reorg of
@@ -6345,9 +6345,10 @@ composition pass derives every parent's rows in a children stream after the name
     identity ascending. Both now run descending.
   - `q` matches the stored name. It differs from the served name for a label that the
     rainbow-table import alone spells, until a chain observes its preimage (TYR-339), and
-    for one another chain observed while this chain's read of that chain lags behind its
-    finalized block, for about (the unread observations / 1,000) blocks of this chain. Such
-    a child serves healed but sorts and matches by its placeholder.
+    for one another chain observed while this chain's watermark for that chain lags behind
+    its finalized block (its safe block when finalized is unset), for about (the observations
+    above the watermark / 1,000) blocks of this chain. Such a child serves healed but sorts
+    and matches by its placeholder.
   - A name longer than 2,000 bytes sorts by its first 500 characters, then child identity.
   - A cursor issued before the change is still accepted. It resumes at its last row's position
     in the new order, so rows the old order placed differently can be skipped or repeated, and

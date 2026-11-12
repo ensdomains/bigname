@@ -2657,9 +2657,9 @@ is unset), a step reads every newer observation, so a label first observed there
 stored name at this chain's next block. Until then a step reads about 1,000 observations,
 rounded up to whole blocks of the other chain (`SOURCE_EVENTS` and `CUTOFF`,
 `crates/project/src/families/derived/children/sources.rs:52` and `:75`). When that chain's
-finalized block moves past more unread observations than one step reads, in ordinary catch-up
-or after an Interpret redo of that chain alone, a label waits about (the unread observations /
-1,000) blocks of this chain.
+finalized block moves past more observations above the watermark than one step reads, in
+ordinary catch-up or after an Interpret redo of that chain alone, a label waits about (the
+observations above the watermark / 1,000) blocks of this chain.
 
 `display_key` is the stored name in C collation, or its first 500 characters when it is longer
 than 2,000 bytes. `expires_key` and `registered_key` are the child's name summary timestamps in

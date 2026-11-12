@@ -1940,11 +1940,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   the row again for another reason, or a rebuild, does not spell it. TYR-339
   moves stored names and sort keys to the imported form. A label first observed
   on another chain reaches the stored name at this chain's next block once this
-  chain has read that chain's observations up to that chain's finalized block.
-  Until then each block of this chain reads about 1,000 of them, in whole blocks
-  of that chain. So after that chain's finalized block moves past more unread
-  observations, or after an Interpret redo of that chain alone, a label can wait
-  about (the unread observations / 1,000) blocks of this chain.
+  chain's watermark for that chain, the highest of its blocks this chain has
+  read observations from, has reached that chain's finalized block (its safe
+  block when finalized is unset). Until then each block of this chain reads
+  about 1,000 observations above the watermark, in whole blocks of that chain.
+  So after that chain's finalized block moves past more observations above the
+  watermark, or after an Interpret redo of that chain alone, a label can wait
+  about (the observations above the watermark / 1,000) blocks of this chain.
   A [non-name form](glossary.md#non-name-form) row matches
   only a prefix, or with `match=contains` a substring, of its placeholder or
   escaped text.
@@ -3749,7 +3751,12 @@ introduces it rebuilds Project from full history before serving the option; see
   `400 invalid_input`, with or without `q`. A valid `match` without a nonempty
   `q` selects nothing and is ignored. The match mode applies before grouping,
   sorting, pagination and `page.total_count`.
-  `sort` defaults to `name`, ordered by the row's served name. `expires_at`,
+  `sort` defaults to `name`, ordered by the row's stored name, the same stored
+  name `q` compares with. A name with no raw bytes is stored with each label
+  spelled from a chain-observed preimage, so a label only the rainbow import
+  spells keeps its `[labelhash]` placeholder there until a chain observes its
+  preimage (TYR-339): such a row serves its healed name but sorts by the
+  placeholder. `expires_at`,
   `registered_at` and `created_at` order by the row's name timestamps as served
   on the row; `created_at` is the name's first observation, the block time of
   the earliest event attributed to the name, including an earlier registrar
