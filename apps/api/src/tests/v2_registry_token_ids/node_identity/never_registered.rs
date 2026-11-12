@@ -404,6 +404,10 @@ async fn a_never_registered_name_resolves_through_its_2017_resolver() -> Result<
         assert!(named(&body, &namehash).is_empty(), "{relation}: {body:#}");
     }
     let subnames = get(&database, "/v1/names/eth/subnames?page_size=100").await?;
+    assert!(
+        !named(&subnames, &namehash).is_empty(),
+        "the subnames of eth list the name: {subnames:#}"
+    );
     for child in named(&subnames, &namehash) {
         for field in ["owner", "manager"] {
             assert!(child.get(field).is_none(), "{field}: {subnames:#}");

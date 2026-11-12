@@ -7289,8 +7289,10 @@ row, as block-by-block publication gives them.
 
 A `.eth` second-level name only the 2017 registry recorded, of which bigname holds no
 BaseRegistrar row and no live ENSv2 entry, is served `unregistered` with no `owner`, `manager` or
-`authority`, and leaves the address names of the 2017 record's owner (see `status` and `authority`
-in the [naming dictionary](api-v1.md#naming-dictionary)).
+`authority`. It leaves the address names of the 2017 record's owner as an owner or manager. While
+the 2017 record names a resolver, the name still resolves through it, so it can stay under
+`resolves_to` for the address it resolves to (see `status` and `authority` in the
+[naming dictionary](api-v1.md#naming-dictionary)).
 
 - The composition change is in `crates/storage/src/families`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The
