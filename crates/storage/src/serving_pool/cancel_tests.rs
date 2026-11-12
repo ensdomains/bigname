@@ -15,8 +15,8 @@ use super::tests::{
     Logs, acquire_all, backend_pid, composed_read, database, idle, server_state, wait_until_idle,
 };
 use super::{
-    CANCEL_FAILED, CANCEL_WAIT, ROLLED_BACK_LEFT_OPEN, cancel_pool, cancel_reads_on_drop,
-    register_cancel_pool, serving_pool_options,
+    CANCEL_FAILED, CANCEL_REPLY_BACKSTOP, CANCEL_WAIT, ROLLED_BACK_LEFT_OPEN, cancel_pool,
+    cancel_reads_on_drop, register_cancel_pool, serving_pool_options,
 };
 
 /// A statement no test lets end: each drops its read first.
@@ -549,7 +549,8 @@ async fn read_whose_cancel_reply_is_late_keeps_its_connection_until_the_reply() 
 #[tokio::test]
 async fn cancel_that_reaches_its_own_statement_timeout_warns_and_returns_the_connection()
 -> Result<()> {
-    let (db, pool, cancels) = late_cancel_setup("read_cancel_own_timeout", 3, Some("1s")).await?;
+    let (db, pool, cancels) =
+        late_cancel_setup("read_cancel_own_timeout", 3, Some("1500ms")).await?;
     let mut snapshot = crate::begin_read_snapshot(&pool).await?;
     let pid = backend_pid(&mut snapshot).await?;
     let logs = Logs::default();
@@ -570,6 +571,50 @@ async fn cancel_that_reaches_its_own_statement_timeout_warns_and_returns_the_con
     let logged = logs.text();
     assert_eq!(logged.matches(CANCEL_FAILED).count(), 1, "{logged}");
     assert!(logged.contains("statement timeout"), "{logged}");
+
+    pool.close().await;
+    cancels.close().await;
+    db.cleanup().await
+}
+
+async fn wait_until_logged(logs: &Logs, text: &str, within: Duration) -> Result<()> {
+    let deadline = Instant::now() + within;
+    while !logs.text().contains(text) {
+        if Instant::now() >= deadline {
+            bail!("nothing logged {text:?}");
+        }
+        tokio::time::sleep(STEP).await;
+    }
+    Ok(())
+}
+
+/// A cancel whose reply does not come within `CANCEL_REPLY_BACKSTOP` gives up, and its
+/// connection, with that reply still due, is closed. The next cancel goes out at once on a new
+/// connection rather than waiting behind it.
+#[tokio::test]
+async fn cancel_past_the_reply_backstop_frees_the_cancel_connection_for_the_next_cancel()
+-> Result<()> {
+    let delay = CANCEL_REPLY_BACKSTOP + Duration::from_secs(5);
+    let (db, pool, cancels) = late_cancel_setup(
+        "read_cancel_backstop",
+        u32::try_from(delay.as_secs())?,
+        None,
+    )
+    .await?;
+    let logs = Logs::default();
+    let _capture = logs.capture();
+    drop(crate::begin_read_snapshot(&pool).await?);
+    wait_until_logged(
+        &logs,
+        "no reply from the server",
+        CANCEL_REPLY_BACKSTOP + Duration::from_secs(3),
+    )
+    .await?;
+
+    let pid = drop_mid_statement(&pool, LONG, DROP_AFTER).await?;
+    wait_until_not_active(db.pool(), pid, Instant::now() + FREED_WITHIN).await?;
+    let logged = logs.text();
+    assert_eq!(logged.matches(CANCEL_FAILED).count(), 1, "{logged}");
 
     pool.close().await;
     cancels.close().await;

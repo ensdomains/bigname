@@ -148,8 +148,8 @@ pub(crate) const CANCEL_WAIT: Duration = Duration::from_secs(1);
 pub(crate) const CANCEL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a sent cancel waits for its reply when the server never answers, as on a dead
-/// socket.
-const CANCEL_REPLY_BACKSTOP: Duration = Duration::from_secs(20);
+/// socket. The cancel connection is then closed.
+pub(crate) const CANCEL_REPLY_BACKSTOP: Duration = Duration::from_secs(20);
 
 /// What is logged when a dropped read's statement could not be cancelled.
 pub(crate) const CANCEL_FAILED: &str = "could not cancel the statement of a dropped read; it runs \
@@ -235,7 +235,12 @@ pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) {
         Ok(Ok(true)) => {}
         Ok(Ok(false)) => tracing::warn!(pid, reason = "no such backend", "{CANCEL_FAILED}"),
         Ok(Err(error)) => tracing::warn!(pid, %error, "{CANCEL_FAILED}"),
-        Err(_) => tracing::warn!(pid, reason = "no reply from the server", "{CANCEL_FAILED}"),
+        Err(_) => {
+            // sqlx's return to the pool waits for the reply still due on this connection, with no
+            // limit, which would hold the pool's one slot.
+            conn.close_on_drop();
+            tracing::warn!(pid, reason = "no reply from the server", "{CANCEL_FAILED}");
+        }
     }
 }
 

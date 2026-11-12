@@ -1727,7 +1727,9 @@ or on an error, the API logs a warning and the statement runs to its end, as it
 would without the cancel. Once a cancel is sent, the request's connection
 stays out of the pool until the server answers, since the cancel could
 otherwise reach the next request on that connection. The cancel connection's
-own `statement_timeout` of 5 seconds bounds that wait. The cancel needs no
+own `statement_timeout` of 5 seconds bounds that wait while the server answers.
+A server that never answers, as on a dead socket, holds it for at most 20
+seconds, after which the cancel connection is closed. The cancel needs no
 privilege beyond the API role's own, and it works on a hot standby.
 
 ### Database connection budget
