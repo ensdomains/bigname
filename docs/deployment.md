@@ -1732,9 +1732,13 @@ A server that never answers, as on a dead socket, holds it for at most 20
 seconds. The API then closes the request's connection and the cancel connection
 rather than reuse them, since the server could still run the cancel later. The
 closed connection's backend exits, so a late cancel reaches no other request,
-unless the OS has given that pid to a new API backend in the meantime. The
-request's transaction control follows sqlx-core 0.8.6 and must be re-checked on a
-sqlx upgrade. The cancel needs no
+unless the OS has given that pid to a new API backend in the meantime. Closing
+the connection needs the pool connection itself, which the database driver's
+transaction type does not expose, so a request's read snapshot runs its
+transaction through the driver's own transaction calls on a connection it holds
+(`crates/storage/src/read_db/owned_transaction.rs`). That copy follows sqlx-core
+0.8.6, and a test fails when the locked sqlx-core version changes, so an upgrade
+re-checks it. The cancel needs no
 privilege beyond the API role's own, and it works on a hot standby.
 
 ### Database connection budget

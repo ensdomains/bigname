@@ -775,14 +775,3 @@ async fn cancel_from_a_role_without_superuser_ends_that_roles_own_statement() ->
         .await?;
     db.cleanup().await
 }
-
-/// The read snapshot drives sqlx's transaction control itself, as sqlx-core 0.8.6's
-/// `Transaction` does (`crate::read_db`). A sqlx upgrade must re-check that mirror, then this pin.
-#[test]
-fn read_snapshot_transaction_control_mirrors_the_locked_sqlx_core() {
-    let lock = include_str!("../../../../Cargo.lock");
-    assert!(
-        lock.contains("name = \"sqlx-core\"\nversion = \"0.8.6\"\n"),
-        "sqlx-core is no longer 0.8.6: re-check ReadSnapshot against its Transaction"
-    );
-}
