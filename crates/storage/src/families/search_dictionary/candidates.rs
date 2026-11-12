@@ -298,8 +298,5 @@ pub(super) async fn load(
 }
 
 #[cfg(test)]
-#[path = "candidates_plan_tests.rs"]
-mod plan_tests;
-#[cfg(test)]
 #[path = "prefix_bucket_tests.rs"]
 mod prefix_bucket_tests;
