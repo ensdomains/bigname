@@ -362,6 +362,9 @@ pub(crate) fn history_page_options(
         bind_cursor_anchor_to_event_kinds: params.event_types.is_some()
             || params.history_filters.is_explicit(),
         block_window,
+        from_block: None,
+        to_block: None,
+        contract_address: None,
     }
 }
 

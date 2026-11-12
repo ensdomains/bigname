@@ -4892,6 +4892,16 @@ For a registrar lease first identified by a later readable observation, registra
   read. When only `resolver` or `contract_address` anchors the read, the count
   is exact up to 10,000 rows and `null` beyond. Other unanchored reads always
   return null.
+  A read that `address` anchors with no `name`, `registration_id` or
+  `resolver` pages through the
+  [address-history catalogue](glossary.md#address-history-catalogue), as
+  [address history](#get-v1addressesaddresshistory) does, so a page reads a
+  bounded prefix of the address's events rather than all of them. Its rows,
+  order and cursors are those of the same read before the catalogue served it,
+  and its `include=total_count` stays exact and uncapped. `contract_address`
+  applies inside that walk; a contract that emitted no event returns the empty
+  page without walking the address's history. Every other anchor combination
+  reads as before.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can
@@ -4912,7 +4922,10 @@ For a registrar lease first identified by a later readable observation, registra
   when a redo began between the checks. That refusal is a retry: once the redo
   finishes, the same cursor continues. A position cursor continues whether or
   not the row it came from still exists; a cursor from before history walks
-  restarts once if its row is gone.
+  restarts once if its row is gone. A read that `address` alone anchors also
+  returns retryable `409 stale` while the address-history catalogue is not
+  published for the captured publication, as address history does. It never
+  falls back to reading the address's whole history.
 - Replaces (v1): `GET /v1/events` compact event search.
 
 ### `GET /v1/resolvers`

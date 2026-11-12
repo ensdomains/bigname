@@ -12,6 +12,7 @@ mod envelope;
 mod error;
 mod event_data;
 mod events;
+mod events_address;
 mod history;
 mod history_context;
 mod history_filters;
@@ -91,7 +92,9 @@ pub(crate) use events::{
     get_events,
 };
 #[cfg(test)]
-pub(crate) use events::{events_summary_mode, parse_events_filter, with_emitter_count_cap};
+pub(crate) use events::{
+    events_summary_mode, parse_events_filter, with_address_sql_page, with_emitter_count_cap,
+};
 pub(crate) use history::{
     HISTORY_TOTAL_COUNT_CAP, format_timestamp, get_history, history_event_id, history_event_type,
     history_page_options, history_sort_token, history_storage_order, history_storage_scope,

@@ -60,6 +60,11 @@ pub struct HistoryPageOptions {
     pub record_key: Option<String>,
     pub bind_cursor_anchor_to_event_kinds: bool,
     pub block_window: Option<HistoryBlockWindow>,
+    /// Inclusive block bounds on every chain, applied beside `block_window`.
+    pub from_block: Option<i64>,
+    pub to_block: Option<i64>,
+    /// Keeps only rows whose source log this contract emitted, compared case-insensitively.
+    pub contract_address: Option<String>,
     /// Publication upper bounds for expanding bindings and historical ownership anchors.
     pub publication_block_bounds: Option<std::collections::BTreeMap<String, i64>>,
     /// Admission's exact publication, for the Project catalogue. Legacy callers supplying

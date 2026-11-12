@@ -1198,8 +1198,10 @@ is no full-address application-side anchor, payload, or attribution collection. 
 can still require many retained facts during composition; the fixed name batch does not impose
 a new bound on that name's lifecycle evidence.
 
-The legacy full-selector reader remains in use for unpaged/diagnostic storage calls and
-`GET /v1/events?address=...`; this bounded route does not change those contracts.
+The legacy full-selector reader remains in use for unpaged/diagnostic storage calls and for a
+`GET /v1/events` read that combines `address` with a `name`, `registration_id` or `resolver`
+anchor. A `GET /v1/events` read that `address` alone anchors uses this bounded reader, with its
+`contract_address`, `from_block` and `to_block` applied inside the walk.
 The three indexes cover only activated rows in readable canonicality states, so an anchor read
 that drops either condition cannot use them and falls back to a broad scan, such as
 `normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the

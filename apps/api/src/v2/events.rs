@@ -104,6 +104,17 @@ pub(crate) async fn get_events(
     let include = history_include(&params.include)?;
     let namespace = resolve_events_namespace(&params)?;
     let mut parsed = parse_events_filter(&params, namespace.as_deref())?;
+    if let Some((address, namespace)) = walked_address(&params, namespace.as_deref()) {
+        return super::events_address::get_address_events(
+            &state,
+            &params,
+            address,
+            namespace,
+            include,
+            parsed.cursor_filters,
+        )
+        .await;
+    }
     let kinds = super::history_filters::event_kinds(&params);
     parsed.storage_filter.match_no_events = kinds.is_empty();
     parsed.storage_filter.event_kinds = kinds;
@@ -160,11 +171,56 @@ pub(crate) async fn get_events(
     .await
     .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
+    let (data, page) = events_page(
+        &state,
+        &params,
+        include,
+        &parsed.cursor_filters,
+        summary_mode,
+        &storage_page,
+        &snapshot.block_bounds(),
+    )
+    .await?;
+    Ok(Json(Envelope {
+        data,
+        page: Some(page),
+        meta: snapshot.finish_history(&state).await?,
+    }))
+}
+
+/// The address of a read that `address` alone anchors, with its namespace. Such a read pages
+/// through the address-history walk; a name, registration or resolver anchor keeps the SQL page.
+fn walked_address<'a>(
+    params: &'a QueryParams,
+    namespace: Option<&'a str>,
+) -> Option<(&'a str, &'a str)> {
+    #[cfg(test)]
+    if ADDRESS_SQL_PAGE.try_with(|_| ()).is_ok() {
+        return None;
+    }
+    if params.name.is_some() || params.registration_id.is_some() || params.resolver.is_some() {
+        return None;
+    }
+    Some((params.address.as_deref()?, namespace?))
+}
+
+/// The rows and page fields of one `/v1/events` page, with each row's name and context read on
+/// the pool.
+pub(super) async fn events_page(
+    state: &AppState,
+    params: &QueryParams,
+    include: HistoryInclude,
+    cursor_filters: &BTreeMap<String, String>,
+    summary_mode: HistorySummaryMode,
+    storage_page: &bigname_storage::HistoryPage,
+    block_bounds: &BTreeMap<String, i64>,
+) -> V2Result<(Vec<Event>, Page)> {
+    let order = history_storage_order(params.order);
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
         encode(&history_keyset::cursor_payload(
             cursor,
             history_sort_token(order),
-            parsed.cursor_filters.clone(),
+            cursor_filters.clone(),
         ))
     });
     let has_more = next_cursor.is_some();
@@ -181,7 +237,7 @@ pub(crate) async fn get_events(
         &state.pool,
         &storage_page.rows,
         include,
-        &snapshot.block_bounds(),
+        block_bounds,
         storage_page.interpret_redo_fence.as_ref(),
     )
     .await?;
@@ -221,17 +277,16 @@ pub(crate) async fn get_events(
             build_event(row, name, include, &context)
         })
         .collect();
-    Ok(Json(Envelope {
+    Ok((
         data,
-        page: Some(Page {
+        Page {
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
             total_count,
             has_more,
-        }),
-        meta: snapshot.finish_history(&state).await?,
-    }))
+        },
+    ))
 }
 
 pub(crate) fn build_event(
@@ -334,6 +389,14 @@ pub(crate) fn events_storage_cursor(
 #[cfg(test)]
 tokio::task_local! {
     static EMITTER_EXACT_COUNT_CAP: u64;
+    static ADDRESS_SQL_PAGE: ();
+}
+
+/// Runs `future` with every address-only read on the SQL page that served it before the
+/// address-history walk, so a test can compare the two.
+#[cfg(test)]
+pub(crate) async fn with_address_sql_page<F: std::future::Future>(future: F) -> F::Output {
+    ADDRESS_SQL_PAGE.scope((), future).await
 }
 
 /// Runs `future` with `cap` in place of the opt-in count cap on emitter-anchored reads.
