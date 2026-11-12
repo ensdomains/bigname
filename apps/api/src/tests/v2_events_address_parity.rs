@@ -29,9 +29,23 @@ async fn walked_page(database: &TestDatabase, uri: &str) -> Result<Value> {
     Ok(body)
 }
 
-/// The same page on the SQL page.
+/// The same page on the SQL page, which must have served it: the walk would have recorded its
+/// source selection.
 async fn sql_page(database: &TestDatabase, uri: &str) -> Result<Value> {
-    crate::v2::with_address_sql_page(v2_history_payload_for_database(database, uri)).await
+    let stats = Arc::new(Mutex::new(
+        bigname_storage::AddressHistoryWorkingSet::default(),
+    ));
+    let body = bigname_storage::with_address_history_working_set(
+        stats.clone(),
+        crate::v2::with_address_sql_page(v2_history_payload_for_database(database, uri)),
+    )
+    .await?;
+    let stats = stats.lock().unwrap().clone();
+    assert!(
+        stats.catalogue_receipt.is_none() && !stats.counters.contains_key("catalogue"),
+        "{uri}: the SQL side took the address-history walk: {stats:?}"
+    );
+    Ok(body)
 }
 
 /// Walks `/v1/events?{query}` to its end in both orders at each page size, comparing every page
