@@ -84,12 +84,14 @@ async fn attach_grants(
         .iter()
         .map(|(_, id, _)| id.parse::<sqlx::types::Uuid>().map_err(|_| read_error()))
         .collect::<V2Result<Vec<_>>>()?;
-    let names = bigname_storage::load_current_names_by_resource_ids(&mut *conn, &registrations)
-        .await
-        .map_err(crate::v2::name_rows_error(
-            crate::v2::SnapshotReadResource::Resolver,
-            |_| read_error(),
-        ))?;
+    let chains = publication_block_bounds.keys().cloned().collect::<Vec<_>>();
+    let names =
+        bigname_storage::load_current_names_by_resource_ids(&mut *conn, &registrations, &chains)
+            .await
+            .map_err(crate::v2::name_rows_error(
+                crate::v2::SnapshotReadResource::Resolver,
+                |_| read_error(),
+            ))?;
     let nameless = registrations
         .iter()
         .filter(|id| !names.contains_key(id))
