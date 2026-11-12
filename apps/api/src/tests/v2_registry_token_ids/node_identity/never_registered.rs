@@ -149,7 +149,11 @@ async fn lookup_serves_a_never_registered_name_as_unregistered() -> Result<()> {
         assert_eq!(response.status(), StatusCode::OK);
         let lookup: Value = read_json(response).await?;
         let record = &lookup["data"][0]["record"];
-        assert_eq!(record["name"], shown_of(&[b"plain"]), "{profile}: {lookup:#}");
+        assert_eq!(
+            record["name"],
+            shown_of(&[b"plain"]),
+            "{profile}: {lookup:#}"
+        );
         assert_no_registration(record);
     }
     database.cleanup().await

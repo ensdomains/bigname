@@ -95,7 +95,14 @@ async fn a_graveyard_claim_of_a_lapsed_lease_over_a_2017_record_is_released() ->
     let holder: Address = HOLDER.parse()?;
     let mut logs = vec![
         owner(B256::ZERO, b"eth", holder, old, 120, 0),
-        owner(node(&[b"eth"]), b"claimed", RECORD_OWNER.parse()?, old, 121, 0),
+        owner(
+            node(&[b"eth"]),
+            b"claimed",
+            RECORD_OWNER.parse()?,
+            old,
+            121,
+            0,
+        ),
     ];
     logs.extend(registration(
         (base_registrar, current),
