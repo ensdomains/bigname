@@ -15,6 +15,8 @@ mod events;
 mod history;
 mod history_context;
 mod history_filters;
+#[cfg(test)]
+pub(crate) use history_filters::UNALIASED_RECORD_KEYS;
 pub(crate) mod history_keyset;
 mod history_values;
 mod list_cursor;
@@ -133,7 +135,7 @@ pub(crate) use registries::{
 #[allow(unused_imports)]
 pub(crate) use resolvers::{
     BoundNames, BoundNamesCursorBinding, bound_names_next_cursor, bound_names_storage_cursor,
-    build_resolver_overview,
+    build_resolver_overview, with_bound_count_cap,
 };
 pub(crate) use resolvers::{
     get_resolver, get_resolver_links, get_resolver_records, get_resolver_roles,

@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use axum::{Router, routing::get};
 use clap::Parser;
 use sqlx::PgPool;
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -18,6 +19,7 @@ mod bounds;
 mod cli;
 mod errors;
 mod health;
+mod label_staging;
 mod metrics;
 mod name_filter;
 mod openapi;
@@ -53,6 +55,7 @@ async fn main() -> Result<()> {
 
 async fn serve(args: ServeArgs) -> Result<()> {
     args.bounds.validate()?;
+    args.label_staging.validate()?;
     let gateway_destination_policy = args.gateway_destination_policy()?;
     let ccip_gateway_deny_ranges = gateway_destination_policy.len();
     bigname_lookup::install_gateway_destination_policy(gateway_destination_policy)?;
@@ -72,6 +75,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     )
     .await?;
     startup_preflight::ensure_verified_lookup_ddl_available(&pool).await?;
+    startup_preflight::warn_on_advisory_indexes(&pool).await;
+    startup_preflight::warn_on_unreadable_child_listing(&pool).await;
+    let walk_index_set_unusable =
+        startup_preflight::ensure_walk_index_set(&pool, args.walk_index_set_check).await?;
     let health_pool = bigname_storage::connect_phase_reserved_readiness_pool(
         &args.database,
         "bigname-api-health",
@@ -106,7 +113,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
     )?;
     let state = AppState::new_with_rpc_urls(pool, chain_rpc_urls)
         .with_phase_heartbeat_max_age_secs(args.phase_heartbeat_max_age_secs)
-        .with_status_freshness_config(status_freshness_config);
+        .with_status_freshness_config(status_freshness_config)
+        .with_label_staging(args.label_staging.clone());
     state
         .status_freshness
         .spawn_refresh(state.lookup_chain_rpc_urls.clone());
@@ -141,6 +149,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
         verified_rate_limit_burst = args.bounds.verified_rate_limit_burst,
         verified_rate_limit_max_clients = args.bounds.verified_rate_limit_max_clients,
         trust_x_forwarded_for = args.bounds.trust_x_forwarded_for,
+        label_staging_per_second = args.label_staging.per_second,
+        walk_index_set_check = args.walk_index_set_check.as_str(),
+        walk_index_set_unusable,
         "API booted"
     );
 
@@ -198,6 +209,11 @@ pub(crate) fn app_router(state: AppState) -> Router {
     ))
 }
 
+/// Chromium caps a cached preflight at 7,200 s and Firefox at 86,400 s, so one day serves both.
+fn cors_layer() -> CorsLayer {
+    CorsLayer::permissive().max_age(Duration::from_secs(86_400))
+}
+
 fn app_router_with_bounds(
     state: AppState,
     health_pool: PgPool,
@@ -206,10 +222,10 @@ fn app_router_with_bounds(
     let bounded_router = v2::router()
         .with_state(state.clone())
         .route("/openapi.json", get(openapi::get_openapi))
-        .route_layer(CorsLayer::permissive());
+        .route_layer(cors_layer());
     let health_router = Router::new()
         .route("/healthz", get(health))
-        .route_layer(CorsLayer::permissive())
+        .route_layer(cors_layer())
         .layer(axum::Extension(HealthDatabasePool(health_pool)))
         .with_state(state);
     // The API is read-only public data served cross-origin to browser clients (the ENS Manager

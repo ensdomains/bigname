@@ -490,22 +490,30 @@ pages through `BignamePhaseFailed`. The runner logs
 PostgreSQL's message:
 
 - `unsupported Unicode escape sequence` or
-  `invalid byte sequence for encoding "UTF8": 0x00` for a NUL byte
+  `invalid byte sequence for encoding "UTF8": 0x00` for a NUL byte. Text
+  record and reverse name reads no longer produce these: a NUL in a read
+  value is a failed hydration read, counted in `hydration_failures` or
+  `attempt_failures`, and the block publishes
 - `index row size … exceeds btree version 4 maximum …` or
   `index row requires … bytes, maximum size is …` for an oversized record key.
 
-A runner exits nonzero once every chain it runs has stopped, so a runner with
-one chain exits on this stop. Its restart policy starts it again, and it replays
-the same block and stops again. That loop can also page
-`BignamePhaseRunnerContainerRestarting`, and `BignamePhaseRunnerDown` if the
-runner stays down between starts. Stop that runner's container until a build
-that handles the value is deployed. On a runner with several chains the others
-keep running. The stopped chain's last publication is kept, and the API serves
-it only while it is within the
+The runner stays up after this stop, even when the chain was its only one. It
+keeps serving its metrics, the chain's row stays `failed`, and there is no
+restart loop and nothing to silence. On a runner with several chains the others
+keep running. Once a build that handles the value is deployed, stop the runner
+and start that build. The stop exits 0, because the failure was already
+reported. With no chain left running the runner also logs this line:
+
+```text
+no chain is running, and the runner serves its metrics until it is stopped
+```
+
+The stopped chain's last publication is kept, and the API serves it only while
+it is within the
 [publication lag tolerance](../glossary.md#publication-lag-tolerance) of the
-stored head. Each restart in that loop runs Ingest to the source's head before
-Project meets the block again, so on a one-chain runner reads soon answer
-`409 stale`. A stop during catch-up does the same on any runner. The chain
+stored head. Any start runs Ingest to the source's head before Project meets the
+block again, so reads soon answer `409 stale` after a restart on a build that
+still cannot store the value. A stop during catch-up does the same. The chain
 recovers once a build that handles the value catches it up.
 Do not edit markers or delete the event. Report the message and block.
 
@@ -513,8 +521,8 @@ Do not edit markers or delete the event. Report the message and block.
 
 | Alert | Threshold | Plain-language meaning |
 | --- | --- | --- |
-| `BignamePhaseFailed` | A phase reports `failed` on one rule evaluation. | This intentionally trades pages during retryable transient backoff for guaranteed visibility of terminal errors and crash loops. Use the logs and subsequent state to distinguish them. |
-| `BignamePhaseRunnerRpcChainMismatch` | `phase_runner_rpc_chain_mismatch` reads `1` on any scrape within 10 minutes. | The named source's RPC endpoint now serves another chain than configured, so that chain stopped. The window keeps the page after the runner exits on it, but only if a scrape saw the gauge first: a single-chain runner usually exits before that, and is caught by `BignamePhaseRunnerDown` and the refusal log instead. A restart refuses to start until the endpoint is fixed. The startup log names the chain, source, expected and observed chain id, the expected genesis hash where the chain pins one, and the observed genesis hash when block 0 was read; an endpoint that could not be read logs the chain, source and error. A chain with no pinned genesis, such as Base, is held to the genesis hash its ingest cursor recorded: at startup the refusal comes once the database is open, or when Ingest, Live or Verify next starts, as an error naming both hashes. That refusal stops the chain without setting this gauge: look for the refusal log, or `BignamePhaseRunnerDown` once a single-chain runner exits. A running runner's mismatch error names the recorded hash as the expected one when the endpoint reports the right chain id but another block 0; a wrong or unreadable chain id is refused before block 0 is read, so that error names chain ids only. |
+| `BignamePhaseFailed` | A phase reports `failed` on one rule evaluation. | This intentionally trades pages during retryable transient backoff for guaranteed visibility of terminal errors, which stop the chain. Use the logs and subsequent state to distinguish them. |
+| `BignamePhaseRunnerRpcChainMismatch` | `phase_runner_rpc_chain_mismatch` reads `1` on any scrape within 10 minutes. | The named source's RPC endpoint now serves another chain than configured, so that chain stopped. A mismatch found while running leaves the runner up with the gauge set, so a scrape sees it. A refusal at start-up exits before a scrape sees the gauge, and is caught by `BignamePhaseRunnerDown` and the refusal log instead. A restart refuses to start until the endpoint is fixed. The startup log names the chain, source, expected and observed chain id, the expected genesis hash where the chain pins one, and the observed genesis hash when block 0 was read. An endpoint that could not be read logs the chain, source and error. A chain with no pinned genesis, such as Base, is held to the genesis hash its ingest cursor recorded: at startup the refusal comes once the database is open, or when Ingest, Live or Verify next starts, as an error naming both hashes. That refusal stops the chain without setting this gauge: look for the refusal log, or `BignamePhaseRunnerDown` when it came at start-up. A running runner's mismatch error names the recorded hash as the expected one when the endpoint reports the right chain id but another block 0. A wrong or unreadable chain id is refused before block 0 is read, so that error names chain ids only. |
 | `BignameUniversalResolverUnadmitted` | `phase_runner_universal_resolver_unadmitted` reads `1` for 5 minutes while `phase_runner_served_lag_blocks` is between 0 and 30 and no Project redo is running. | The chain's client-facing Universal Resolver ends at an implementation the `ens_execution` manifest does not admit. It moves no name: the chain stays [cut over](#universal-resolver-cutover), and names keep the expiry, grace and resolvability they had. Clients on chain no longer resolve through the deployment bigname models. Nothing is broken in the pipeline and no repair helps. Read the proxy, the implementation and the block from the warning log, then check the `ens_execution` manifest history. If a manifest change removed that implementation, restore it. Otherwise the installed deployment was never admitted, usually because upstream repointed the proxy: pin the deployment the implementation belongs to under `.refs/` and admit it in the `ens_execution` manifest (with the rest of the deployment when upstream redeployed), as for any re-admission ([manifests](../manifests.md#universal_resolver_implementations)). The log's block is the latest `Upgraded` among the proxies on the client-facing chain, the block from which it has ended there, so on a chain of proxies it can be an earlier proxy's repoint rather than the last proxy's upgrade. Either manifest change rotates the interpreter content hash, and the redo it requires reclassifies the proxy, which clears the alert. Neither moves a name. With `BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS` above 30, the proxy can drift while the API serves a publication more than 30 blocks behind, and this rule stays quiet. |
 | `BignamePhaseRunnerDown` | The target reports `up=0`, or no `up` series exists for the job, continuously for 2 minutes. | The runner process, metrics listener, or Prometheus target definition stayed unavailable. A successful scrape resets the timer, so this rule does not catch a flapping crash loop. The absent-target branch has only the `job` label because no target exists to supply an `instance`. |
 | `BignamePhaseRunnerCapacityPaused` | A phase remains continuously `paused` for 15 minutes. | Storage capacity has stopped pipeline work for the named chain phase. Short capacity waits do not page, while the runner continues refreshing its liveness signals during the wait. |
@@ -522,21 +530,49 @@ Do not edit markers or delete the event. Report the message and block.
 | `BignamePhaseRunnerHeartbeatThresholdMissing` | The configured heartbeat-threshold series is absent for 2 minutes. | The runner image and rules are incompatible, so the age-based alerts cannot be evaluated safely. |
 | `BignamePhaseRunnerLoopHeartbeatMissing` | The runner is scrapeable and exports the heartbeat threshold, but its runner-loop heartbeat series is absent for 2 minutes. | The runner image predates the loop-liveness rule, so between-phase stalls cannot be evaluated safely. |
 | `BignamePhaseRunnerHeartbeatStale` | An active phase has no database liveness heartbeat, or exceeds `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` (900 seconds by default), for 2 minutes. | The runner stopped refreshing phase liveness. Capacity waits keep this heartbeat fresh and instead page through `BignamePhaseRunnerCapacityPaused` after 15 minutes. |
-| `BignamePhaseRunnerLoopStale` | A supervised or active one-shot repair chain crosses no phase or batch boundary for the heartbeat threshold, plus 2 minutes. | The process is scrapeable, but work for that chain may be wedged while every supervised phase row rests. |
+| `BignamePhaseRunnerLoopStale` | A supervised or active one-shot repair chain crosses no phase or batch boundary for the heartbeat threshold, plus 2 minutes. | The process is scrapeable, but work for that chain may be wedged while every supervised phase row rests. A chain with a phase in `failed` is left to `BignamePhaseFailed`, so its frozen loop age does not page here. |
 | `BignamePhaseRunnerHeadLagHigh` | Live lag exceeds 30 blocks and Live is observed running at least once in every 2-minute window for 10 minutes. | The chain is persistently falling behind new blocks; brief completed-state zeroes do not reset the alert, while a failed or resting phase does not keep it active without new running samples. |
 | `BignamePhaseRunnerMetricsRefreshStale` | The database read fails, or the last successful refresh becomes older than 60 seconds, for 2 minutes. | The endpoint is reachable but is serving an old view of pipeline state. |
 | `BignamePhaseRunnerPhaseNonProgress` | Three confirmed unchanged-cursor work batches, or two whose sequence is at least 10 minutes old, remain present for 2 minutes. | The named phase and mode is repeatedly committing work without changing its durable resume position. It does not require the phase to be sampled as `running`; a failed phase remains owned by `BignamePhaseFailed`. |
 | `BignamePhaseRunnerProgressMetricsMissing` | Either non-progress metric family is absent from a scrapeable runner that exports the heartbeat threshold for 2 minutes. | The runner image and rules are incompatible, so cursor-progress paging fails closed. |
 
 The two hand-detected failure cases from issue #327 map directly to paging: a
-terminal phase error triggers `BignamePhaseFailed` while the runner remains
-reachable, or `BignamePhaseRunnerDown` if the process exits and remains down
-for 2 minutes. Repeated exits with successful scrapes between them trigger
+terminal phase error triggers `BignamePhaseFailed`, and the runner stays up and
+reachable. A process that exits and remains down for 2 minutes triggers
+`BignamePhaseRunnerDown`. Repeated exits with successful scrapes between them trigger
 `BignamePhaseRunnerContainerRestarting` reliably for restart periods under
 about three minutes, intermittently for periods from roughly three to five
 minutes, and not for periods of five minutes or longer. A stalled batch that
 crosses the deployment's configured maximum healthy duration triggers
 `BignamePhaseRunnerHeartbeatStale`.
+
+A chain can stop without a `failed` row: a panic in its task, a refusal before a
+phase starts, or a
+[walk index rebuild](../../ops/walk-index-set/README.md#the-phase-runners-rebuild)
+that fails. The runner stays up for these too, and `BignamePhaseFailed` stays
+quiet.
+`BignamePhaseRunnerLoopStale` pages once the chain's loop age passes the
+threshold. A panic leaves the phase row `running`, so
+`BignamePhaseRunnerHeartbeatStale` pages as well. The runner logs
+`chain supervisor stopped after a terminal error` in every case. Stop the runner
+to replace the build or to start again once the cause is fixed.
+
+Some errors do not stop the chain. A database or RPC error outside a phase's
+own retry, such as one during start-up recovery, is one. A phase lock still
+held at start-up is another, usually the previous process's session before
+PostgreSQL reaps it. The runner runs that chain again with backoff and no
+limit. A stop while the chain waits for that lock is a clean stop and exits 0. Each attempt logs this line at `WARN` with the attempt number and the
+error:
+
+```text
+chain supervisor runs the chain again after a retryable error
+```
+
+A chain that keeps failing before its first phase ages its loop heartbeat, so
+`BignamePhaseRunnerLoopStale` pages once that passes the threshold. A chain
+that fails again after its phases have run refreshes the heartbeat on each
+attempt, so watch for the warning. A lock held once the chain is running,
+by a redo or a second runner, still stops the chain.
 
 A slow crash loop remains unpaged when its restart period is five minutes or
 longer, each outage lasts less than two minutes, and no phase failure has yet

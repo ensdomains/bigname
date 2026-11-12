@@ -1,6 +1,6 @@
 //! The composed bound-name listing of `GET /v1/resolvers/{chain_id}/{address}`: the names whose
 //! composed row serves the resolver and passes the bound-name rules (`bound_rules.rs`), in page
-//! order, with an optional exact count.
+//! order, with an optional count.
 //!
 //! The page order is the name as the composed row renders it from chain data alone, then
 //! namespace and namehash: the raw name, or for a surface that stores no raw bytes each label
@@ -44,7 +44,8 @@ use crate::{
     name_current::DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
 };
 
-/// A page of bound names, and the exact count of the whole list when it was asked for.
+/// A page of bound names, and the count of the whole list when it was asked for: exact, or under
+/// a cap at most `cap + 1`, which says only that the list holds more than `cap` names.
 #[derive(Clone, Debug, Default)]
 pub struct BoundNamesPage {
     pub rows: Vec<BoundName>,
@@ -89,7 +90,7 @@ const STORED_SELECTOR_SQL: &str = "summary.resolver_chain_id = $1
         AND summary.resolver_address = lower($2)
         AND summary.resolver_listing_eligible";
 
-/// The surface fences of the walk the listing replaced, over the summary row `summary`: an
+/// The surface fences of a listed name, over the summary row `summary`: an
 /// active surface at or below the family marker, on readable lineage. The keys it reads make it
 /// one row at most.
 const SURFACE_FENCES_SQL: &str = "FROM bigname_phase.name_surfaces surface
@@ -140,22 +141,30 @@ pub(crate) fn bound_page_sql(supported: bool) -> String {
            > (COALESCE($4, ''), COALESCE($5, ''), COALESCE($6, ''))
      ORDER BY summary.order_name, summary.namespace, summary.namehash
      LIMIT $7",
-        listed = listed_sql(
-            &format!("COALESCE((SELECT TRUE {SURFACE_FENCES_SQL}), FALSE)"),
-            supported
-        ),
+        listed = listed_sql(&scalar_fences(), supported),
     )
 }
 
-/// The number of names the list holds, over the page's relation with no cursor: the fences as
-/// `EXISTS`, which the planner can run as one semi-join, since the count reads every listed row.
+/// The surface fences as a scalar subquery, run once for each summary row a statement reads.
+fn scalar_fences() -> String {
+    format!("COALESCE((SELECT TRUE {SURFACE_FENCES_SQL}), FALSE)")
+}
+
+/// The number of names the list holds, up to `$4` of them (every name when `$4` is null, which
+/// is `LIMIT ALL`): the page's statement with no cursor, under a count. Like the page it reads
+/// the partial index in page order and runs the fences once for each row it reads, so it stops
+/// after `$4` rows pass. Fences written as `EXISTS` could be planned as a semi-join that reads
+/// the surfaces of every listed name before the first row, which no limit bounds.
 pub(crate) fn bound_count_sql(supported: bool) -> String {
     format!(
-        "/* storage:families.name.bound_count */ SELECT count(*) {}",
-        listed_sql(
-            &format!("EXISTS (SELECT 1 {SURFACE_FENCES_SQL})"),
-            supported
-        )
+        "/* storage:families.name.bound_count */
+     SELECT count(*) FROM (
+       SELECT 1
+       {listed}
+       ORDER BY summary.order_name, summary.namespace, summary.namehash
+       LIMIT $4
+     ) capped",
+        listed = listed_sql(&scalar_fences(), supported),
     )
 }
 
@@ -178,7 +187,10 @@ async fn binding_supported(
 
 /// The bound-name listing over the composed rows: up to `limit` names bound to
 /// `resolver_address` on `chain_id`, after `cursor`, in page order, and with `total_count` the
-/// exact number of names in the whole list, counted from the same relation on the same snapshot.
+/// number of names in the whole list, counted from the same relation on the same snapshot. With
+/// `count_cap` the count reads at most `cap + 1` names, so a count above the cap means only
+/// that the list holds more.
+#[allow(clippy::too_many_arguments)]
 pub async fn load_family_bound_names(
     db: impl Into<crate::ReadDb<'_>>,
     chain_id: &str,
@@ -187,6 +199,7 @@ pub async fn load_family_bound_names(
     cursor: Option<&NameCurrentListCursor>,
     limit: i64,
     total_count: bool,
+    count_cap: Option<u64>,
 ) -> Result<BoundNamesPage> {
     // The cursor's name is the order name of the row it follows.
     let after = cursor
@@ -210,6 +223,7 @@ pub async fn load_family_bound_names(
                 &mut snapshot,
                 (chain_id, resolver_address, namespace),
                 supported,
+                count_cap,
             )
             .await?,
         )
@@ -294,37 +308,47 @@ async fn select(
         .collect()
 }
 
-/// The number of names in the whole list ([`bound_count_sql`]).
+/// The number of names in the whole list ([`bound_count_sql`]), or with `cap` at most `cap + 1`.
 ///
-/// The count is planned with the resolver's own values on every run. A generic plan guesses a
-/// few hundred names and probes every name's surfaces in a nested loop, which takes seconds at a
-/// million names. So the count is sent unprepared, which no cached statement can switch to its
-/// generic plan, and it runs under `plan_cache_mode = force_custom_plan` ([`custom_plans`]),
-/// which a server, role or session setting of `force_generic_plan` cannot override.
+/// The count is planned with the resolver's own values and its limit on every run, never with a
+/// generic plan's guess of a few hundred names. It is sent unprepared, which no cached statement
+/// can switch to its generic plan, and it runs under `plan_cache_mode = force_custom_plan`
+/// ([`custom_plans`]), which a server, role or session setting of `force_generic_plan` cannot
+/// override. The savepoint also turns sorts off, so the count's order is met only by reading
+/// the index in page order. Without it, a resolver whose size the planner estimates below the
+/// limit is read by a bitmap scan of every listed row, each probed, then sorted.
 pub(crate) async fn count(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
     supported: bool,
+    cap: Option<u64>,
 ) -> Result<u64> {
     let mut scoped = custom_plans(conn).await?;
     let total: i64 = sqlx::query_scalar(&bound_count_sql(supported))
         .bind(chain_id)
         .bind(resolver_address)
         .bind(namespace)
+        .bind(count_limit(cap))
         .persistent(false)
         .fetch_one(&mut *scoped)
         .await
         .with_context(|| {
             format!("failed to count the bound names of {chain_id}:{resolver_address}")
         })?;
-    // Rolling back ends the setting. The count wrote nothing.
+    // Rolling back ends both settings. The count wrote nothing.
     scoped.rollback().await?;
     Ok(u64::try_from(total).unwrap_or_default())
 }
 
+/// The count statement's `$4` for `cap`: `cap + 1` rows, or null for every row.
+fn count_limit(cap: Option<u64>) -> Option<i64> {
+    cap.map(|cap| i64::try_from(cap.saturating_add(1)).unwrap_or(i64::MAX))
+}
+
 /// A savepoint on `conn` (or a transaction, on a connection outside one) whose statements are
-/// planned with their values: `SET LOCAL plan_cache_mode = force_custom_plan`. The caller rolls
-/// it back, which restores the setting for the rest of the read and keeps its snapshot.
+/// planned with their values and without a sort: `SET LOCAL plan_cache_mode =
+/// force_custom_plan` and `SET LOCAL enable_sort = off`. The caller rolls it back, which
+/// restores both settings for the rest of the read and keeps its snapshot.
 async fn custom_plans(conn: &mut PgConnection) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
     let mut scoped = conn
         .begin()
@@ -334,6 +358,10 @@ async fn custom_plans(conn: &mut PgConnection) -> Result<sqlx::Transaction<'_, s
         .execute(&mut *scoped)
         .await
         .context("failed to plan the bound-name count with its values")?;
+    sqlx::query("SET LOCAL enable_sort = off")
+        .execute(&mut *scoped)
+        .await
+        .context("failed to plan the bound-name count in index order")?;
     Ok(scoped)
 }
 
@@ -346,6 +374,7 @@ pub(crate) async fn count_plan(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
     supported: bool,
+    cap: Option<u64>,
 ) -> Result<String> {
     let quoted = |value: Option<&str>| {
         value.map_or("NULL".to_owned(), |value| {
@@ -354,16 +383,17 @@ pub(crate) async fn count_plan(
     };
     let mut scoped = custom_plans(conn).await?;
     sqlx::query(&format!(
-        "PREPARE bound_count_probe (text, text, text) AS {}",
+        "PREPARE bound_count_probe (text, text, text, bigint) AS {}",
         bound_count_sql(supported)
     ))
     .execute(&mut *scoped)
     .await?;
     let plan: Vec<String> = sqlx::query_scalar(&format!(
-        "EXPLAIN EXECUTE bound_count_probe ({}, {}, {})",
+        "EXPLAIN EXECUTE bound_count_probe ({}, {}, {}, {})",
         quoted(Some(chain_id)),
         quoted(Some(resolver_address)),
-        quoted(namespace)
+        quoted(namespace),
+        count_limit(cap).map_or("NULL".to_owned(), |limit| limit.to_string())
     ))
     .fetch_all(&mut *scoped)
     .await?;

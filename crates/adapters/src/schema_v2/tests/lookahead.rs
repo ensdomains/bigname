@@ -2,6 +2,8 @@ use super::*;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[path = "lookahead_name_cap.rs"]
+mod name_cap;
 #[path = "v2_mount_path.rs"]
 mod v2_mount_path;
 
@@ -81,10 +83,16 @@ fn complete(
 thread_local! {
     /// Scoped comparisons run on this test thread, so a test can prove the fixture hook ran.
     static SCOPED_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The attempts the latest scoped comparison on this thread made, the one it used included.
+    static SCOPED_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(super) fn scoped_comparisons() -> usize {
     SCOPED_COMPARISONS.get()
+}
+
+fn last_scoped_attempts() -> usize {
+    SCOPED_ATTEMPTS.get()
 }
 
 /// The families whose retained events `events.sql` reads by name or resource.
@@ -326,7 +334,9 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
     }
     // Mirrors the Interpret loader: an attempt that reads a key outside the loaded set is
     // discarded, and the next attempt loads that key too.
+    let mut attempts = 0;
     let (prepared, loaded) = loop {
+        attempts += 1;
         let (scoped, rows) = scope(dependencies.clone(), &prior)?;
         assert!(scoped.unsupported.is_empty());
         let attempt = restore_schema_v2_lookahead_session(
@@ -372,6 +382,7 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
             }
         }
     };
+    SCOPED_ATTEMPTS.set(attempts);
     let (actual, session) = complete(prepared, &prior)?;
     assert_eq!(actual, expected, "complete scoped suffix output differs");
     SCOPED_COMPARISONS.set(SCOPED_COMPARISONS.get() + 1);

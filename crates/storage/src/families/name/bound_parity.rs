@@ -1,12 +1,7 @@
-//! Test support for the bound-name listing: the page read from the name summary
-//! ([`super::load_family_bound_names`]) against the walk it replaced
-//! ([`super::bound_walk::load_bound_names_by_walk`]), and the stored bound-name values against a
-//! fresh composition. The listing holds the walk's set of names, in the order of their stored
-//! order names: the walk ordered a name without raw bytes by the name it is shown under, and a
-//! name whose surface changed its raw bytes after its summary was composed by its new raw name.
-//! So the walk's whole list is put in stored order before the pages are compared with it, and
-//! the stored order names are checked on their own against the surfaces as the publication's
-//! block reads them. It is compiled for tests only.
+//! Test support for the bound-name listing ([`super::load_family_bound_names`]): its pages
+//! against one read of the whole list, and the stored bound-name values against a fresh
+//! composition. The stored order names are checked on their own against the surfaces as the
+//! publication's block reads them. It is compiled for tests only.
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -15,12 +10,11 @@ use super::{
     batch,
     bound::{BoundName, load_family_bound_names},
     bound_rules::ORDER_NAME_BYTES,
-    bound_walk::load_bound_names_by_walk,
     rendered::placeholder_name,
 };
-use crate::{NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow};
+use crate::{NameCurrentListCursor, NameCurrentListCursorValue};
 
-/// The page sizes every parity check reads the whole list in.
+/// The page sizes every paging check reads the whole list in.
 const PAGE_SIZES: [i64; 4] = [1, 2, 7, 50];
 
 /// The summary columns the bound-name page selects by.
@@ -35,31 +29,19 @@ const STORED_BOUND_COLUMNS: [&str; 7] = [
 ];
 
 /// Checks the stored summaries ([`assert_stored_bound_fields_are_fresh`]), then reads the bound
-/// names of `resolver_address` on `chain_id` on one snapshot, page by page at each of
-/// [`PAGE_SIZES`], and fails unless the pages chain, row for row, to the walk's whole list in the
-/// listing's order, and every page's count is the walk's whole list. Returns the listed names as
+/// names of `resolver_address` on `chain_id` on one snapshot: the whole list in one page, then
+/// page by page at each of [`PAGE_SIZES`]. Fails unless the pages chain, row for row, to the
+/// whole list, and every page's count is the whole list's length. Returns the listed names as
 /// served, in page order.
-pub async fn assert_bound_names_match_the_walk(
+pub async fn assert_bound_name_pages_chain(
     pool: &PgPool,
     chain_id: &str,
     resolver_address: &str,
     namespace: Option<&str>,
 ) -> Result<Vec<String>> {
-    // First, so a name the summary lost fails as a missing summary rather than as a walked name
-    // with no stored order name.
+    // First: the pages below read the summary, so a name it lost fails only here.
     assert_stored_bound_fields_are_fresh(pool, chain_id).await?;
     let mut snapshot = crate::begin_read_snapshot(pool).await?;
-    let walked = load_bound_names_by_walk(
-        &mut *snapshot,
-        chain_id,
-        resolver_address,
-        namespace,
-        None,
-        i64::from(u32::MAX),
-    )
-    .await?;
-    let whole = in_listing_order(&mut snapshot, chain_id, walked).await?;
-    let expected = u64::try_from(whole.len())?;
     let unasked = load_family_bound_names(
         &mut *snapshot,
         chain_id,
@@ -68,63 +50,36 @@ pub async fn assert_bound_names_match_the_walk(
         None,
         1,
         false,
+        None,
     )
     .await?;
     ensure!(
         unasked.total_count.is_none(),
         "a page asked for no count carries one"
     );
-    // One page of the whole list first, so a difference names the rows it is about.
+    let limit = i64::from(u32::MAX);
     let listed = load_family_bound_names(
         &mut *snapshot,
         chain_id,
         resolver_address,
         namespace,
         None,
-        i64::try_from(whole.len())? + 1,
-        false,
+        limit,
+        true,
+        None,
     )
     .await?;
-    if listed.rows != whole {
-        let shown: Vec<&str> = listed
-            .rows
-            .iter()
-            .map(|name| name.row.logical_name_id.as_str())
-            .collect();
-        let missing: Vec<&str> = whole
-            .iter()
-            .map(|name| name.row.logical_name_id.as_str())
-            .filter(|id| !shown.contains(id))
-            .collect();
-        let stored: Vec<Value> = sqlx::query_scalar(
-            "SELECT jsonb_build_object('summary', to_jsonb(summary), 'surface',
-                 jsonb_build_object('raw_name', surface.raw_name, 'block', surface.block_number,
-                     'visibility', surface.visibility_state,
-                     'canonicality', surface.canonicality_state,
-                     'witness', surface.preimage_event_identity),
-                 'marker', (SELECT marker.current_block_number
-                            FROM bigname_phase.project_family_marker marker
-                            WHERE marker.chain_id = surface.chain_id),
-                 'preimages', (SELECT jsonb_agg(jsonb_build_array(event.block_number,
-                                   event.event_identity, event.canonicality_state))
-                               FROM bigname_phase.normalized_events event
-                               WHERE event.logical_name_id = surface.logical_name_id
-                                 AND event.event_kind = 'PreimageObserved'))
-             FROM bigname_phase.name_surfaces surface
-             LEFT JOIN bigname_phase.project_name_summary summary
-               ON summary.logical_name_id = surface.logical_name_id
-             WHERE surface.logical_name_id = ANY($1)",
-        )
-        .bind(&missing)
-        .fetch_all(&mut *snapshot)
-        .await?;
-        anyhow::bail!(
-            "the summary lists {:?}, the walk lists {:?}. The walk's names the summary leaves \
-             out: {stored:#?}",
-            names(&listed.rows),
-            names(&whole)
-        );
-    }
+    let whole = listed.rows;
+    let expected = u64::try_from(whole.len())?;
+    ensure!(
+        whole.len() < usize::try_from(limit)?,
+        "the whole list fills a page of {limit}"
+    );
+    ensure!(
+        listed.total_count == Some(expected),
+        "the whole list of {expected} names counts {:?}",
+        listed.total_count
+    );
     for size in PAGE_SIZES {
         let mut cursor: Option<NameCurrentListCursor> = None;
         let mut served: Vec<BoundName> = Vec::new();
@@ -137,19 +92,20 @@ pub async fn assert_bound_names_match_the_walk(
                 cursor.as_ref(),
                 size + 1,
                 true,
+                None,
             )
             .await?;
             ensure!(
                 page.total_count == Some(expected),
-                "page {page_number} of size {size} counts {:?}, the walk lists {expected}",
+                "page {page_number} of size {size} counts {:?}, the whole list has {expected}",
                 page.total_count
             );
             let offset = served.len();
             let lookahead = whole.iter().skip(offset).take(usize::try_from(size + 1)?);
             ensure!(
                 page.rows.iter().eq(lookahead),
-                "page {page_number} of size {size} after {cursor:?} differs from the walk: \
-                 summary {:?}, walk {:?}",
+                "page {page_number} of size {size} after {cursor:?} differs from the whole list: \
+                 page {:?}, whole list from there {:?}",
                 names(&page.rows),
                 names(&whole[offset.min(whole.len())..])
             );
@@ -164,7 +120,7 @@ pub async fn assert_bound_names_match_the_walk(
         }
         ensure!(
             served == whole,
-            "pages of size {size} chain to {:?}, the walk lists {:?}",
+            "pages of size {size} chain to {:?}, the whole list is {:?}",
             names(&served),
             names(&whole)
         );
@@ -179,6 +135,7 @@ pub async fn assert_bound_names_match_the_walk(
             Some(&cursor_after(last)),
             2,
             true,
+            None,
         )
         .await?;
         ensure!(
@@ -190,40 +147,6 @@ pub async fn assert_bound_names_match_the_walk(
     }
     snapshot.rollback().await?;
     Ok(names(&whole))
-}
-
-/// The walk's rows in the listing's order: their stored order names, then namespace and
-/// namehash, compared by the database. A walked name with no stored order name fails.
-async fn in_listing_order(
-    conn: &mut sqlx::PgConnection,
-    chain_id: &str,
-    rows: Vec<NameCurrentRow>,
-) -> Result<Vec<BoundName>> {
-    let ids: Vec<String> = rows.iter().map(|row| row.logical_name_id.clone()).collect();
-    let ordered: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT listed.id, summary.order_name
-         FROM unnest($2::text[]) AS listed(id)
-         LEFT JOIN bigname_phase.project_name_summary summary
-           ON summary.chain_id = $1 AND summary.logical_name_id = listed.id
-         ORDER BY summary.order_name, summary.namespace, summary.namehash",
-    )
-    .bind(chain_id)
-    .bind(&ids)
-    .fetch_all(&mut *conn)
-    .await?;
-    let mut by_id: std::collections::BTreeMap<String, NameCurrentRow> = rows
-        .into_iter()
-        .map(|row| (row.logical_name_id.clone(), row))
-        .collect();
-    ordered
-        .into_iter()
-        .map(|(id, order_name)| {
-            let order_name =
-                order_name.with_context(|| format!("{id} has no stored order name"))?;
-            let row = by_id.remove(&id).context("a walked row twice")?;
-            Ok(BoundName { row, order_name })
-        })
-        .collect()
 }
 
 /// The order name of a surface from chain data, built here apart from the family step's

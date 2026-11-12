@@ -209,6 +209,14 @@ pub(crate) fn name_rows_error(
             );
             return V2Error::stale(stale_snapshot_message(resource));
         }
+        if let Some(unreadable) = error.downcast_ref::<bigname_storage::ChildListingUnreadable>() {
+            error!(
+                service = "api",
+                resource = %resource.label(),
+                relations = %unreadable.relations.join(","),
+                "the child routes cannot read the stored child listing; grant the API role SELECT on it (docs/deployment.md, The child listing family and its counts)"
+            );
+        }
         internal(error)
     }
 }

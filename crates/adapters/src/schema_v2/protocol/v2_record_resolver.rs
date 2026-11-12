@@ -13,7 +13,7 @@ use crate::{
         catalog::Selected,
         common::{
             decode_dns_labels, event_string_selector, event_string_value, namehash_raw,
-            surface_labels,
+            record_key_over_cap, surface_labels,
         },
         model::RawLogInput,
         state::State,
@@ -148,6 +148,9 @@ pub(super) fn interpret(
                 "data"
             };
             let selector = event_string_selector(family, &key);
+            if record_key_over_cap(selected, raw, &selector.record_family, &selector.record_key) {
+                return Ok(Interpreted::new());
+            }
             let mut after = json!({"record_family":selector.record_family, "record_key":selector.record_key,
                 "selector_key":selector.selector_key, "value_retained":true, "value_length":value.len(),
                 "value":if family == "text" { event_string_value(&value) } else { json!(hex_string(&value)) }});

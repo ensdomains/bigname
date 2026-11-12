@@ -43,7 +43,7 @@ const PLAN_MODES: [&str; 2] = ["force_generic_plan", "force_custom_plan"];
 /// follow block. PostgreSQL 16 has no skip scan, so a btree range is bounded only by the leading
 /// columns up to the first one without a condition. A condition on a later column filters
 /// inside the range, though EXPLAIN prints it as an index condition too.
-type Probe<'a> = (&'a str, &'a [&'a str]);
+pub(super) type Probe<'a> = (&'a str, &'a [&'a str]);
 const BLOCK_RANGE: &[&str] = &["(chain_id = ", "(block_number > ", "(block_number <= "];
 const BLOCK_INDEXES: &[Probe] = &[
     ("normalized_events_chain_block_number_idx", BLOCK_RANGE),
@@ -316,7 +316,7 @@ fn before_fix() -> Result<String> {
 }
 
 /// Every scan node of a JSON plan, children included.
-fn collect_scans<'a>(node: &'a Value, scans: &mut Vec<&'a Value>) {
+pub(super) fn collect_scans<'a>(node: &'a Value, scans: &mut Vec<&'a Value>) {
     if node["Node Type"]
         .as_str()
         .is_some_and(|kind| kind.contains("Scan"))
@@ -331,7 +331,7 @@ fn collect_scans<'a>(node: &'a Value, scans: &mut Vec<&'a Value>) {
 /// Why the scans of `relation` under `alias` are not all index probes of one of the indexes of
 /// `probes` whose index condition holds every condition that index's entry lists, or `None` when
 /// they are. A bitmap heap scan passes when a bitmap index scan below it does.
-fn probe_failure(
+pub(super) fn probe_failure(
     scans: &[&Value],
     relation: &str,
     alias: &str,

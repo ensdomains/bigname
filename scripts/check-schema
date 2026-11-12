@@ -529,10 +529,10 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=547
+expected_refusal_assertions=571
 predecessor_shape_proof_count=0
 # Includes registration_lifecycle applied after lookup_precomputation on the removal path.
-expected_predecessor_shape_proof_count=93
+expected_predecessor_shape_proof_count=96
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
@@ -542,6 +542,8 @@ search_prefix_index_migration="$ROOT/migrations/20261029120000_search_prefix_buc
 transfer_node_index_migration="$ROOT/migrations/20261102130000_normalized_events_v1_transfer_node_index.sql"
 registry_roles_index_migration="$ROOT/migrations/20261102140000_normalized_events_registry_roles_index.sql"
 resolver_link_order_index_migration="$ROOT/migrations/20261103130000_project_resolver_link_order_index.sql"
+parent_key_index_migration="$ROOT/migrations/20261104120000_name_surfaces_project_parent_key_index.sql"
+record_history_index_migration="$ROOT/migrations/20261111120000_normalized_events_record_history_indexes.sql"
 # label_hashes and its GIN index as the identity baseline defined them before
 # 20261012130000_drop_unread_indexes.sql. The baseline no longer does, so a proof that
 # starts from the earlier shape builds both from this text.
@@ -879,6 +881,20 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20261104130000_project_event_count.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261104130000_project_event_count.sql" baseline-first
+            # The address listing family: absent from the pre-7c shape, present in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261104140000_project_address_listing.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261104140000_project_address_listing.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261104140000_project_address_listing.sql" baseline-first
+            # The parent key index: the identity file has no pre-7c copy, so both shapes hold
+            # it from the baseline.
+            emit_phase_migration "$parent_key_index_migration" baseline-first
+            # The record history indexes: absent from the pre-7c shape, present in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$record_history_index_migration" preceding-shape
+            fi
+            emit_phase_migration "$record_history_index_migration" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -1043,7 +1059,10 @@ for migration_file in \
     "$registry_roles_index_migration" \
     "$ROOT/migrations/20261103120000_project_child_listing.sql" \
     "$resolver_link_order_index_migration" \
-    "$ROOT/migrations/20261104130000_project_event_count.sql"
+    "$parent_key_index_migration" \
+    "$ROOT/migrations/20261104130000_project_event_count.sql" \
+    "$ROOT/migrations/20261104140000_project_address_listing.sql" \
+    "$record_history_index_migration"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1421,6 +1440,15 @@ emit_phase_migration "$resolver_link_order_index_migration" baseline-first | run
 # The same fixture lacks the stored event counts.
 emit_phase_migration "$ROOT/migrations/20261104130000_project_event_count.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261104130000_project_event_count.sql" baseline-first | run_psql
+# The same fixture lacks the address listing family.
+emit_phase_migration "$ROOT/migrations/20261104140000_project_address_listing.sql" preceding-shape | run_psql
+emit_phase_migration "$ROOT/migrations/20261104140000_project_address_listing.sql" baseline-first | run_psql
+# name_surfaces has no historical copy, so it already holds the parent key index.
+emit_phase_migration "$parent_key_index_migration" baseline-first | run_psql
+# The historical normalized-event fixture lacks the record history indexes, and the table is
+# empty, so the schema-migration builds them.
+emit_phase_migration "$record_history_index_migration" preceding-shape | run_psql
+emit_phase_migration "$record_history_index_migration" baseline-first | run_psql
 # The historical normalized-event fixture lacks the registrar lease index. Install
 # the current operational definition before walk-set and exact-adoption checks.
 render_phase_migration "$ROOT/ops/history-registrar-lease-index/install.sql" | run_psql
@@ -3844,7 +3872,8 @@ BEGIN
         WHERE (to_regclass(expected.index_name) IS NULL) <> (expected.index_name IN ($walk_index_dropped))
     ) OR (
         SELECT count(*) FROM pg_index WHERE indrelid = 'normalized_events'::regclass
-    ) <> 17 THEN
+    ) <> 17 + 2 THEN
+        -- The 17 kept indexes and the two advisory record-key indexes, which drop.sql leaves.
         RAISE EXCEPTION 'walk index set drop did not leave exactly the kept indexes';
     END IF;
 END \$\$;
@@ -3877,7 +3906,7 @@ DO $$
 BEGIN
     IF to_regclass('normalized_events_project_v1_pointer_node_idx') IS NULL OR (
         SELECT count(*) FROM pg_index WHERE indrelid = 'normalized_events'::regclass
-    ) <> 18 THEN
+    ) <> 18 + 2 THEN
         RAISE EXCEPTION 'walk index set drop did not leave an unlisted index alone';
     END IF;
 END $$;
@@ -4171,6 +4200,11 @@ BEGIN
     END IF;
 END $$;
 DROP INDEX name_surfaces_project_entry_keys_idx, name_surfaces_project_path_hash_idx;
+-- The parent key index of 20261104120000 reads the function too. It is built again below, as
+-- the baseline builds it.
+CREATE TEMP TABLE expected_parent_key_index_after_path AS
+SELECT pg_get_indexdef('name_surfaces_project_parent_key_idx'::regclass) AS definition;
+DROP INDEX name_surfaces_project_parent_key_idx;
 DROP FUNCTION entry_key_hashes(text[]);
 SQL
     emit_phase_migration "$path_index_migration" preceding-shape
@@ -4209,6 +4243,16 @@ BEGIN
     END IF;
 END $$;
 DROP TABLE expected_path_indexes, expected_entry_key_hashes;
+CREATE INDEX name_surfaces_project_parent_key_idx
+    ON name_surfaces (namespace, hash_array_extended(entry_key_hashes(labelhashes[2:]), 0));
+DO $$
+BEGIN
+    IF pg_get_indexdef('name_surfaces_project_parent_key_idx'::regclass)
+        <> (SELECT definition FROM expected_parent_key_index_after_path) THEN
+        RAISE EXCEPTION 'the parent key index differs from the baseline after the path index proof';
+    END IF;
+END $$;
+DROP TABLE expected_parent_key_index_after_path;
 SQL
 } | run_psql
 assert_migration_context_count "$path_index_migration" empty-schema 1
@@ -5141,6 +5185,8 @@ source "$ROOT/scripts/schema-check/history-direct-accounts.sh"
 source "$ROOT/scripts/schema-check/history-transfer-node.sh"
 source "$ROOT/scripts/schema-check/registry-roles.sh"
 source "$ROOT/scripts/schema-check/resolver-link-order.sh"
+source "$ROOT/scripts/schema-check/parent-key.sh"
+source "$ROOT/scripts/schema-check/record-history.sh"
 
 # Recreate the registry token index from its preceding schema shape. Compare
 # the resulting catalog definition to the fresh baseline, then prove a rerun
@@ -6658,6 +6704,7 @@ BEGIN
             ('project_child_listing'),
             ('project_child_listing_count'),
             ('project_child_preimage_watermark'),
+            ('project_address_listing'),
             ('project_lookup_name'),
             ('project_lookup_relation'),
             ('project_lookup_inventory'),
@@ -6784,6 +6831,7 @@ BEGIN
             ('project_child_listing'),
             ('project_child_listing_count'),
             ('project_child_preimage_watermark'),
+            ('project_address_listing'),
             ('project_lookup_name'),
             ('project_lookup_relation'),
             ('project_lookup_inventory'),

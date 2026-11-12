@@ -198,6 +198,12 @@ fn child_id(n: i64) -> String {
 }
 
 pub(super) async fn install(conn: &mut PgConnection) -> Result<()> {
+    install_with(conn, true).await
+}
+
+/// [`install`], with the planner statistics collected or, without `statistics`, never collected:
+/// autovacuum is off on every fixture table, as on tables a redo has just rebuilt.
+pub(super) async fn install_with(conn: &mut PgConnection, statistics: bool) -> Result<()> {
     raw_sql("CREATE SCHEMA bigname_phase; SET search_path TO bigname_phase, public; SET jit = off")
         .execute(&mut *conn)
         .await?;
@@ -212,8 +218,19 @@ pub(super) async fn install(conn: &mut PgConnection) -> Result<()> {
     ] {
         raw_sql(baseline).execute(&mut *conn).await?;
     }
+    let autovacuum = if statistics {
+        ""
+    } else {
+        "ALTER TABLE name_surfaces SET (autovacuum_enabled = false);
+         ALTER TABLE chain_lineage SET (autovacuum_enabled = false);
+         ALTER TABLE project_family_marker SET (autovacuum_enabled = false);
+         ALTER TABLE project_child_edge_candidate SET (autovacuum_enabled = false);
+         ALTER TABLE project_name_summary SET (autovacuum_enabled = false);
+         ALTER TABLE project_name_state SET (autovacuum_enabled = false);"
+    };
     raw_sql(&format!(
-        "INSERT INTO chain_lineage(chain_id, block_hash, block_number, block_timestamp,
+        "{autovacuum}
+         INSERT INTO chain_lineage(chain_id, block_hash, block_number, block_timestamp,
              canonicality_state) VALUES ('{CHAIN}', 'block', 100, to_timestamp(100), 'canonical');
          INSERT INTO name_surfaces(logical_name_id, namespace, raw_name, raw_labels,
              dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
@@ -230,9 +247,14 @@ pub(super) async fn install(conn: &mut PgConnection) -> Result<()> {
              100, 0, n, 'child:' || n || ':0', '0x1111111111111111111111111111111111111111',
              '0x' || lpad(to_hex(n), 64, '0'), 'ens_v1_registry_l1'
          FROM generate_series(1, {CHILDREN}) n;
-         ANALYZE name_surfaces; ANALYZE chain_lineage; ANALYZE project_family_marker;
-         ANALYZE project_child_edge_candidate; ANALYZE project_name_summary;",
-        bigname_content_hash::PROJECTION_CONTENT_HASH
+         {}",
+        bigname_content_hash::PROJECTION_CONTENT_HASH,
+        if statistics {
+            "ANALYZE name_surfaces; ANALYZE chain_lineage; ANALYZE project_family_marker;
+             ANALYZE project_child_edge_candidate; ANALYZE project_name_summary;"
+        } else {
+            ""
+        }
     ))
     .execute(conn)
     .await?;

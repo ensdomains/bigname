@@ -10,7 +10,7 @@ use crate::{
         catalog::Selected,
         common::{
             decode_dns_labels, event_string_has_content, event_string_selector, event_string_value,
-            namehash, namehash_raw, surface_labels,
+            namehash, namehash_raw, record_key_over_cap, surface_labels,
         },
         model::RawLogInput,
         state::State,
@@ -143,6 +143,9 @@ pub(super) fn interpret(
             let node = hex_string(event.node);
             let value_length = event.value.len();
             let selector = event_string_selector("text", &event.key);
+            if record_key_over_cap(selected, raw, &selector.record_family, &selector.record_key) {
+                return Ok(Interpreted::new());
+            }
             let mut after_state = json!({
                 "source_event": "TextChanged",
                 "resolver": raw.emitting_address,

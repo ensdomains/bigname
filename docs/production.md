@@ -49,6 +49,23 @@ for the health-specific concurrency ceiling. `/v2/*` is not served by the
 binary and not admitted by the edge. Phase-runner and PostgreSQL control
 surfaces are not routed through Caddy.
 
+### Edge rules in force
+
+The production edge also refuses the request shapes below before they reach the
+API. These rules are not in `docker/caddy/Caddyfile`, and a self-hosted deployment
+does not need them. Update this list with every matcher change.
+
+| Refused request | Answer | What to call instead | Exit condition |
+| --- | --- | --- | --- |
+| `/v1/diagnostics/events` and paths below it | `404` | `GET /v1/events`, the product event collection. | Goes when the edge drops this matcher. That waits on an API change to this route. |
+| `/v1/names/eth/subnames`, `/v1/names/base.eth/subnames` and paths below them | `400` | `GET /v1/names/{name}/subnames` for any other parent, or `GET /v1/names` with `namespace`, `parent` and an expiry window. | Goes when the edge drops this matcher. That waits on an API change to the subnames route. |
+| `/v1/events` with `contract_address` and `include=total_count` | `400` | The same read without `include=total_count`. | Retiring: the API now caps this count when only a contract anchors the read. Goes when the edge drops this matcher. |
+| `/v1/resolvers/*` with `include=total_count` | `400` | The same read without `include=total_count`. | Retiring: the API now bounds this count. Goes when the edge drops this matcher. |
+
+Matching is case-insensitive on the unescaped path. A query test reads the raw
+query string, so a repeated `include` or a percent-encoded underscore in either
+key is still caught.
+
 ### Internal-only versus public URLs
 
 Not every URL the API process answers is a public one. Keep the two sets
@@ -112,10 +129,15 @@ recommended starting point before the public edge is undrained.
 | `BIGNAME_API_RPC_TIMEOUT_MS` | `8000` | `8000` | Total deadline for each API-triggered execution JSON-RPC call. |
 | `BIGNAME_API_CCIP_GATEWAY_DENY_CIDRS` | empty | deployment policy | Operator deny list: comma-separated IPv4 or IPv6 CIDR ranges, such as `198.51.100.0/24`, that a CCIP-Read gateway may never be fetched from, on top of the built-in loopback, private, link-local, shared-address, unique-local, unspecified, multicast, reserved and IPv6 transition ranges. A fetch it refuses fails that record in band as `gateway_destination_refused`. Startup refuses an entry that is not a range. See [CCIP-Read gateway transport](execution.md#ccip-read-gateway-transport). |
 | `BIGNAME_API_RPC_CHAIN_CHECK` | `full` | `full` | Startup check of every `BIGNAME_API_CHAIN_RPC_URLS` endpoint: `eth_chainId` must match the chain and, in `full`, block 0 must be its genesis block. A mismatch refuses to start without logging the URL; an unreachable endpoint only warns, and is not checked again once it answers. `chain-id-only` is for local nodes on their own genesis; there is no off value. See the [RPC chain check](deployment.md#rpc-chain-check). |
+| `BIGNAME_API_WALK_INDEX_SET_CHECK` | `refuse` | `refuse` | Startup check of the `normalized_events` indexes [`ops/walk-index-set/drop.sql`](../ops/walk-index-set/README.md) drops, on the database the API reads. `refuse` exits naming each index that is missing, not valid and ready, or under a name another relation holds. `warn` starts without them and logs a warning, for a deliberate start while they are dropped or being rebuilt. See [the startup check](deployment.md#the-api-refuses-to-start-without-the-indexes-dropsql-drops). |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_PER_SECOND` | `0` (off) | `1` | Per-client token refill rate for verified-execution-triggering routes, keyed by an IPv4 address or IPv6 `/64`; excess requests return `429 rate_limited`. |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_BURST` | `10` | `5` | Maximum tokens in each client bucket when rate limiting is enabled. |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_MAX_CLIENTS` | `65536` | `65536` | In-memory client-bucket ceiling per API process. |
 | `BIGNAME_API_TRUST_X_FORWARDED_FOR` | `false` | `true` | Whether the client-IP key may use the rightmost valid `X-Forwarded-For` address instead of the TCP peer. |
+| `BIGNAME_API_LABEL_STAGING_PER_SECOND` | `10` | `10` | Writes a second of the [label candidates](deployment.md#api-label-candidates) a name request proves, into `bigname_phase.ens_names`. `0` stages nothing, and responses still show proven labels. |
+| `BIGNAME_API_LABEL_STAGING_BURST` | `20` | `20` | Label-candidate writes allowed at once after a quiet period. |
+| `BIGNAME_API_LABEL_STAGING_MAX_LABELS` | `65536` | `65536` | Labelhashes one API process remembers as staged, so it writes each label once. |
+| `BIGNAME_API_LABEL_STAGING_MAX_IN_FLIGHT` | `2` | `2` | Concurrent label-candidate writes. A write past it is dropped and counted `throttled`. |
 
 The API process attaches its two RPC deadlines when it constructs its lookup
 provider configuration. Phase-runner hydration uses its own provider

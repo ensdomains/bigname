@@ -178,6 +178,16 @@ async fn v2_get_names_serves_authority_and_filters_by_authority_and_parent() -> 
         assert_eq!(v2_names_listed(&payload), expected, "{uri}");
         assert_eq!(payload["page"]["total_count"], Value::Null, "{uri}");
     }
+    // A parent label spelled as its labelhash names the same node, so it lists the same names.
+    for (label, filters, expected) in [
+        ("lease", "", vec!["wrapped.lease.eth"]),
+        ("fresh", "&authority=ens_v2", vec!["kid.fresh.eth"]),
+    ] {
+        let labelhash = alloy_primitives::hex::encode(alloy_primitives::keccak256(label));
+        let uri = v2_names_filter_uri(&format!("&parent=%5B{labelhash}%5D.eth{filters}"));
+        let payload = v2_names_payload(&database, &uri).await?;
+        assert_eq!(v2_names_listed(&payload), expected, "{uri}: {payload:#}");
+    }
     database.cleanup().await
 }
 
