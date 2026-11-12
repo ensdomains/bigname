@@ -427,7 +427,8 @@ async fn read_dropped_while_the_cancel_pool_is_closed_warns_once_and_ends_its_st
 }
 
 /// The cancel waits at most `CANCEL_WAIT` for its connection, then lets the drop end as before.
-/// Nothing was sent, so the connection goes back to the pool.
+/// Nothing was sent, so the connection goes back to the pool, not closed. While one cancel holds
+/// the cancel connection, no other can reach the reply backstop.
 #[tokio::test]
 async fn read_dropped_while_the_cancel_connection_is_busy_gives_up_after_the_wait() -> Result<()> {
     let db = database("read_cancel_busy").await?;

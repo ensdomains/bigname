@@ -32,8 +32,8 @@
 //! connection until the reply. The cancel connection's own `statement_timeout`,
 //! `CANCEL_STATEMENT_TIMEOUT`, bounds that on the server. A cancel still unanswered after
 //! `CANCEL_REPLY_BACKSTOP` closes the read's connection, and the cancel connection, rather than
-//! return them. The read's backend then exits, so the late cancel reaches no later request,
-//! unless the OS has handed that pid to a new backend of the same role meanwhile. PostgreSQL
+//! return them. No request uses the read's session again, so the late cancel reaches no later
+//! request, unless the OS has handed that pid to a new backend of the same role meanwhile. PostgreSQL
 //! ignores a cancel that reaches a backend between statements. The cancel needs no privilege
 //! beyond the role the request pool connects as, and it works on a hot standby. See the
 //! PostgreSQL documentation, "Server Signaling Functions" and "Hot Standby", "Administrator's
@@ -226,6 +226,13 @@ pub(crate) enum CancelOutcome {
 /// the backstop, or on a transport or protocol error after the send, the outcome is
 /// [`CancelOutcome::Unsettled`]. The cancel connection, with its answer still due, is closed then
 /// as well: sqlx's return to the pool would wait for that answer with no limit.
+///
+/// A closed connection's server session lingers until its statement ends or reaches its own
+/// `statement_timeout`. The cancel pool has one connection, so only one cancel waits on its reply
+/// at a time, and every other drop meanwhile times out on the acquire, sends nothing and returns
+/// its connection (the busy-connection test). Outside a server stall that leaves at most one
+/// lingering session at a time. A stall that outlasts the backstop adds one per backstop interval
+/// until the server recovers.
 pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) -> CancelOutcome {
     let mut conn = match tokio::time::timeout(CANCEL_WAIT, cancels.acquire()).await {
         Ok(Ok(conn)) => conn,

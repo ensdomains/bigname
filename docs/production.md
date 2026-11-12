@@ -182,8 +182,10 @@ reachability, while `database.identity` is populated only when both probes
 return the same opaque identity token. The
 phase request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; the readiness
 connection and the connection that cancels a dropped request's statement are
-additional, so the API process can open at most
-`BIGNAME_DATABASE_MAX_CONNECTIONS + 2` PostgreSQL connections.
+additional, so the API process holds at most
+`BIGNAME_DATABASE_MAX_CONNECTIONS + 2` PostgreSQL connections. A connection the
+API closes after an unanswered cancel can leave its server session open
+briefly (`docs/deployment.md`, the cancel on drop).
 HTTP-concurrency saturation and exhaustion of the request pool therefore
 cannot queue the readiness probe past the compose healthcheck's five-second
 window: a healthy but busy process returns `200` with `status="ready"`, though

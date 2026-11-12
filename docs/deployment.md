@@ -1684,9 +1684,10 @@ with it, both report `full`. The Sepolia entrypoint is the checked-in active
 `manifests/sepolia/ethereum/ens/ens_execution/v2.toml`, which the normal
 manifest sync installs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection and the cancel connection described
-below, one API process can open at most `BIGNAME_DATABASE_MAX_CONNECTIONS + 2`
-PostgreSQL connections. A current-state collection request holds one
-request-pool connection while its read snapshot is open.
+below, one API process holds at most `BIGNAME_DATABASE_MAX_CONNECTIONS + 2`
+PostgreSQL connections. The server can briefly hold one more session per
+cancel that went unanswered, as described below. A current-state collection
+request holds one request-pool connection while its read snapshot is open.
 
 Before either pool hands out an idle connection, the API asks the server in one
 statement whether the session is still inside a transaction. That statement
@@ -1730,16 +1731,28 @@ otherwise reach the next request on that connection. The cancel connection's
 own `statement_timeout` of 5 seconds bounds that wait while the server answers.
 A server that never answers, as on a dead socket, holds it for at most 20
 seconds. The API then closes the request's connection and the cancel connection
-rather than reuse them, since the server could still run the cancel later. The
-closed connection's backend exits, so a late cancel reaches no other request,
-unless the OS has given that pid to a new API backend in the meantime. Closing
+rather than reuse them, since the server could still run the cancel later. No
+request uses the closed connection's session again, and the session ends once
+its statement does, so a late cancel reaches no other request, unless the OS has
+given that pid to a new API backend in the meantime. Closing
 the connection needs the pool connection itself, which the database driver's
 transaction type does not expose, so a request's read snapshot runs its
 transaction through the driver's own transaction calls on a connection it holds
 (`crates/storage/src/read_db/owned_transaction.rs`). That copy follows sqlx-core
 0.8.6, and a test fails when the locked sqlx-core version changes, so an upgrade
-re-checks it. The cancel needs no
-privilege beyond the API role's own, and it works on a hot standby.
+re-checks it. The cancel needs no privilege beyond the API role's own, and it
+works on a hot standby.
+
+The server's sessions can therefore briefly exceed the connections the API
+holds. A closed connection's session ends only when its statement ends or
+reaches its own `statement_timeout`, and that statement had already run for the
+20 seconds the cancel waited. The cancel pool has one connection, so only one
+cancel can wait on its reply at a time. Every other read dropped meanwhile
+times out waiting for the cancel connection, sends nothing, and returns its
+connection as usual. Outside a server stall, at most one such lingering session
+exists at a time, and only briefly. During a stall that outlasts the 20
+seconds, they add one per 20 seconds until the server recovers, and by then the
+server is already not answering.
 
 ### Database connection budget
 
@@ -1855,7 +1868,7 @@ than inheriting the PostgreSQL default, and size it as the sum of:
 | Explicit maintenance, one process at a time | `7` (a redo; a rewind needs `6`) — add `7` per additional process you intend to overlap |
 | Superuser reservation | `superuser_reserved_connections`, `3` by default |
 | Administrative headroom | `2` for `psql` and `sqlx migrate` |
-| Each API process | `BIGNAME_DATABASE_MAX_CONNECTIONS + 2` |
+| Each API process | `BIGNAME_DATABASE_MAX_CONNECTIONS + 2`, plus at most one lingering session outside a server stall (see the cancel on drop above) |
 
 One chain with one API process at the default pool of `10` and one explicit
 process at a time: `8 + 7 + 3 + 2 + 12 = 32`. Three chains: `18 + 7 + 3 + 2 +
