@@ -148,6 +148,26 @@ pub async fn load_registry_permission_registration_map(
         return Ok(BTreeMap::new());
     }
     let mut conn = db.into().acquire().await?;
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(&registry_permission_registration_map_sql())
+        .bind(resource_ids)
+        .bind(registration_id)
+        .bind(serde_json::to_value(publication_block_bounds)?)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to resolve published registry permission registrations")?;
+    let mut mapping = BTreeMap::new();
+    for (resource, registration) in rows {
+        if let Some(previous) = mapping.insert(resource, registration) {
+            anyhow::ensure!(
+                previous == registration,
+                "ambiguous registry permission registration"
+            );
+        }
+    }
+    Ok(mapping)
+}
+
+fn registry_permission_registration_map_sql() -> String {
     // Select a batch of page resources, or controls of the explicitly requested lease. The
     // reverse lookup is only a candidate restriction; the latest-grant check below still
     // excludes obsolete leases. Direct nodes take precedence over possibly stale name links.
@@ -156,7 +176,7 @@ pub async fn load_registry_permission_registration_map(
     let node_candidates = registry_permission_node_candidates();
     let anchor_identity = registry_permission_token_identity("anchor");
     let authority_candidates = registry_permission_authority_candidates(node_candidates);
-    let query = format!(
+    format!(
         r#"WITH eligible AS NOT MATERIALIZED (
             SELECT ne.*,
                 lower(COALESCE(ne.after_state ->> 'child_node',
@@ -235,24 +255,7 @@ pub async fn load_registry_permission_registration_map(
                 AND (release.block_number, COALESCE(release.log_index, -1))
                     >= (lease.block_number, COALESCE(lease.log_index, -1))
           )"#
-    );
-    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(&query)
-        .bind(resource_ids)
-        .bind(registration_id)
-        .bind(serde_json::to_value(publication_block_bounds)?)
-        .fetch_all(&mut *conn)
-        .await
-        .context("failed to resolve published registry permission registrations")?;
-    let mut mapping = BTreeMap::new();
-    for (resource, registration) in rows {
-        if let Some(previous) = mapping.insert(resource, registration) {
-            anyhow::ensure!(
-                previous == registration,
-                "ambiguous registry permission registration"
-            );
-        }
-    }
-    Ok(mapping)
+    )
 }
 
 fn registry_permission_same_node(left: &str, right: &str) -> String {
@@ -357,3 +360,7 @@ fn registry_permission_authority_candidates(node_candidates: &str) -> String {
            AND token.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')"
     )
 }
+
+#[cfg(test)]
+#[path = "resource_summary_plan_tests.rs"]
+mod plan_tests;
