@@ -89,16 +89,16 @@ async fn plan(conn: &mut PgConnection, name: &str, execute: &str) -> Result<Valu
     Ok(plan[0]["Plan"].clone())
 }
 
-/// The first node of `node_type` in the plan, depth first.
-fn find<'a>(node: &'a Value, node_type: &str) -> Option<&'a Value> {
-    if node["Node Type"] == node_type {
+/// The first scan of `relation` in the plan, depth first.
+fn find<'a>(node: &'a Value, relation: &str) -> Option<&'a Value> {
+    if node["Relation Name"] == relation {
         return Some(node);
     }
     node["Plans"]
         .as_array()
         .into_iter()
         .flatten()
-        .find_map(|child| find(child, node_type))
+        .find_map(|child| find(child, relation))
 }
 
 fn quoted(text: &str) -> String {
@@ -386,10 +386,11 @@ async fn a_filtered_total_counts_the_name_index_only() -> Result<()> {
                 &format!("('{PARENT}', '{PARENT}', {limit})"),
             )
             .await?;
-            let scan = find(&plan, "Index Only Scan").unwrap_or(&Value::Null);
+            let scan = find(&plan, "project_child_listing").unwrap_or(&Value::Null);
             ensure!(
                 plan["Node Type"] == "Aggregate"
                     && has_node(&plan, "Limit")
+                    && scan["Node Type"] == "Index Only Scan"
                     && scan["Index Name"] == "project_child_listing_name_idx"
                     && scan["Actual Rows"]
                         .as_f64()

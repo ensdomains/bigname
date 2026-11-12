@@ -105,28 +105,28 @@ async fn registry_overview_reads_no_labels_without_counts() -> Result<()> {
 }
 
 /// Row L-edge: a registry holding more registrations than the cap under its name, with at most
-/// the cap in labels, counts its labels exactly. three.alpha.eth is registered by alpha.eth's
-/// subregistry but serves its ENSv1 edge, so it is a subname and not a label: the subregistry
-/// holds three registrations under alpha.eth and two labels. A count that read the
+/// the cap in labels, counts its labels exactly. alpha.eth's subregistry instance also answers at
+/// a second address, which registers three.alpha.eth: the instance holds three registrations
+/// under alpha.eth and the subregistry address two labels. A count that read the instance's
 /// registrations stopped at a cap of two and served `null`.
 #[tokio::test]
 async fn the_label_count_is_exact_above_the_cap_in_registrations() -> Result<()> {
+    const SECOND_ADDRESS: &str = "0x00000000000000000000000000000000000000b2";
     let database = TestDatabase::new_migrated().await?;
     seed_family_children_fixture(&database).await?;
     insert_family_label_preimage(&database.pool, b"three").await?;
-    let (three, _) = seed_family_name(&database, "three.alpha.eth", 0x6d1_0000, "ens_v1").await?;
-    insert_family_registry_child_edge(
-        &database.pool,
-        "ens",
-        FAMILY_CHAIN,
-        "alpha.eth",
-        &child_labelhash("three"),
-        CHILD_OWNER,
-        241,
-        "0xhistory241",
-    )
-    .await?;
+    let (three, _) = seed_family_name(&database, "three.alpha.eth", 0x6d1_0000, "ens_v2").await?;
     let alpha_registry = Uuid::from_u128(0x6b0_0001);
+    sqlx::query(
+        "INSERT INTO bigname_phase.contract_instance_addresses (contract_instance_id, chain_id,
+             address, active_from_block_number)
+         VALUES ($1, $2, $3, 200)",
+    )
+    .bind(alpha_registry)
+    .bind(FAMILY_CHAIN)
+    .bind(SECOND_ADDRESS)
+    .execute(&database.pool)
+    .await?;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[child_registry_event(
@@ -135,7 +135,7 @@ async fn the_label_count_is_exact_above_the_cap_in_registrations() -> Result<()>
             "RegistrationGranted",
             241,
             1,
-            CHILD_ALPHA_REGISTRY,
+            SECOND_ADDRESS,
             json!({"registry_contract_instance_id": alpha_registry.to_string(),
                    "status": "registered", "registrant": CHILD_OWNER,
                    "expiry": 1_900_000_000i64}),
