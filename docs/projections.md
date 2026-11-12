@@ -665,8 +665,9 @@ serves `unregistered` with no registration or control field, no `owner`, `manage
 `authority`, stands on no binding and relates no address as an owner or manager, and
 `provenance.authority_selection.old_record_without_lease` records why. The current registry
 reads the 2017 record's resolver while it has no record for the node, so the row keeps the
-node's retained registry resolver pointer as its serving pointer: it serves records through it,
-under `resolves_to` and in the resolver's bound names, and a child list serves it no owner. The
+node's retained registry resolver pointer as its serving pointer: it serves records through it
+and under `resolves_to`, and a child list serves it no owner. As for an ownerless name, the
+resolver's `bound_names` list it only when the resolver's family enumerates bindings. The
 name's subnames keep their own registry records.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f)
