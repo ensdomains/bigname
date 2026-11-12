@@ -147,7 +147,7 @@ async fn one_chain_lists_only_its_own_resolvers() -> Result<()> {
                     51,
                 )
                 .await?;
-                let expected = if after.0 == chain || after.0 > chain {
+                let expected = if after.0 >= chain {
                     Vec::new()
                 } else {
                     vec![expect(chain, n, 1, &[power])]
@@ -309,7 +309,8 @@ fn rows_read(plan: &[String]) -> f64 {
         read += actual_rows(line);
         read += plan[index + 1..]
             .iter()
-            .take_while(|line| !line.contains("->"))
+            // A node's own properties, up to its first child. A filter can hold `->>`.
+            .take_while(|line| !line.trim_start().starts_with("->"))
             .filter_map(|line| line.trim().strip_prefix("Rows Removed by Filter: "))
             .filter_map(|rows| rows.trim().parse::<f64>().ok())
             .sum::<f64>();
