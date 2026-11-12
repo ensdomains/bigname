@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::{
     FamilyPosition,
+    address_listing::AddressListingRows,
     address_relation_inputs::ChainInputs,
     address_relations::{relation_position, relations},
     address_roles::RoleHolderLoad,
@@ -28,11 +29,14 @@ pub struct CurrentHistoryRelation {
     pub position: FamilyPosition,
 }
 
+/// The current relations of `composed` at `publication` with their cited events, for the
+/// history catalogue, and the address listing rows of the same names (`address_listing.rs`),
+/// from one load of the relation inputs.
 pub(crate) async fn publication_relations(
     conn: &mut PgConnection,
     publication: &FamilyPublication,
     composed: &[&NameCurrentRow],
-) -> Result<Vec<CurrentHistoryRelation>> {
+) -> Result<(Vec<CurrentHistoryRelation>, AddressListingRows)> {
     let clock = publication.timestamp_seconds();
     let inputs = ChainInputs::load(
         conn,
@@ -43,13 +47,15 @@ pub(crate) async fn publication_relations(
     )
     .await?;
     let mut out = Vec::new();
+    let mut listing = AddressListingRows::default();
     for row in composed {
+        let input = inputs.input(row, clock);
+        listing.push(&input, publication);
         let (Some(resource_id), Some(surface_binding_id)) =
             (row.resource_id, row.surface_binding_id)
         else {
             continue;
         };
-        let input = inputs.input(row, clock);
         for (address, relation) in relations(&input) {
             // A normal bounded history read requires a cited acquisition event at or below
             // the publication. Missing evidence does not gain membership through the index.
@@ -70,5 +76,5 @@ pub(crate) async fn publication_relations(
             });
         }
     }
-    Ok(out)
+    Ok((out, listing))
 }

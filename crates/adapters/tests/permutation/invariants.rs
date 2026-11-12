@@ -574,7 +574,10 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         input.blocks.last().map(|block| block.block_timestamp),
     )?;
     if live != restored {
-        bail!("{context}: live adapter state differs from a compacted restore");
+        bail!(
+            "{context}: live adapter state differs from a compacted restore:{}",
+            session_difference(&live, &restored)
+        );
     }
 
     let mut session = None;
@@ -655,7 +658,10 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
             blocks.last().map(|block| block.block_timestamp),
         )?;
         if next != restored_session {
-            bail!("{context}: split batch {index} live state differs from a compacted restore");
+            bail!(
+                "{context}: split batch {index} live state differs from a compacted restore:{}",
+                session_difference(&next, &restored_session)
+            );
         }
         session = Some(next);
         absorb_rows(&mut replayed, resumed_output.clone());
@@ -687,6 +693,73 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         artifacts,
         tiny_cache_misses,
     })
+}
+
+/// The lines where two sessions' debug renderings differ, with a little context on each side.
+fn session_difference(live: &AdapterSession, restored: &AdapterSession) -> String {
+    let live = format!("{live:#?}");
+    let restored = format!("{restored:#?}");
+    let live = without_cache_bookkeeping(&live);
+    let restored = without_cache_bookkeeping(&restored);
+    let prefix = live
+        .iter()
+        .zip(&restored)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = live[prefix..]
+        .iter()
+        .rev()
+        .zip(restored[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let window = |lines: &[&str]| {
+        lines[prefix.saturating_sub(4)..(lines.len() - suffix + 4).min(lines.len())]
+            .iter()
+            .take(120)
+            .map(|line| format!("      {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let at = |lines: &[&str]| {
+        lines
+            .get(prefix)
+            .map_or_else(|| "<end>".to_owned(), |line| line.trim().to_owned())
+    };
+    format!(
+        "\n    first difference:\n      live     {}\n      restored {}\n    live:\n{}\n    restored:\n{}",
+        at(&live),
+        at(&restored),
+        window(&live),
+        window(&restored)
+    )
+}
+
+/// The debug rendering's lines without the state cache's access order, which session equality
+/// ignores (`StateResidency`'s `PartialEq`), so the first difference shown is one that counts.
+fn without_cache_bookkeeping(rendered: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut skipping: Option<usize> = None;
+    for line in rendered.lines() {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if let Some(depth) = skipping {
+            if indent == depth && trimmed.starts_with('}') {
+                skipping = None;
+            }
+            continue;
+        }
+        if trimmed.starts_with("accessed_at: {") || trimmed.starts_with("least_recent: {") {
+            if !trimmed.ends_with("},") {
+                skipping = Some(indent);
+            }
+            continue;
+        }
+        if trimmed.starts_with("clock: ") {
+            continue;
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 fn restore_adapter_session(

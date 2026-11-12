@@ -44,6 +44,8 @@ pub(super) struct ParsedAddressLookup {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct IdentityNameLookup {
     pub(super) logical_name_id: String,
+    /// The normalized input, whose plain labels the batch proves (`super::heal`).
+    pub(super) normalized_name: String,
     corrected_input_normalization: bool,
 }
 
@@ -329,6 +331,7 @@ fn parse_identity_name_lookup_with_namespace(
     Ok(IdentityNameLookup {
         logical_name_id: parsed.logical_name_id(namespace.unwrap_or(parsed.namespace)),
         corrected_input_normalization: parsed.corrected_input_normalization,
+        normalized_name: parsed.normalized_name,
     })
 }
 

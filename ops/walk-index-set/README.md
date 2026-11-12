@@ -15,8 +15,12 @@ exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until
 are rebuilt. The operator's `phase-runner inspect` block and raw-event windows count
 and list normalized events by block hash, which `normalized_events_block_idx` serves.
 
+An API that is already serving keeps serving while they are dropped. An API that starts while
+they are dropped refuses to start, unless `BIGNAME_API_WALK_INDEX_SET_CHECK=warn` (see
+[The API's startup check](#the-apis-startup-check)).
+
 The [walk index set](../../docs/glossary.md#walk-index-set) is the 17 indexes Interpret keeps.
-`drop.sql` drops the other 35 before a from-zero walk or a full-history Interpret redo. Before
+`drop.sql` drops the other 38 before a from-zero walk or a full-history Interpret redo. Before
 Project runs, the phase runner rebuilds any of them that is missing, with the statements
 `install.sql` uses (see [The phase runner's rebuild](#the-phase-runners-rebuild)), and
 `install.sql` remains the way to rebuild them by hand.
@@ -45,7 +49,7 @@ the other's.
 The script checks this before the drops and again after them, and takes no phase lock, so
 nothing stops an Interpret redo completing while the drops run. Run it as the walk or redo
 starts, with Interpret's whole range still ahead. The one-hour timeout bounds each drop, not
-the script, so there is no fixed limit on the whole sequence. Allow for all 35 drops before
+the script, so there is no fixed limit on the whole sequence. Allow for all 38 drops before
 Interpret can complete. The second check sees only the state when it runs: if a chain meets
 the condition then, for example because its Project started during the drops and is still
 running, it fails after the receipt, naming the chains, and `psql` exits non-zero; run
@@ -171,10 +175,10 @@ build or wait can also raise the heartbeat-stale alert.
   the runner.
 - A build or drop that fails stops the chain with an error naming the index and the cause. It is
   not retried in the process: another chain's Project entry stops with the same error instead of
-  building again. Once every chain has stopped the process exits non-zero. Under a restart
-  policy each start drops the invalid leftover and builds it again, so a cause that persists,
-  such as a login that does not own the table, shows as a restart loop with the same error each
-  time.
+  building again. The runner stays up until it is stopped. Each start drops the invalid
+  leftover and builds it again, so fix the cause and then restart the runner. A cause that
+  persists, such as a login that does not own the table, stops the chain again with the same
+  error.
 - A stop during any of the rebuild's statements, a read held behind a lock included, cancels
   it on the server and releases the rebuild's lock. A stop while it waits for capacity issues
   no build.
@@ -190,6 +194,33 @@ build or wait can also raise the heartbeat-stale alert.
 `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS` set `maintenance_work_mem` and
 `max_parallel_maintenance_workers` on the rebuild's connection only. Unset, the server's values
 apply. The build line logs the values in force.
+
+## The API's startup check
+
+At startup, after its schema check, the API reads the state of every name `drop.sql` drops in
+the catalog of the database it connects to, with the same read as the phase runner. It reads
+`pg_class` and `pg_index` only, so its login needs no grant beyond its `USAGE` on the schema,
+and on a physical standby it sees the primary's catalog as replayed there.
+
+- With every name a valid, ready index on `normalized_events` it logs
+  `every normalized_events index the walk index set scripts drop is in place` and starts.
+- Otherwise it logs `API walk index set check refused to start` at ERROR and exits non-zero.
+  The error names each index as `missing`, `not valid and ready`, or held by the relation that
+  holds its name, and says how to rebuild them.
+- A valid index with another definition counts as in place, with a warning naming both
+  definitions, as the runner logs.
+- `BIGNAME_API_WALK_INDEX_SET_CHECK=warn` starts it anyway, with a warning that lists the
+  indexes in `unusable`. Set it only for a start that must serve while the indexes are dropped
+  or being rebuilt, such as the event audit during a redo, and unset it once the runner logs
+  that every index is in place. With every index in place, `warn` still logs a warning that it
+  is set.
+- The gauge `walk_index_set_unusable` on the API's metrics listener counts the indexes the
+  check found not in place, and the `API booted` line carries `walk_index_set_check` and
+  `walk_index_set_unusable`.
+
+The check runs only at startup. Under a restart policy, an API that restarts while the indexes
+are dropped shows as a restart loop with the same error until they are rebuilt.
+`apps/api/src/tests/walk_index_set_check.rs` proves the check's outcomes.
 
 ## Checks and recovery
 

@@ -14,7 +14,7 @@ SET statement_timeout = '1h';
 -- progress or holds a live publication, which it commits before it records progress, and
 -- its Interpret is not redoing. The check runs before and after the drops and takes no phase
 -- lock, so run the script as the walk or redo starts. The one-hour timeout bounds each drop,
--- not the script, so allow for all 35 before Interpret can complete.
+-- not the script, so allow for all 38 before Interpret can complete.
 CREATE OR REPLACE FUNCTION pg_temp.walk_index_served_chains() RETURNS text
 LANGUAGE sql STABLE AS $$
     SELECT string_agg(projected.chain_id, ', ' ORDER BY projected.chain_id)
@@ -72,6 +72,9 @@ LANGUAGE sql IMMUTABLE AS $$
         'normalized_events_address_registrant_match_idx',
         'normalized_events_address_token_holder_match_idx',
         'normalized_events_address_registry_owner_match_idx',
+        'normalized_events_address_to_idx',
+        'normalized_events_address_registrant_idx',
+        'normalized_events_address_owner_idx',
         'normalized_events_address_root_permission_idx',
         'normalized_events_registry_roles_idx',
         'normalized_events_project_node_history_idx',
@@ -146,6 +149,9 @@ DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_v1_transfer_no
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_registrant_match_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_token_holder_match_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_registry_owner_match_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_to_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_registrant_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_owner_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_root_permission_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_registry_roles_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_node_history_idx;

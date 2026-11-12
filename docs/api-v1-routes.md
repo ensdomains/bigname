@@ -368,7 +368,10 @@ collection route carry neither header.
   failure_reason?, normalization?, record?, records?, page?}`. `input` echoes
   the caller-supplied input, including `id` when supplied; omitted `id` is not
   synthesized. `kind` is `name` or `address`. Name results use `record` for the
-  single record object. Reverse results use `records` for zero or more record
+  single record object. Every name input proves the labels it spells as text,
+  for every record of the batch: a record's `name` and `display_name` show that
+  text in place of the label's placeholder, an address input's records included
+  ([name inputs](api-v1.md#name-inputs)). Reverse results use `records` for zero or more record
   rows with `is_primary` and `relations` in addition to the shared record
   fields; a `resolves_to` row carries `relations: ["resolves_to"]` and
   `resolution: {coin_type, record_key}`, and its `is_primary` and
@@ -677,7 +680,7 @@ collection route carry neither header.
 | `grace_ends_before` | query | string | no | none | Exclusive finite grace-deadline upper bound, as decimal Unix seconds or RFC 3339; later than grace_ends_after when both are supplied. Cannot combine with expiry parameters. |
 | `grace_ends_window` | query | repeated array [1, 32] of string | no | none | Repeat for disjoint half-open grace-deadline windows with the same rules as expires_window. Input order defines grace_ends_window_index. Cannot combine with scalar grace or any expiry parameter. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
-| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by labelhash path, are listed. A bracketed labelhash label names the node it hashes. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `sort` | query | enum `expires_at`, `grace_ends_at` | no | none | Defaults to the supplied date family; explicit sort must match it. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -726,9 +729,12 @@ collection route carry neither header.
   unordered comma-separated set of served authority values using the grammar
   of [address names](#get-v1addressesaddressnames); rows that serve no authority
   match no set. `parent` selects names exactly one label below the supplied
-  ENSIP-15-normalized name by served spelling, including its
-  [rendered-name](glossary.md#rendered-name) rules, not registry topology.
-  `parent=eth` selects second-level `.eth` names and excludes deeper subnames.
+  ENSIP-15-normalized name by labelhash path, not by served spelling. A
+  bracketed labelhash label in `parent` names the node it hashes, and a name is
+  listed whatever text its labels are served under, a
+  [rendered-name](glossary.md#rendered-name) label with no verified text
+  included. `parent=eth` selects second-level `.eth` names and excludes deeper
+  subnames.
   Both filters apply before paging. Empty or invalid parents and invalid
   authority sets return `400 invalid_input`.
 - A proved canonical allocation remains discoverable when current authority is
@@ -755,9 +761,10 @@ collection route carry neither header.
   before selecting at most `page_size + 1` names for composition. A repeated
   request selects at most that many narrow keys per window, then composes only
   the global first `page_size + 1` once. Namespace/deadline and
-  namespace/authority/deadline indexes support both families. Composition is
-  bounded even when a sparse parent filter or many names sharing a deadline
-  require inspecting more narrow keys; the database chooses the query plan.
+  namespace/authority/deadline indexes support both families, and a parent key
+  index reads the names below a parent with few names below it. Composition is
+  bounded even when many names sharing a deadline require inspecting more
+  narrow keys. With `parent`, the database chooses the query plan for each request's values.
   A mismatch between a selected stored deadline and its composed row fails
   with `500 internal_error` rather than returning a shortened page.
 - Each page reads one publication snapshot. Its cursor binds the date family,
@@ -818,6 +825,10 @@ collection route carry neither header.
   served path's record under the requested `name`, `display_name` and `namehash`, with
   `canonical_name` naming the served path. A path that resolves to no token answers as
   before, with the name's own row or `404 not_found`.
+- Proven labels: a label the request spells as text shows as that text in `name`,
+  `display_name` and `canonical_name` wherever the row would serve its labelhash
+  placeholder, and is staged for the preimage import
+  ([name inputs](api-v1.md#name-inputs)).
 - ENSv1 registry resolver: ENSv1 clients read a name's resolver from the ENSv1
   registry (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f).
   A name whose `authority` is `ens_v1` or `ens_v0`, that serves a resolver and
@@ -1250,6 +1261,10 @@ its value map:
   resolver, indexed records and inventory, and `canonical_name` names the served path.
   `source=verified` and the verified keys of `source=auto` read the chain for the
   requested path. A path that resolves to no token answers as before.
+- Proven labels: the response carries no name of the row except `canonical_name`,
+  which shows a label the request spells as text, as on name detail. The labels
+  the row serves as placeholders and the request proves are staged for the
+  preimage import ([name inputs](api-v1.md#name-inputs)).
 - ENSv1 registry resolver: as on [name detail](#get-v1namesname), a name whose
   `authority` is `ens_v1` or `ens_v0` serves the resolver its ENSv1 registry
   pointer names, `ens_v1.resolver`, and that resolver's records for the node,
@@ -1763,6 +1778,31 @@ its value map:
   ABI records stay outside the record-key grammar: `known_keys` never lists
   them, `keys=abi:<content_type>` is still rejected, and record counts do not
   include them.
+- `meta.completeness`: on an indexed answer (`meta.source=indexed`), this field
+  says whether a record inventory that an
+  [admitted resolver](consumer-capabilities.md#admitted-resolvers) backs stands
+  behind the response. It summarises the read and changes no per-key answer.
+
+  | Inventory behind the answer | `meta.completeness` | `meta.unsupported_fields` | `meta.unsupported_reason` |
+  | --- | --- | --- | --- |
+  | Authoritative: coverage `status` is `full` or `projected` and it names no `unsupported_reason` | `full` | absent | absent |
+  | A row that is not authoritative: a resolver whose implementation is not admitted, an address no resolver manifest declares, which includes an offchain resolver, or a mirror whose registry walk finds no projected ENSv1 resolver | `unsupported` | `["records"]` | `inventory_not_authoritative` |
+  | No inventory the name may serve: no resolver of its own, a released or unbound name, a reservation, or a name whose resolution is withheld | `unsupported` | `["records"]` | `inventory_not_available` |
+  | None read, because the name is unsupported or its resolution cannot be attributed | `unsupported` | `["records"]` | the name-level reason each key carries |
+
+  `full` speaks for the inventory, not for each key. Under it, a key can still
+  answer `not_found`, or `unsupported` with `value_not_retained` or a family
+  reason. Under `inventory_not_authoritative`, each key keeps the row's own
+  reason, such as `resolver_not_declared`. Under `inventory_not_available`, a
+  name that serves no records, such as a released ENSv2 registration, keeps
+  answering its keys `not_found`. So does a keyed `source=auto` read of a name
+  with no resolver to read, such as a registry clear.
+
+  The three fields are absent when `meta.source=verified`, including a default
+  or `source=auto` read once any key came from the verified read. `values=false`
+  reports the same fields as the indexed value read of the same name.
+  `POST /v1/lookup` and `GET /v1/diagnostics/names/{name}/records` do not set
+  them.
 - Pagination behavior: none.
 - Status semantics: a missing name returns `404 not_found`. Missing, unset, or
   unsupported requested or default record values are reported with the common result
@@ -2028,8 +2068,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   spelling with the row. Its row never takes the escape form: a label whose
   preimage is not valid text reads as the placeholder. A parent whose surface
   stores no raw label bytes lists and counts its children under its own
-  rendered name, at any depth. Admitted ENSv1 `NewOwner` events create these
-  surfaces when the complete labelhash path is proven back to the root.
+  rendered name, at any depth. A parent label the request spells as text shows
+  as that text in every row's `name` and `display_name`, while a child's own
+  label keeps its placeholder unless the request spells that same label
+  ([name inputs](api-v1.md#name-inputs)). Cursors,
+  order and counts do not change with the spelling. Admitted ENSv1 `NewOwner`
+  events create these surfaces when the complete labelhash path is proven back
+  to the root.
   The escape form is never a name input. Resolver records are not included here;
   use `GET /v1/names/{name}` for `resolver` and grouped `records`, or `GET /v1/names/{name}/records` for per-key record
   answers.
@@ -2122,20 +2167,29 @@ A recognized namespace with no available publication returns retryable `409 stal
   treated as omitted; a nonblank value containing only commas is invalid.
   This blank-parameter rule also applies to `type`. Repeated parameter names
   are invalid; send multiple values in one comma-separated value.
-- `record_key` selects one exact, nonempty, case-sensitive stored history key,
-  for example `addr:60`, `text:avatar`, `name`, or `abi:16`. Its URL-decoded
-  value is not trimmed, normalized, or split on commas. Empty values and keys
-  containing a NUL character return `400 invalid_input`. It is independent of
-  the narrower record-lookup key grammar. Matching rows are writes or clears
-  of that key plus record-version resets already within the route's history
-  scope, even when no earlier write of that key was retained. Other keys and
+- `record_key` selects one nonempty, case-sensitive stored history key.
+  Text records are stored as `text:<key>`, for example `text:avatar`,
+  `text:url`, `text:description`, `text:header`, or `text:com.twitter`. Other
+  records carry their own prefix, for example `addr:60`, `abi:16`,
+  `interface:<id>`, or `dns:zonehash`. A key with no colon is read as the text
+  record `text:<key>`, so `avatar` matches `text:avatar` and `Avatar` matches
+  `text:Avatar`. The three keys stored without a prefix are not rewritten:
+  `content` (the legacy `ContentChanged` record), `contenthash`, and `name`.
+  Apart from that one rule the URL-decoded value is not trimmed, normalized, or
+  split on commas, and a key that contains a colon is never rewritten. Empty
+  values and keys containing a NUL character return `400 invalid_input`. It is
+  independent of the narrower record-lookup key grammar. Matching rows are
+  writes or clears of that key plus record-version resets already within the
+  route's history scope, even when no earlier write of that key was retained. Other keys and
   resets outside that collection are excluded. A reset remains one reset row
   with no fabricated key/value; use `include=raw` to identify its
   `RecordVersionChanged` kind. Other explicit type/kind filters still apply,
   so `kind=RecordChanged` omits resets and incompatible filters match nothing.
   This filter adds no child-registration rows, reconstructs no effective
   resolution, and changes no resolver attribution. All these filters apply
-  before pagination and existing counts, and all bind the cursor.
+  before pagination and existing counts, and all bind the cursor. A cursor
+  binds the key as stored, so a cursor issued for `avatar` continues for
+  `text:avatar`.
 - `from_timestamp` and `to_timestamp` are inclusive bounds accepting decimal
   Unix seconds or RFC 3339 (`Z` or a numeric offset; fractional seconds
   allowed and retained for filtering). They are resolved to block
@@ -2276,21 +2330,25 @@ A recognized namespace with no available publication returns retryable `409 stal
   next; each opt-in request counts again at its current published position. An
   exact empty result is zero. Exact counting may scan the entire matching
   history and cost substantially more than a page.
-- `page.total_count` is populated by default for other anchored history reads:
-  name history, and `/v1/events` when `name`, `registration_id`,
-  `address`, or `resolver` bounds the read. The count runs inside the same repeatable-read
+- Name history populates `page.total_count` by default. The count runs inside the same repeatable-read
   transaction as the page over exactly the page's filters (scope, type set,
   block and timestamp windows, product visibility, and duplicate suppression),
   so it agrees with what paging would enumerate. With
   `include=child_registrations`, the count covers the combined collection of
   name rows and direct child registration rows, each event counted once. It is capped: counting stops
   after 10,000 product-visible rows and a larger result reports
-  `total_count=null`. With `include=total_count`, anchored history reads instead
-  run an exact, uncapped count in the same read transaction and return that total.
+  `total_count=null`. With `include=total_count`, name history instead
+  runs an exact, uncapped count in the same read transaction and returns that total.
   Clients needing a name event counter can request its history with
   `page_size=1&include=total_count`; no event rows need to be enumerated. This
-  option may cost more on names with a long history. Unanchored `/v1/events` reads (namespace, type, and block
-  or timestamp windows only) never count and always report `total_count=null`.
+  option may cost more on names with a long history.
+- `/v1/events` returns `page.total_count=null` unless the request sends
+  `include=total_count`, whatever anchors the read. With the flag, a read that
+  `name`, `registration_id`, `address`, or `resolver` bounds runs the exact,
+  uncapped count described above, over the page's filters and in its read
+  transaction, except for the emitter-only reads in the next item. Unanchored
+  `/v1/events` reads (namespace, type, and block or timestamp windows only)
+  never count and always report `total_count=null`.
   A `/v1/events` read bounded only by `contract_address` also defaults to
   `total_count=null`, but `include=total_count` requests the exact filtered
   total in the same page transaction and published snapshot. This is a row
@@ -2301,10 +2359,10 @@ A recognized namespace with no available publication returns retryable `409 stal
   total is returned, and an exact empty result is zero.
 - A `/v1/events` read that only an emitting contract anchors (`resolver`,
   `contract_address`, or both, with no `name`, `registration_id`, or
-  `address`) caps the opt-in count at 100,000 rows. One contract can emit more
+  `address`) caps the opt-in count at 10,000 rows. One contract can emit more
   rows than an exact count reads within the request deadline. Up to the cap
   `include=total_count` returns the exact total as above. Above it the count
-  stops after 100,001 rows and the page reports `total_count=null`. The rows,
+  stops after 10,001 rows and the page reports `total_count=null`. The rows,
   `next_cursor`, and `has_more` are the same as without the flag.
 
 ### History event payloads (`include=data`, `include=raw`)
@@ -2699,7 +2757,7 @@ the controller a name's `manager` or `role_holder`.
 | `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
 | `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
 | `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
-| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `record_key` | query | string | no | none | Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets. |
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
@@ -3540,7 +3598,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_owner. Former owners accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. relation=former_owner accepts only omitted dedupe or dedupe=name; dedupe=registration returns 400 invalid_input. |
-| `include` | query | array of enum `counts`, `role_summary`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the candidate cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner. |
+| `include` | query | array of enum `counts`, `role_summary`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -3585,10 +3643,10 @@ introduces it rebuilds Project from full history before serving the option; see
   `authority` (Basenames rows and ownerless registry rows without an implied lease) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
-  `parent` keeps only names exactly one label below the given name, by the
-  rule it has on [`GET /v1/names`](#get-v1names): the value is normalized as a
-  path name, and a row matches by its normalized name spelling, not by node or
-  registry topology, so `parent=eth` keeps the `.eth` second-level names and
+  `parent` keeps only names exactly one label below the given name. The value
+  is normalized as a path name, and a row matches by its normalized name
+  spelling, not by node or registry topology. [`GET /v1/names`](#get-v1names)
+  matches by labelhash path instead. Here `parent=eth` keeps the `.eth` second-level names and
   no deeper subname, wrapped or not (see the
   [naming dictionary](api-v1.md#naming-dictionary)). An ENSv1 registry child
   with no name row matches by the name it serves, which spells an unknown
@@ -3606,28 +3664,24 @@ introduces it rebuilds Project from full history before serving the option; see
   On the ownership relations `page.total_count` counts the collection before
   its cursor, with the same relations, `q` and `match` predicate, `authority`
   set, `parent`, migration predicate and deduplication as the rows. It is exact
-  when the address has at most 1,000 candidate names, and `null` above that
-  unless `include=total_count` asks for the exact total. The candidate names are
-  counted before the `q`, `match`, `authority`, `parent` and migration filters:
-  the names on which some admission could make the address the `owner` or
-  `manager` (the address index of
-  [address collections](projections.md#address-and-child-collections)), its ENSv1
-  registry children with no name row, and, when the relation set includes
-  `role_holder` (as it does by default), the names of registrations on which it
-  holds an ENSv2 registry role, all in the requested namespace. An address with
-  more than 1,000 candidates therefore reports `null` even when its filtered
-  collection is small. Above the cap a page composes candidates in sort order,
-  in growing batches, and stops once later candidates can no longer change it,
-  so an ordinary page composes about as many names as it returns. A filter that
-  matches few names can still compose every candidate. `sort=created_at`
-  always composes every candidate first, a batch at a time, because a name's
-  first observation can be dated by a registrar event bound to it only later.
-  `include=total_count` does the same to count every group. The page itself
-  is then composed in sort order as above. On an address with tens of
-  thousands of names these reads can reach the request deadline
-  (`408 request_timeout`).
+  when the filtered collection has at most 1,000 entries, and `null` above that
+  unless `include=total_count` asks for the exact total. The rows and the total
+  are read from the address listing Project stores at each publication, one row
+  per name and address the relations hold, so a page reads about as many names as
+  it returns whatever the address holds, and the total counts the stored rows
+  without composing any name. A name whose surface or registration a reorg has
+  since taken off readable lineage, or whose surface Interpret has since
+  shadowed, leaves the page at once but stays in the total until the next
+  publication. Names with equal sort values list in name id order, and
+  `order=desc` lists exactly the reverse of `order=asc`. A descending cursor
+  issued before this ordering is refused with `400 invalid_input`.
   The flag changes no row, order or cursor and does not bind cursors, so a
   client can request it on the first page only.
+  The `q`, `match` and `parent` filters and `sort=name` use the spelling bigname
+  had from chain data at the latest publication. A label or name the chain
+  reveals later is shown at once, and is matched and ordered from the next
+  publication. A label known only from an imported preimage is shown, and is not
+  matched or ordered by.
   `owner` also lists names with no token for their registry owner, such as
   unwrapped subnames and registry children with no lease, so `relation=owner&dedupe=registration`
   counts those as well. For the registrations an address holds, add
@@ -3820,10 +3874,9 @@ introduces it rebuilds Project from full history before serving the option; see
   and `include=role_summary` apply as for the authority relations;
   `include=total_count` returns `400 invalid_input`.
   An address with more than 1,000 candidate names, the names that may serve
-  records through a resolver record holding the address, is paged as the
-  ownership relations page one above their cap: candidates are composed in
-  sort order, in growing batches, until later candidates can no longer change
-  the page. `sort=created_at` first composes every candidate a batch at a
+  records through a resolver record holding the address, is paged by composing
+  its candidates in sort order, in growing batches, until later candidates can
+  no longer change the page. `sort=created_at` first composes every candidate a batch at a
   time, so on an address with tens of thousands of such names it can reach the
   request deadline (`408 request_timeout`).
 - Response shape: `data` is an array of record-shaped rows with `name`,
@@ -4404,7 +4457,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
 | `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
 | `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
-| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `record_key` | query | string | no | none | Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets. |
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
@@ -4662,11 +4715,11 @@ introduces it rebuilds Project from full history before serving the option; see
 | `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
 | `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
 | `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
-| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `record_key` | query | string | no | none | Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets. |
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total. When only resolver or contract_address anchors the read, it is exact up to 100,000 rows and null above. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total, and page.total_count is null without it. When only resolver or contract_address anchors the read, it is exact up to 10,000 rows and null above. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4792,13 +4845,11 @@ For a registrar lease first identified by a later readable observation, registra
   and block filter (including `resolver`), the direction, the `type` set, and
   the timestamp window. A nonterminal page contains `page_size` rows; only the
   terminal page may be shorter. `page.total_count` follows the shared history
-  rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
-  `registration_id`, `address`, or `resolver` anchors the read; opting into
-  `include=total_count` removes that cap and also enables exact filtered totals
-  for contract-address reads, whose default remains null. When only
-  `resolver` or `contract_address` anchors the read, the opt-in count is
-  exact up to 100,000 rows and `null` beyond. Other unanchored
-  reads always return null.
+  rule: `null` unless the request sends `include=total_count`. With the flag
+  the count is exact when `name`, `registration_id`, or `address` anchors the
+  read. When only `resolver` or `contract_address` anchors the read, the count
+  is exact up to 10,000 rows and `null` beyond. Other unanchored reads always
+  return null.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can
@@ -4833,7 +4884,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
-| `include` | query | array of enum `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests the exact number of bound names. Without it bound_names.page.total_count is null. |
+| `include` | query | array of enum `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests the number of bound names, exact up to 100,000 and null above. Without it bound_names.page.total_count is null. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address} -->
@@ -4929,10 +4980,13 @@ For a registrar lease first identified by a later readable observation, registra
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
   `bound_names.page.total_count` is `null` unless the request has
-  `include=total_count`. Then it is the exact number of names in the whole
+  `include=total_count`. Then it is the number of names in the whole
   listing, counted from the same filtered names as the page on the same
   database snapshot, so it is the same on every page of an unchanged
-  publication, whatever the cursor.
+  publication, whatever the cursor. It is exact up to 100,000 names and
+  `null` above that, on every page. The count reads the listing in page order
+  and stops after 100,001 names. The rows, cursor and `has_more` do not depend
+  on it.
 - Snapshot behavior: the resolver overview and bound names read
   `bigname_phase` projections from one completed projection-phase generation. A row
   target may precede the selected position when the row was unchanged by later
@@ -5208,6 +5262,14 @@ For a registrar lease first identified by a later readable observation, registra
   `records` is `{}` and `inventory` is always present, without requested-key
   augmentation; known, unset, unsupported and ABI availability retain their
   existing meanings.
+- `meta.completeness` reports the inventory read at this resolver, with the
+  [name records route's meanings](#get-v1namesnamerecords). It is `full` for an
+  [admitted resolver](consumer-capabilities.md#admitted-resolvers), including a
+  node with no inventory there. It is `unsupported` for any other resolver, and
+  for a mirror whose registry walk finds no projected ENSv1 resolver, with
+  `meta.unsupported_fields=["records"]` and
+  `meta.unsupported_reason=inventory_not_authoritative`. This route always
+  reads an inventory row, so it never reports `inventory_not_available`.
 - Which records are read: the writes the resolver emitted for the name's node,
   under the record-version and link rules of the name records route. For a
   declared [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
@@ -5243,7 +5305,7 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- | --- |
 | `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 100,000 events and null above. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 10,000 events and null above. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -5311,11 +5373,11 @@ For a registrar lease first identified by a later readable observation, registra
   `GET /v1/events?contract_address=` at the same chain and block: that feed
   defaults to the `ens` namespace, which is served on one chain. The
   overview's count and the feed's `include=total_count` count are both exact
-  up to 100,000 events and `null` above that, so they also agree above the
+  up to 10,000 events and `null` above that, so they also agree above the
   cap. For an address
   an operator also admits into another namespace on this chain, the overview
   counts those events too and the default feed does not. The count reads the
-  contract's events rather than a projected total, and stops after 100,001. It includes the
+  contract's events rather than a projected total, and stops after 10,001. It includes the
   registry's root role changes (`RootPermissionChanged` `permission` rows),
   which the feed has listed since they became product history.
   `counts.roles`, also present with `include=counts`, is the exact number of

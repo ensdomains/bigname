@@ -281,7 +281,7 @@ async fn v2_textless_name_detail_is_served_by_its_bracketed_route() -> Result<()
 }
 
 #[tokio::test]
-async fn v2_textless_name_with_no_known_label_is_all_placeholders() -> Result<()> {
+async fn v2_textless_name_with_no_known_label_shows_only_the_labels_its_request_spells() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     // No preimage for `alpha` or `eth`: the surface names nothing but its own label hashes.
     let fixture = seed_textless_fixture(&database, false).await?;
@@ -292,20 +292,23 @@ async fn v2_textless_name_with_no_known_label_is_all_placeholders() -> Result<()
     );
     let first = format!("{}.{ancestors}", tl_bracket(&fixture.first));
 
-    // The route still reads `alpha.eth` as the labels it hashes to.
-    for route in [&fixture.first_name, &first] {
+    // The route reads `alpha.eth` as the labels it hashes to. Spelled as text, they are also
+    // their own preimages, so that response shows them, and a bracketed `eth` is read as `eth`
+    // (docs/api-v1.md, "Name inputs").
+    let first_eth = format!(
+        "{}.{}.eth",
+        tl_bracket(&fixture.first),
+        tl_bracket(&child_labelhash("alpha"))
+    );
+    for (route, served) in [(&fixture.first_name, &fixture.first_name), (&first, &first_eth)] {
         let detail = tl_get(&database, &format!("/v1/names/{}", tl_path(route))).await?;
-        assert_eq!(detail["data"]["name"], json!(first), "{route}: {detail:#}");
-        assert_eq!(detail["data"]["display_name"], json!(first), "{route}: {detail:#}");
+        assert_eq!(detail["data"]["name"], json!(served), "{route}: {detail:#}");
+        assert_eq!(detail["data"]["display_name"], json!(served), "{route}: {detail:#}");
     }
     let nested = tl_get(&database, &format!("/v1/names/{}", tl_path(&fixture.nested_name))).await?;
-    assert_eq!(
-        nested["data"]["name"],
-        json!(format!("{}.{first}", tl_bracket(&fixture.nested))),
-        "{nested:#}"
-    );
+    assert_eq!(nested["data"]["name"], json!(fixture.nested_name), "{nested:#}");
     let known = tl_get(&database, &format!("/v1/names/{}", tl_path(&fixture.known_name))).await?;
-    assert_eq!(known["data"]["name"], json!(format!("known.{first}")), "{known:#}");
+    assert_eq!(known["data"]["name"], json!(fixture.known_name), "{known:#}");
     // alpha.eth stores its bytes and is served under them.
     let alpha = tl_get(&database, "/v1/names/alpha.eth").await?;
     assert_eq!(alpha["data"]["name"], json!("alpha.eth"), "{alpha:#}");

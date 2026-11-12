@@ -1,5 +1,6 @@
 #[tokio::test]
 async fn api_serve_tolerates_an_absent_phase_schema() -> Result<()> {
+    let _gauge = walk_index_set_check::GAUGE.lock().await;
     let database = TestDatabase::new_migrated().await?;
     sqlx::query("DROP SCHEMA bigname_phase CASCADE")
         .execute(&database.lookup_pool)
@@ -13,6 +14,7 @@ async fn api_serve_tolerates_an_absent_phase_schema() -> Result<()> {
         rpc_connect_timeout_ms: 2_000,
         rpc_timeout_ms: 8_000,
         rpc_chain_check: crate::cli::RpcChainCheck::Full,
+        walk_index_set_check: crate::cli::WalkIndexSetCheck::Refuse,
         ccip_gateway_deny_cidrs: None,
         bounds: ApiBoundsConfig::default(),
         phase_heartbeat_max_age_secs: state::DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS,
@@ -25,6 +27,7 @@ async fn api_serve_tolerates_an_absent_phase_schema() -> Result<()> {
         status_max_block_lag: v2::support::status_freshness::DEFAULT_MAX_BLOCK_LAG,
         status_max_lag_secs: v2::support::status_freshness::DEFAULT_MAX_LAG_SECS,
         publication_lag_tolerance_blocks: bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS,
+        label_staging: crate::label_staging::LabelStagingConfig::default(),
         database: database.database_config(6)?,
     };
 
@@ -53,6 +56,7 @@ async fn api_serve_refuses_a_schema_missing_normalized_events() -> Result<()> {
         rpc_connect_timeout_ms: 2_000,
         rpc_timeout_ms: 8_000,
         rpc_chain_check: crate::cli::RpcChainCheck::Full,
+        walk_index_set_check: crate::cli::WalkIndexSetCheck::Refuse,
         ccip_gateway_deny_cidrs: None,
         bounds: ApiBoundsConfig::default(),
         phase_heartbeat_max_age_secs: state::DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS,
@@ -65,6 +69,7 @@ async fn api_serve_refuses_a_schema_missing_normalized_events() -> Result<()> {
         status_max_block_lag: v2::support::status_freshness::DEFAULT_MAX_BLOCK_LAG,
         status_max_lag_secs: v2::support::status_freshness::DEFAULT_MAX_LAG_SECS,
         publication_lag_tolerance_blocks: bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS,
+        label_staging: crate::label_staging::LabelStagingConfig::default(),
         database: database.database_config(6)?,
     };
 
@@ -192,6 +197,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.project_account_approval",
         "relation: bigname_phase.project_address_controller_candidate",
         "relation: bigname_phase.project_address_history_anchor",
+        "relation: bigname_phase.project_address_listing",
         "relation: bigname_phase.project_address_name_fold",
         "relation: bigname_phase.project_address_name_index",
         "relation: bigname_phase.project_address_record_id_index",
@@ -246,7 +252,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 76);
+    assert_eq!(actual.len(), 77);
     database.cleanup().await
 }
 

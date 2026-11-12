@@ -23,6 +23,8 @@ use crate::{
     state::PhaseStore,
 };
 
+pub use crate::supervisor::SupervisorReport;
+
 #[path = "runner_batch.rs"]
 mod batch;
 #[path = "runner_capacity.rs"]
@@ -52,11 +54,6 @@ pub enum RedoPhase {
     Phase(PhaseName),
     RecomputeFlags,
     All,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SupervisorReport {
-    pub stopped_chains: Vec<(String, RunnerError)>,
 }
 
 #[derive(Clone)]

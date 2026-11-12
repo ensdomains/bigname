@@ -1277,6 +1277,25 @@ async fn zero_api_response(
     request: reqwest::RequestBuilder,
     source: Option<&str>,
 ) -> Result<Value> {
+    zero_api_response_with_meta(request, source, &[]).await
+}
+
+/// `zero_api_response` for the records route of an admitted resolver, where an indexed answer
+/// also reports `meta.completeness`.
+async fn zero_records_response(request: reqwest::RequestBuilder, source: &str) -> Result<Value> {
+    if source != "indexed" {
+        return zero_api_response(request, Some(source)).await;
+    }
+    let body = zero_api_response_with_meta(request, Some(source), &["completeness"]).await?;
+    assert_eq!(body["meta"]["completeness"], "full");
+    Ok(body)
+}
+
+async fn zero_api_response_with_meta(
+    request: reqwest::RequestBuilder,
+    source: Option<&str>,
+    extra_meta_keys: &[&'static str],
+) -> Result<Value> {
     let response = request.send().await?;
     let status = response.status();
     let body: Value = response.json().await?;
@@ -1288,6 +1307,7 @@ async fn zero_api_response(
         meta_keys.push("source");
         assert_eq!(body["meta"]["source"], source);
     }
+    meta_keys.extend_from_slice(extra_meta_keys);
     assert_keys(&body["meta"], &meta_keys);
     for position in body["meta"]["as_of"]
         .as_object()
@@ -1374,7 +1394,7 @@ pub(super) async fn assert_zero_api_shapes(
             api.base_url,
         ));
         let selected_source = if source == "auto" { "indexed" } else { source };
-        let body = zero_api_response(request, Some(selected_source)).await?;
+        let body = zero_records_response(request, selected_source).await?;
         assert_keys(&body["data"], &["namespace", "resolver", "records"]);
         assert_keys(&body["data"]["resolver"], &["chain_id", "address"]);
         assert_eq!(body["data"]["namespace"], namespace);
@@ -1389,12 +1409,12 @@ pub(super) async fn assert_zero_api_shapes(
     // Without `keys` the route answers the inventory's default key set from the index: the
     // retained nonzero default address is an `ok` answer and the cleared `addr:60` stays absent.
     for source in ["indexed", "auto"] {
-        let body = zero_api_response(
+        let body = zero_records_response(
             api.client.get(format!(
                 "{}/v1/names/{name}/records?namespace={namespace}&source={source}",
                 api.base_url,
             )),
-            Some("indexed"),
+            "indexed",
         )
         .await?;
         assert_keys(&body["data"], &["namespace", "resolver", "records"]);

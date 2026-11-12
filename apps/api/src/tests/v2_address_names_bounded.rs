@@ -424,8 +424,13 @@ async fn seed_bulk_names_with_records(
     Ok(())
 }
 
+/// The route's answer as the ownership walk composes it, which the walk tests here exercise and
+/// the stored listing's pages are compared with.
 async fn bulk_payload(database: &TestDatabase, uri: &str) -> Result<Value> {
-    v2_address_names_payload_for_database(database, uri).await
+    bigname_storage::families::records::seams::with_composed_address_names(
+        v2_address_names_payload_for_database(database, uri),
+    )
+    .await
 }
 
 /// The response helper compares role summaries with a second complete per-resource request.

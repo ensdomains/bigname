@@ -14,13 +14,16 @@ use anyhow::Result;
 use sqlx::types::Uuid;
 
 pub use expiring::{NameCurrentDeadline, NameCurrentExpiringFilter, NameCurrentExpiryWindow};
-pub(crate) use expiring::{expiring_page_from, parent_like_patterns, push_parent_predicate};
-pub(crate) use list::{COMPOSED_NC_COLUMNS, escape_like_pattern, list_page_from};
+pub(crate) use expiring::{
+    expiring_page_from, parent_labelhash_path, parent_like_patterns, push_parent_key_predicate,
+    push_parent_predicate,
+};
 pub use list::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
     NameCurrentListRow, NameCurrentListSort, name_current_list_cursor_from_row,
 };
+pub(crate) use list::{escape_like_pattern, list_page_from};
 pub use migration::{
     MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND, load_name_migration_transition_timestamps,
     name_current_authority_arm,

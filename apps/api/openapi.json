@@ -135,7 +135,7 @@
             "name": "record_key",
             "in": "query",
             "required": false,
-            "description": "Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes.",
+            "description": "Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets.",
             "schema": {
               "type": "string"
             }
@@ -558,7 +558,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the candidate cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner.",
             "schema": {
               "type": "array",
               "items": {
@@ -1278,7 +1278,7 @@
             "name": "record_key",
             "in": "query",
             "required": false,
-            "description": "Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes.",
+            "description": "Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets.",
             "schema": {
               "type": "string"
             }
@@ -1315,7 +1315,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total. When only resolver or contract_address anchors the read, it is exact up to 100,000 rows and null above.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total, and page.total_count is null without it. When only resolver or contract_address anchors the read, it is exact up to 10,000 rows and null above.",
             "schema": {
               "type": "array",
               "items": {
@@ -1645,7 +1645,7 @@
             "name": "parent",
             "in": "query",
             "required": false,
-            "description": "A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname.",
+            "description": "A name; only names exactly one label below it, by labelhash path, are listed. A bracketed labelhash label names the node it hashes. parent=eth lists every `<label>.eth` name and no deeper subname.",
             "schema": {
               "type": "string"
             }
@@ -2361,7 +2361,7 @@
             "name": "record_key",
             "in": "query",
             "required": false,
-            "description": "Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes.",
+            "description": "Stored record key, such as `text:avatar` or `addr:60`. A key with no colon reads the text record `text:<key>`, except `content`, `contenthash` and `name`. Otherwise exact, including punctuation or whitespace. Non-empty, no NUL. Restricts results to writes or clears of that key and to record-version resets.",
             "schema": {
               "type": "string"
             }
@@ -3851,7 +3851,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 100,000 events and null above.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 10,000 events and null above.",
             "schema": {
               "type": "array",
               "items": {
@@ -4461,7 +4461,7 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests the exact number of bound names. Without it bound_names.page.total_count is null.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count requests the number of bound names, exact up to 100,000 and null above. Without it bound_names.page.total_count is null.",
             "schema": {
               "type": "array",
               "items": {
@@ -8269,7 +8269,7 @@
               "integer",
               "null"
             ],
-            "description": "Count of product-visible events emitted by the registry, exact up to 100,000 and null above; only with include=counts."
+            "description": "Count of product-visible events emitted by the registry, exact up to 10,000 and null above; only with include=counts."
           }
         },
         "additionalProperties": false

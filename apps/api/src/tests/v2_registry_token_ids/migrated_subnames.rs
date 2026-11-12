@@ -678,7 +678,7 @@ async fn assert_name_consumers(
         expected,
         "{lookup:#}"
     );
-    let listed = bigname_storage::families::name::assert_bound_names_match_the_walk(
+    let listed = bigname_storage::families::name::assert_bound_name_pages_chain(
         &database.pool,
         PATH_CHAIN,
         &format!("{resolver:#x}"),

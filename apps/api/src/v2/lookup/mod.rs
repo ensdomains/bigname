@@ -19,6 +19,7 @@ mod dto;
 mod enrich;
 mod forward;
 pub(crate) mod head;
+mod heal;
 #[cfg(test)]
 pub(crate) use head::{
     served_head_initial_validation_test_hooks, served_head_revalidation_test_hooks,
@@ -170,11 +171,12 @@ pub(crate) async fn get_lookup(
     if let Some(served_head) = served_head.as_ref() {
         revalidate_served_head(&state.pool, served_head).await?;
     }
-    let data = results
+    let mut data = results
         .into_iter()
         .map(|result| result.expect("every parsed lookup input must render a result"))
         .collect::<Vec<_>>();
     let meta = lookup_request_scope_meta(&served_head, &public_namespaces, &snapshot_scope)?;
+    heal::heal_results(&state, &name_inputs, &mut data);
     Ok(Json(Envelope {
         data,
         page: None,

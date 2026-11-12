@@ -201,6 +201,16 @@ fn decode_multicall_results(return_data: &[u8]) -> Result<Vec<EnsTextRecordMulti
                     });
                 }
             };
+            // PostgreSQL text and jsonb cannot hold a NUL byte, so a value containing one has the
+            // outcome of a malformed return: no value is written and the read counts as failed.
+            // The check is here, not in `decode_record_result`, which verified lookups also use.
+            if value.as_deref().is_some_and(|value| value.contains('\0')) {
+                return Ok(EnsTextRecordMulticallResult::Failed {
+                    message: "resolver text call returned a value containing a NUL byte, which \
+                              cannot be stored"
+                        .to_owned(),
+                });
+            }
             Ok(match value {
                 Some(value) => EnsTextRecordMulticallResult::Success { value },
                 None => EnsTextRecordMulticallResult::NotFound,
