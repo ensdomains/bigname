@@ -1274,7 +1274,10 @@ the five indexes above, that the plan reads `normalized_events_project_node_hist
 `normalized_events_record_id_write_idx` and `normalized_events_record_id_link_idx`, each probe
 keyed by the pointer (its node, its resolver and record id, or its resolver and node), and that
 the mirror lookup, run over a non-empty walk, reads registry pointers
-through `normalized_events_project_v1_pointer_addressed_node_idx`.
+through `normalized_events_project_v1_pointer_addressed_node_idx`. That lookup reads the index
+key behind an `OFFSET 0` fence, with the readable filter, the order and the `LIMIT` outside it.
+`history/attribution/mirror_plan_tests.rs` checks it on a fixture where the unfenced lookup walks
+`normalized_events_chain_block_number_desc_idx`, and checks its rows against the unfenced lookup.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's
