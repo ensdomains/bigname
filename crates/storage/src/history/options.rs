@@ -65,6 +65,8 @@ pub struct HistoryPageOptions {
     pub to_block: Option<i64>,
     /// Keeps only rows whose source log this contract emitted, compared case-insensitively.
     pub contract_address: Option<String>,
+    /// Keeps only events of this namespace, whatever anchor admitted them.
+    pub namespace: Option<String>,
     /// Publication upper bounds for expanding bindings and historical ownership anchors.
     pub publication_block_bounds: Option<std::collections::BTreeMap<String, i64>>,
     /// Admission's exact publication, for the Project catalogue. Legacy callers supplying

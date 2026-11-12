@@ -365,6 +365,7 @@ pub(crate) fn history_page_options(
         from_block: None,
         to_block: None,
         contract_address: None,
+        namespace: None,
     }
 }
 

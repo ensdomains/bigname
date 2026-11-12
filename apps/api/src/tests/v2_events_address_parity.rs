@@ -572,3 +572,54 @@ async fn events_address_contract_without_the_addresss_events_walks_every_bucket(
     assert_eq!(buckets, 1, "{uri}: {stats:?}");
     database.cleanup().await
 }
+
+/// The resolver of the address's ENSv1 name is also admitted under another namespace on the
+/// same chain, and writes the name's node there. Record attribution accepts that write for the
+/// node, but it is not an `ens` event: the walk lists and counts only the requested namespace,
+/// as the SQL page does.
+#[tokio::test]
+async fn events_address_walk_keeps_only_the_requested_namespace() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let events = seed_names(&database, 1).await?;
+    let manifest = declare_family_fixture_resolver(
+        &database.pool,
+        "basenames",
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        RESOLVER,
+    )
+    .await?;
+    let node = bigname_lookup::ens_namehash_hex("walk-0000.eth")?;
+    let mut write = address_fixture_event(
+        "events-walk-other-namespace-record",
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        BLOCK,
+        HASH,
+        50,
+        json!({"source_event":"TextChanged", "node":node, "resolver":RESOLVER,
+            "record_key":"text:description", "record_family":"text",
+            "selector_key":"description", "value":"elsewhere"}),
+    );
+    write.namespace = "basenames".into();
+    write.manifest_version = 1;
+    write.source_manifest_id = Some(manifest);
+    write.raw_fact_ref =
+        json!({"kind":"raw_log", "emitting_address":RESOLVER, "transaction_index":0});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[write]).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", BLOCK, HASH).await?;
+    let other = hkw_id("events-walk-other-namespace-record");
+    for query in [
+        format!("address={ADDRESS}&namespace=ens&include=total_count"),
+        format!("address={ADDRESS}&include=total_count"),
+    ] {
+        let rows = assert_walk_matches_sql_page(&database, &query, &[1, 200][..]).await?;
+        assert_eq!(rows, events.len(), "{query}");
+        let page = walked_page(&database, &format!("/v1/events?{query}&page_size=200")).await?;
+        assert!(!hk_ids(&page).contains(&other), "{query}: {page}");
+        assert_eq!(page["page"]["total_count"], json!(events.len()), "{query}");
+    }
+    database.cleanup().await
+}
