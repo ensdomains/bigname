@@ -129,9 +129,59 @@ async fn seed_buckets(database: &TestDatabase) -> Result<()> {
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", HEAD, &hash(HEAD)).await
 }
 
+/// The plan modes each namespace row runs in.
+const PLAN_MODES: [&str; 2] = ["force_custom_plan", "force_generic_plan"];
+
+/// The app state the rows serve `ens` from.
+fn ens_state(database: &TestDatabase) -> AppState {
+    database.app_state_with_public_namespaces(&["ens"])
+}
+
+/// An app state serving `ens` and `basenames` on a pool of its own, whose connections run with
+/// `plan_mode` as their `plan_cache_mode`.
+async fn state_in(database: &TestDatabase, plan_mode: &str) -> Result<AppState> {
+    let setup = format!("SET plan_cache_mode = {plan_mode}");
+    let pool = PgPoolOptions::new()
+        .max_connections(database.lookup_pool.options().get_max_connections())
+        .after_connect(move |connection, _| {
+            let setup = setup.clone();
+            Box::pin(async move {
+                sqlx::query(&setup).execute(&mut *connection).await?;
+                Ok(())
+            })
+        })
+        .connect_with(database.lookup_pool.connect_options().as_ref().clone())
+        .await
+        .context("failed to connect the plan-mode pool")?;
+    let state = AppState::new_with_rpc_urls(pool, bigname_lookup::ChainRpcUrls::default());
+    Ok(state.with_public_namespaces_for_test(["ens", "basenames"]))
+}
+
+/// The payload of `uri` on `state`, which must answer 200.
+async fn payload_on(state: &AppState, uri: &str) -> Result<Value> {
+    let request = Request::builder().uri(uri).body(Body::empty())?;
+    let response = app_router(state.clone())
+        .oneshot(request)
+        .await
+        .context("events request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{uri}: {payload}");
+    Ok(payload)
+}
+
 /// One page through the catalogue walk, with the leapfrog on or off, and its measurements.
 async fn walked(
     database: &TestDatabase,
+    uri: &str,
+    leapfrog: bool,
+) -> Result<(Value, bigname_storage::AddressHistoryWorkingSet)> {
+    walked_on(&ens_state(database), uri, leapfrog).await
+}
+
+/// [`walked`] on `state`.
+async fn walked_on(
+    state: &AppState,
     uri: &str,
     leapfrog: bool,
 ) -> Result<(Value, bigname_storage::AddressHistoryWorkingSet)> {
@@ -141,7 +191,7 @@ async fn walked(
     }));
     let body = bigname_storage::with_address_history_working_set(
         stats.clone(),
-        v2_history_payload_for_database(database, uri),
+        payload_on(state, uri),
     )
     .await?;
     let stats = stats.lock().unwrap().clone();
@@ -158,8 +208,8 @@ fn counted(stats: &bigname_storage::AddressHistoryWorkingSet, key: &str) -> usiz
 }
 
 /// The same page on the SQL page.
-async fn sql_page(database: &TestDatabase, uri: &str) -> Result<Value> {
-    crate::v2::with_address_sql_page(v2_history_payload_for_database(database, uri)).await
+async fn sql_page_on(state: &AppState, uri: &str) -> Result<Value> {
+    crate::v2::with_address_sql_page(payload_on(state, uri)).await
 }
 
 /// Walks `/v1/events?{query}` to its end at `page_size`, and checks every page against the walk
@@ -167,6 +217,15 @@ async fn sql_page(database: &TestDatabase, uri: &str) -> Result<Value> {
 /// and, per page, the bucket batches and seeks with and without the leapfrog.
 async fn walk_three_ways(
     database: &TestDatabase,
+    query: &str,
+    page_size: usize,
+) -> Result<(Vec<String>, Vec<[usize; 4]>)> {
+    walk_three_ways_on(&ens_state(database), query, page_size).await
+}
+
+/// [`walk_three_ways`] on `state`.
+async fn walk_three_ways_on(
+    state: &AppState,
     query: &str,
     page_size: usize,
 ) -> Result<(Vec<String>, Vec<[usize; 4]>)> {
@@ -178,9 +237,9 @@ async fn walk_three_ways(
         if let Some(cursor) = &cursor {
             uri.push_str(&format!("&cursor={cursor}"));
         }
-        let (body, stats) = walked(database, &uri, true).await?;
-        let (without, before) = walked(database, &uri, false).await?;
-        let sql = sql_page(database, &uri).await?;
+        let (body, stats) = walked_on(state, &uri, true).await?;
+        let (without, before) = walked_on(state, &uri, false).await?;
+        let sql = sql_page_on(state, &uri).await?;
         assert_eq!(body["data"], without["data"], "{uri}");
         assert_eq!(body["page"], without["page"], "{uri}");
         assert_eq!(body["data"], sql["data"], "{uri}");
@@ -336,16 +395,12 @@ async fn events_address_contract_ties_unchanged() -> Result<()> {
     database.cleanup().await
 }
 
-/// An ENSv1 name of the address points to a resolver that a basenames manifest also admits on
-/// the same chain, and that resolver wrote a basenames record for the name's node. With that
-/// resolver as `contract_address` and `namespace=ens`, the page and its total hold the name's ens
-/// events and not the basenames write, and the walk probes no more buckets than the resolver
-/// emitted in.
-#[tokio::test]
-async fn events_address_contract_keeps_to_the_requested_namespace() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    let seeded = seed_names(&database, 2).await?;
-    extend_lineage(&database).await?;
+/// Two ENSv1 names of the address, whose events in bucket 0 its resolver emitted. A basenames
+/// manifest also admits that resolver on the same chain, and under it the resolver wrote a
+/// record for the first name's node in bucket 2. Returns the ids of the address's ens events.
+async fn seed_cross_namespace(database: &TestDatabase) -> Result<Vec<String>> {
+    let seeded = seed_names(database, 2).await?;
+    extend_lineage(database).await?;
     let manifest = declare_family_fixture_resolver(
         &database.pool,
         "basenames",
@@ -376,6 +431,19 @@ async fn events_address_contract_keeps_to_the_requested_namespace() -> Result<()
     write.source_manifest_id = Some(manifest);
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[write]).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", HEAD, &hash(HEAD)).await?;
+    let ids = seeded.iter().map(|(_, identity)| hkw_id(identity));
+    Ok(ids.collect())
+}
+
+/// An ENSv1 name of the address points to a resolver that a basenames manifest also admits on
+/// the same chain, and that resolver wrote a basenames record for the name's node. With that
+/// resolver as `contract_address` and `namespace=ens`, the page and its total hold the name's ens
+/// events and not the basenames write, and the walk probes no more buckets than the resolver
+/// emitted in.
+#[tokio::test]
+async fn events_address_contract_keeps_to_the_requested_namespace() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let seeded = seed_cross_namespace(&database).await?;
     for order in ["desc", "asc"] {
         let query =
             format!("address={ADDRESS}&contract_address={RESOLVER}&namespace=ens&order={order}");
@@ -392,6 +460,140 @@ async fn events_address_contract_keeps_to_the_requested_namespace() -> Result<()
         assert_eq!(body["page"]["total_count"], json!(seeded.len()), "{total}");
     }
     database.cleanup().await
+}
+
+/// The `contract_address` reads of the namespace rows, each with the resolver of
+/// [`seed_cross_namespace`].
+#[derive(Clone, Copy)]
+enum ContractRead {
+    /// One page. The resolver emitted the address's ens events and the basenames write.
+    WithEvents,
+    /// One page from block 512, where the resolver emitted only the basenames write.
+    WithoutTheAddresssEvents,
+    /// One row per page, every cursor followed.
+    Cursor,
+    /// One row per page with `include=total_count`, every cursor followed.
+    Count,
+}
+
+/// One namespace row: the resolver as `contract_address` in `namespace`, or in the route's
+/// default namespace when it is `None`, in both orders and both plan modes. Every page equals
+/// the walk without the leapfrog and the SQL page, cursors and totals included. The rows are
+/// the address's events in the requested namespace that `read` admits, the exact total is their
+/// number, and no page probes more buckets than the resolver emitted in.
+async fn assert_namespace_row(namespace: Option<&str>, read: ContractRead) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let ens_events = seed_cross_namespace(&database).await?;
+    // The address holds no basenames name, so a basenames read admits none of its events.
+    let mut expected = match (namespace, read) {
+        (Some("basenames"), _) | (_, ContractRead::WithoutTheAddresssEvents) => Vec::new(),
+        _ => ens_events,
+    };
+    expected.sort();
+    // The resolver emitted in buckets 0 and 2, and from block 512 only in bucket 2.
+    let (window, buckets) = match read {
+        ContractRead::WithoutTheAddresssEvents => ("&from_block=512", 1),
+        _ => ("", 2),
+    };
+    let (page_size, include) = match read {
+        ContractRead::Cursor => (1, ""),
+        ContractRead::Count => (1, "&include=total_count"),
+        _ => (200, ""),
+    };
+    let namespace = match namespace {
+        Some(namespace) => format!("&namespace={namespace}"),
+        None => String::new(),
+    };
+    for mode in PLAN_MODES {
+        let state = state_in(&database, mode).await?;
+        for order in ["desc", "asc"] {
+            let query = format!(
+                "address={ADDRESS}&contract_address={RESOLVER}&order={order}{namespace}{window}"
+            );
+            let paged = format!("{query}{include}");
+            let (mut rows, pages) = walk_three_ways_on(&state, &paged, page_size).await?;
+            rows.sort();
+            assert_eq!(rows, expected, "{paged} {mode}");
+            for [batches, ..] in &pages {
+                assert!(
+                    *batches <= buckets,
+                    "{paged} {mode}: buckets probed: {pages:?}"
+                );
+            }
+            let total = format!("/v1/events?{query}&page_size=200&include=total_count");
+            let (body, _) = walked_on(&state, &total, true).await?;
+            assert_eq!(
+                body["page"]["total_count"],
+                json!(expected.len()),
+                "{total} {mode}"
+            );
+        }
+        state.pool.close().await;
+    }
+    database.cleanup().await
+}
+
+// The namespace rows: `namespace=ens`, no namespace (the route reads `ens`) and
+// `namespace=basenames`, each with the four reads of `ContractRead`.
+
+#[tokio::test]
+async fn events_address_ens_contract_with_the_addresss_events() -> Result<()> {
+    assert_namespace_row(Some("ens"), ContractRead::WithEvents).await
+}
+
+#[tokio::test]
+async fn events_address_ens_contract_without_the_addresss_events() -> Result<()> {
+    assert_namespace_row(Some("ens"), ContractRead::WithoutTheAddresssEvents).await
+}
+
+#[tokio::test]
+async fn events_address_ens_contract_cursor() -> Result<()> {
+    assert_namespace_row(Some("ens"), ContractRead::Cursor).await
+}
+
+#[tokio::test]
+async fn events_address_ens_contract_count() -> Result<()> {
+    assert_namespace_row(Some("ens"), ContractRead::Count).await
+}
+
+#[tokio::test]
+async fn events_address_default_namespace_contract_with_the_addresss_events() -> Result<()> {
+    assert_namespace_row(None, ContractRead::WithEvents).await
+}
+
+#[tokio::test]
+async fn events_address_default_namespace_contract_without_the_addresss_events() -> Result<()> {
+    assert_namespace_row(None, ContractRead::WithoutTheAddresssEvents).await
+}
+
+#[tokio::test]
+async fn events_address_default_namespace_contract_cursor() -> Result<()> {
+    assert_namespace_row(None, ContractRead::Cursor).await
+}
+
+#[tokio::test]
+async fn events_address_default_namespace_contract_count() -> Result<()> {
+    assert_namespace_row(None, ContractRead::Count).await
+}
+
+#[tokio::test]
+async fn events_address_basenames_contract_with_the_addresss_events() -> Result<()> {
+    assert_namespace_row(Some("basenames"), ContractRead::WithEvents).await
+}
+
+#[tokio::test]
+async fn events_address_basenames_contract_without_the_addresss_events() -> Result<()> {
+    assert_namespace_row(Some("basenames"), ContractRead::WithoutTheAddresssEvents).await
+}
+
+#[tokio::test]
+async fn events_address_basenames_contract_cursor() -> Result<()> {
+    assert_namespace_row(Some("basenames"), ContractRead::Cursor).await
+}
+
+#[tokio::test]
+async fn events_address_basenames_contract_count() -> Result<()> {
+    assert_namespace_row(Some("basenames"), ContractRead::Count).await
 }
 
 /// A contract with events in every bucket and an address whose one name has events only in
