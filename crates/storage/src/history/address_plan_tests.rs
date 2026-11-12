@@ -898,7 +898,7 @@ fn assert_no_unkeyed_event_scan(
             .is_some_and(|condition| ROW_KEYS.iter().any(|key| condition.contains(key)))
     };
     for node in nodes {
-        if node["Relation Name"] != "normalized_events" || node["Alias"] != "ne" {
+        if node["Relation Name"] != "normalized_events" || !is_ne_alias(&node["Alias"]) {
             continue;
         }
         let keyed = if node["Node Type"] == "Bitmap Heap Scan" {
@@ -922,6 +922,17 @@ fn assert_no_unkeyed_event_scan(
         );
     }
     Ok(())
+}
+
+/// `ne`, or the `ne_1`, `ne_2`, ... EXPLAIN names the scans of several subqueries that each alias
+/// `normalized_events` as `ne`, such as the anchor statement's per-key probes.
+fn is_ne_alias(alias: &Value) -> bool {
+    alias.as_str().is_some_and(|alias| {
+        alias == "ne"
+            || alias
+                .strip_prefix("ne_")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 fn bitmap_index_names<'a>(node: &'a Value, output: &mut Vec<&'a str>) {
@@ -968,6 +979,36 @@ fn bitmap_heap_scan_is_keyed_only_by_the_statement_indexes() {
     );
     let nodes = main_plan_nodes(&keyed);
     assert!(assert_no_unkeyed_event_scan("probe", &nodes, &keyed, &SELECTOR_INDEXES).is_ok());
+}
+
+/// The anchor statement's probes plan as `ne_1`, `ne_2` and `ne_3`. A probe that reads an index
+/// not keyed by the address must still be caught under those aliases.
+#[test]
+fn numbered_probe_aliases_are_checked() {
+    let probe = |alias: &str, index: &str| {
+        serde_json::json!({
+            "Node Type": "Index Scan",
+            "Relation Name": "normalized_events",
+            "Alias": alias,
+            "Index Name": index,
+            "Index Cond": "(event_kind = 'TokenControlTransferred'::text)",
+        })
+    };
+    let plan = |index: &str| {
+        serde_json::json!([{"Plan": {"Node Type": "Append", "Plans": [
+            probe("ne_1", ANCHOR_INDEXES[0]),
+            probe("ne_2", index),
+            probe("ne_3", ANCHOR_INDEXES[2]),
+        ]}}])
+    };
+    let unkeyed = plan("normalized_events_projection_idx");
+    let nodes = main_plan_nodes(&unkeyed);
+    assert!(assert_no_unkeyed_event_scan("anchor", &nodes, &unkeyed, &ANCHOR_INDEXES).is_err());
+    let keyed = plan(ANCHOR_INDEXES[1]);
+    let nodes = main_plan_nodes(&keyed);
+    assert!(assert_no_unkeyed_event_scan("anchor", &nodes, &keyed, &ANCHOR_INDEXES).is_ok());
+    assert!(!is_ne_alias(&serde_json::json!("nested")));
+    assert!(!is_ne_alias(&serde_json::json!("ne_")));
 }
 
 /// Plan the statement twice: as PostgreSQL's generic prepared-statement plan, which sqlx's
