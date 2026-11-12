@@ -1,4 +1,4 @@
--- Existing schema-v2 databases gain four read-only btree indexes that API reads probe. Each
+-- Existing schema-v2 databases gain three read-only btree indexes that API reads probe. Each
 -- replaces a scan of its whole table:
 --
 -- - chain_lineage_timestamp_idx serves the history timestamp window
@@ -8,10 +8,6 @@
 -- - project_resource_pointer_namehash_resolver_idx serves the resource pointer joins of the
 --   resolves_to candidates (CANDIDATES in crates/storage/src/families/records/candidates.rs),
 --   which join on chain, namehash and resolver.
--- - name_surfaces_name_prefix_idx serves a prefix search over raw names
---   (storage:families.name.search_candidates). The text_pattern_ops operator class makes a
---   LIKE prefix a range on raw_name whatever the database collation. Its predicate is the one
---   of name_surfaces_name_order_idx, and the reader carries the same bounds.
 -- - project_registry_pointer_resource_idx serves the registry pointer arm of
 --   storage:families.records.names_reaching_resources, which looks pointers up by resource.
 --
@@ -72,8 +68,6 @@ BEGIN
                  $def$CREATE INDEX chain_lineage_timestamp_idx ON bigname_phase.chain_lineage USING btree (chain_id, block_timestamp, block_number)$def$),
                 ('project_resource_pointer_namehash_resolver_idx', 'project_resource_pointer',
                  $def$CREATE INDEX project_resource_pointer_namehash_resolver_idx ON bigname_phase.project_resource_pointer USING btree (chain_id, namehash, resolver_address)$def$),
-                ('name_surfaces_name_prefix_idx', 'name_surfaces',
-                 $def$CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))$def$),
                 ('project_registry_pointer_resource_idx', 'project_registry_pointer',
                  $def$CREATE INDEX project_registry_pointer_resource_idx ON bigname_phase.project_registry_pointer USING btree (chain_id, resource_id)$def$)
             ) AS reviewed(index_name, table_name, definition)

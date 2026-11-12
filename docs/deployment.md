@@ -5370,15 +5370,13 @@ content hash, then check on Ethereum Mainnet that `GET /v1/names/coathup.eth` se
 `registered_at`, a `registration_id` and `ens_v1.expires_at`, and that
 `GET /v1/names/kaaboosd.eth` serves `active` with a `registered_at`.
 
-## Read indexes for history windows, search prefixes and `resolves_to`
+## Read indexes for history windows and `resolves_to`
 
-The build that adds four read-only btree indexes changes no stored row and no response
+The build that adds three read-only btree indexes changes no stored row and no response
 body. Each serves an API read that otherwise scans its whole table:
 
 - History, address-history and events pages with `from_timestamp` or `to_timestamp` map each
   bound to a block through `chain_lineage_timestamp_idx` on `chain_lineage`.
-- `GET /v1/search` with a raw-name prefix reads its matches as one range of
-  `name_surfaces_name_prefix_idx` on `name_surfaces`.
 - `relation=resolves_to` on `GET /v1/addresses/{address}/names` finds its candidate
   resources through `project_resource_pointer_namehash_resolver_idx` on
   `project_resource_pointer`, and the names that reach them through
@@ -5394,7 +5392,7 @@ serves.
 - It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
   watch plan are unchanged, so stamp no Ingest redo.
 
-Schema-migration `20261028120000_serving_read_indexes.sql` installs the four indexes. An
+Schema-migration `20261028120000_serving_read_indexes.sql` installs the three indexes. An
 index that already exists under its name, with the reviewed definition, is adopted without a
 build and without a lock on its table. This covers an index an operator created
 concurrently under the same name before the release. A missing index is built with an
@@ -5412,17 +5410,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_timestamp_idx
     ON bigname_phase.chain_lineage (chain_id, block_timestamp, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS project_resource_pointer_namehash_resolver_idx
     ON bigname_phase.project_resource_pointer (chain_id, namehash, resolver_address);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_name_prefix_idx
-    ON bigname_phase.name_surfaces (raw_name text_pattern_ops, namespace, namehash, logical_name_id)
-    WHERE visibility_state = 'active'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND octet_length(raw_name) <= 2000;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_pointer_resource_idx
     ON bigname_phase.project_registry_pointer (chain_id, resource_id);
 ```
 
 `IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
-invalid index. The schema-migration checks all four names before its own builds and again
+invalid index. The schema-migration checks all three names before its own builds and again
 after them. It refuses a name that is not an index, is on another table, is not valid and
 ready, or has another definition, and its error names the index. Check the same things
 yourself after each concurrent build, so the schema-migration does not stop inside the
@@ -5438,7 +5431,6 @@ WHERE c.relnamespace = 'bigname_phase'::regnamespace
   AND c.relname IN (
       'chain_lineage_timestamp_idx',
       'project_resource_pointer_namehash_resolver_idx',
-      'name_surfaces_name_prefix_idx',
       'project_registry_pointer_resource_idx');
 RESET search_path;
 ```
@@ -5450,7 +5442,6 @@ compares:
 ```text
 CREATE INDEX chain_lineage_timestamp_idx ON bigname_phase.chain_lineage USING btree (chain_id, block_timestamp, block_number)
 CREATE INDEX project_resource_pointer_namehash_resolver_idx ON bigname_phase.project_resource_pointer USING btree (chain_id, namehash, resolver_address)
-CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
 CREATE INDEX project_registry_pointer_resource_idx ON bigname_phase.project_registry_pointer USING btree (chain_id, resource_id)
 ```
 
@@ -6985,3 +6976,69 @@ gives the recovery steps. Then run the schema-migrations again.
 The index is advisory. The phase runner never builds it, and no walk drops it. The API starts
 and serves without it, with a WARN at startup when it is not in place, and the page then reads
 every grant of the holder.
+
+## The raw-name prefix index is dropped
+
+`name_surfaces_name_prefix_idx` is a `text_pattern_ops` index on `name_surfaces` that an
+operator may have built by hand to give a raw-name `LIKE` prefix a range. A prefix search now
+reads search documents, through the [prefix bucket indexes](#prefix-bucket-indexes-for-search)
+for a dense class and by id for any other. No statement reads this index, and every write to
+`name_surfaces` still maintains it.
+
+- Responses, their order and their cursors do not change.
+- Neither content hash rotates. The baselines and schema-migrations are inputs of neither. No
+  redo is needed.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261112160000_name_surfaces_drop_raw_prefix_index.sql` drops the index
+when it has the definition below, valid or not. A database without the name passes unchanged.
+The baseline does not define the index, and `20261028120000_serving_read_indexes.sql` no
+longer builds it.
+
+`DROP INDEX` takes an ACCESS EXCLUSIVE lock on `name_surfaces`. The drop only removes the
+index's catalog entry and its file, so the index's size does not matter, and the lock is held
+only until the schema-migration commits a moment later. To get the lock it first waits for
+every transaction that holds the table, and statements on the table queue behind it while it
+waits. Its own five-second `lock_timeout` bounds that wait. On a timeout it fails unrecorded,
+and a rerun is safe.
+
+Apply it with the release's other schema-migrations. With the phase runner, redo processes and
+API stopped, nothing holds the table and the drop does not wait. A database promoted from a
+redo's seed that already ran the schema-migration has no index left to drop. On a database that
+keeps serving while the schema-migrations run, drop the index concurrently first, as below.
+
+To drop it without that lock, read the index first, outside a transaction:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'name_surfaces_name_prefix_idx';
+RESET search_path;
+```
+
+No row means there is nothing to drop. Otherwise the definition must be exactly this line, which
+is the text the schema-migration compares:
+
+```text
+CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
+```
+
+Then confirm the three prefix bucket indexes are valid, and drop it. The schema-migration then
+finds no name and passes:
+
+```sql
+DROP INDEX CONCURRENTLY bigname_phase.name_surfaces_name_prefix_idx;
+```
+
+The schema-migration refuses anything else under the name, and drops nothing:
+
+- A relation that is not an index: find out what it is for, then remove or rename it.
+- An index with another definition: the error prints the definition it found and the one it
+  expects. Find out what the index serves, then rename it or drop it with
+  `DROP INDEX CONCURRENTLY`.
+
+Then run the schema-migrations again.
