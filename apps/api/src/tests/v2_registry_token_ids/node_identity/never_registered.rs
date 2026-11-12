@@ -334,40 +334,90 @@ async fn the_authority_filter_leaves_out_a_never_registered_name() -> Result<()>
     database.cleanup().await
 }
 
+/// The rows of a page's data that serve `namehash`.
+fn named(body: &Value, namehash: &str) -> Vec<Value> {
+    body["data"]
+        .as_array()
+        .expect("a page of rows")
+        .iter()
+        .filter(|row| row["namehash"] == namehash)
+        .cloned()
+        .collect()
+}
+
+/// The address names of `HOLDER` under `relation`.
+async fn holder_names(database: &TestDatabase, relation: &str) -> Result<Value> {
+    get(
+        database,
+        &format!("/v1/addresses/{HOLDER}/names?namespace=ens&relation={relation}&page_size=100"),
+    )
+    .await
+}
+
 /// The current registry answers `resolver(node)` from the 2017 registry while it holds no record
 /// for the node, so a name only the 2017 registry recorded keeps the 2017 record's resolver and
-/// resolves through it, with no owner and no binding.
+/// resolves through it, as it did before it served no registration. It has no owner and no
+/// binding, and the 2017 record's owner holds it under no ownership relation.
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 #[tokio::test]
 async fn a_never_registered_name_resolves_through_its_2017_resolver() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let resolver = seed(&database).await?;
     let pointed = node(&[b"pointed", b"eth"]);
+    let namehash = format!("{pointed:#x}");
+    // What the name resolves to.
     let row = detail(&database, &[b"pointed", b"eth"]).await?;
-    assert_no_registration(&row);
     assert_eq!(row["resolver"]["address"], format!("{resolver:#x}"), "{row:#}");
     assert_eq!(row["records"]["addresses"]["60"], HOLDER, "{row:#}");
-    let stored = bigname_storage::load_name_current(&database.pool, &format!("ens:{pointed:#x}"))
+    let resolves = holder_names(&database, "resolves_to").await?;
+    let listed = named(&resolves, &namehash);
+    assert_eq!(listed.len(), 1, "{resolves:#}");
+    let bound = get(&database, &format!("/v1/resolvers/1/{resolver:#x}?page_size=100")).await?;
+    assert!(bound.to_string().contains(&name_of(b"pointed")), "{bound:#}");
+    // What it serves as a name with no registration.
+    assert_no_registration(&row);
+    for field in ["owner", "manager", "authority"] {
+        assert!(listed[0].get(field).is_none(), "{field}: {resolves:#}");
+    }
+    let stored = bigname_storage::load_name_current(&database.pool, &format!("ens:{namehash}"))
         .await?
         .context("the name has a composed row")?;
     assert!(
         stored.surface_binding_id.is_none() && stored.resource_id.is_none(),
         "{stored:#?}"
     );
-    let resolves = get(
-        &database,
-        &format!("/v1/addresses/{HOLDER}/names?namespace=ens&relation=resolves_to&page_size=100"),
-    )
-    .await?;
-    let listed = resolves["data"]
-        .as_array()
-        .expect("address names")
-        .iter()
-        .find(|row| row["namehash"] == format!("{pointed:#x}"))
-        .unwrap_or_else(|| panic!("{resolves:#}"));
-    for field in ["owner", "authority"] {
-        assert!(listed.get(field).is_none(), "{field}: {listed:#}");
+    for relation in ["owner", "manager", "former_owner"] {
+        let body = holder_names(&database, relation).await?;
+        assert!(named(&body, &namehash).is_empty(), "{relation}: {body:#}");
     }
+    let subnames = get(&database, "/v1/names/eth/subnames?page_size=100").await?;
+    for child in named(&subnames, &namehash) {
+        for field in ["owner", "manager"] {
+            assert!(child.get(field).is_none(), "{field}: {subnames:#}");
+        }
+    }
+    database.cleanup().await
+}
+
+/// A name only the 2017 registry recorded with no resolver record has no records and resolves
+/// to no address.
+#[tokio::test]
+async fn a_never_registered_name_with_no_resolver_resolves_to_nothing() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resolver = seed(&database).await?;
+    let namehash = format!("{:#x}", node(&[b"plain", b"eth"]));
+    let row = detail(&database, &[b"plain", b"eth"]).await?;
+    assert_no_registration(&row);
+    assert_eq!(row["resolver"], Value::Null, "{row:#}");
+    assert_eq!(row["records"]["addresses"]["60"], Value::Null, "{row:#}");
+    let stored = bigname_storage::load_name_current(&database.pool, &format!("ens:{namehash}"))
+        .await?
+        .context("the name has a composed row")?;
+    assert!(stored.serving_resource_id.is_none(), "{stored:#?}");
+    let resolves = holder_names(&database, "resolves_to").await?;
+    assert!(named(&resolves, &namehash).is_empty(), "{resolves:#}");
+    let bound = get(&database, &format!("/v1/resolvers/1/{resolver:#x}?page_size=100")).await?;
+    assert!(!bound.to_string().contains(&name_of(b"plain")), "{bound:#}");
     database.cleanup().await
 }
 
@@ -436,18 +486,10 @@ async fn a_registered_2017_record_serves_the_current_registry_pointer() -> Resul
     assert_eq!(row["owner"], GRANTEE, "{row:#}");
     assert!(row.get("registration_id").is_some(), "{row:#}");
     assert_eq!(row["resolver"], Value::Null, "{row:#}");
-    let resolves = get(
-        &database,
-        &format!("/v1/addresses/{HOLDER}/names?namespace=ens&relation=resolves_to&page_size=100"),
-    )
-    .await?;
-    assert!(
-        resolves["data"]
-            .as_array()
-            .expect("address names")
-            .iter()
-            .all(|row| row["namehash"] != format!("{pointed:#x}")),
-        "{resolves:#}"
-    );
+    assert_eq!(row["records"]["addresses"]["60"], Value::Null, "{row:#}");
+    let resolves = holder_names(&database, "resolves_to").await?;
+    assert!(named(&resolves, &format!("{pointed:#x}")).is_empty(), "{resolves:#}");
+    let bound = get(&database, &format!("/v1/resolvers/1/{resolver:#x}?page_size=100")).await?;
+    assert!(!bound.to_string().contains(&name_of(b"pointed")), "{bound:#}");
     database.cleanup().await
 }
