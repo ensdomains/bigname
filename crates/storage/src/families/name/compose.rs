@@ -237,7 +237,8 @@ fn declared_coverage(parts: &Parts<'_>) -> Value {
     } else {
         json!([])
     };
-    let basis = if parts.serving.is_some() {
+    // A name with no registration resolves through its pointer but serves no registry owner.
+    let basis = if parts.serving.is_some() && !parts.shadow.trace.contains_key("never_registered") {
         "event_linked_registry_resolver"
     } else if ens_v2 {
         "exact_name_profile"
