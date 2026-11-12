@@ -291,7 +291,8 @@ pub(crate) async fn clear_names(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {
-    for sql in [CLEAR_NAMES, CLEAR_HISTORY, CLEAR_COUNTS] {
+    let _ = CLEAR_COUNTS;
+    for sql in [CLEAR_NAMES, CLEAR_HISTORY] {
         sqlx::query(sql)
             .bind(chain_id)
             .execute(&mut **transaction)

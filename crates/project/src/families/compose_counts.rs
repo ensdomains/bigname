@@ -137,7 +137,7 @@ async fn merge(
         .await
         .map_err(|error| ProjectError::database("failed to merge the event counts", error))?
         .rows_affected();
-    if step.last(STEPS) {
+    if step.last(STEPS) && CLEAR_WORK.is_empty() {
         sqlx::query(CLEAR_WORK)
             .bind(chain)
             .execute(&mut **transaction)
