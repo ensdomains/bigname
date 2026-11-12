@@ -13,6 +13,7 @@
 //! to its rows and to the previous statement's rows.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 
 use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -57,6 +58,10 @@ const SEPOLIA_HOLDER: u32 = 0x700b;
 const CONTRACT: u32 = 0x700c;
 /// Stored in upper case as a registrant.
 const UPPER_CASE: &str = "0x0000000000000000000000000000000000abcdef";
+/// Stored with mixed case, as a checksummed address prints, as a token transfer's recipient.
+const MIXED_CASE: &str = "0x00000000000000000000000000000000abcdef12";
+/// Stored as a token transfer's recipient without the `0x` prefix.
+const BARE_HEX: &str = "0x00000000000000000000000000000000000fedcb";
 
 type Anchor = (Option<String>, Option<Uuid>);
 
@@ -533,9 +538,86 @@ async fn address_matches_rows_and_oracle_parity() -> Result<()> {
                 DIAGNOSTICS,
                 typical.to_vec(),
             ),
+            (
+                "R22 mixed-case recipient",
+                MIXED_CASE.to_owned(),
+                EVENTS,
+                vec![named(0x7f21)],
+            ),
+            (
+                "R23 recipient without 0x",
+                BARE_HEX.to_owned(),
+                EVENTS,
+                vec![],
+            ),
+            (
+                "R23 recipient without 0x, diagnostics",
+                BARE_HEX.to_owned(),
+                DIAGNOSTICS,
+                vec![],
+            ),
         ];
-        // The rows whose key is present as JSON null hold no address.
-        let json_null = [named(0x7e01), named(0x7e02), named(0x7e03)];
+        // The rows whose key is JSON null, a 3,000-character string or 40 hex digits without
+        // `0x` hold no address, so no probe may return them.
+        let never = [
+            named(0x7e01),
+            named(0x7e02),
+            named(0x7e03),
+            named(0x7f01),
+            named(0x7f02),
+            named(0x7f03),
+            named(0x7f11),
+            named(0x7f12),
+            named(0x7f13),
+        ];
+        // Only the mixed-case recipient's value has an address's length, so it alone is in a key
+        // index, and the long values were inserted with the indexes present.
+        let indexed: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT event_identity, length(COALESCE(after_state ->> 'to', after_state ->> \
+             'registrant', after_state ->> 'owner')) = 42 IS TRUE
+             FROM normalized_events
+             WHERE event_identity LIKE 'n:%' OR event_identity LIKE 'long:%'
+                OR event_identity LIKE 'bare:%' OR event_identity = 'mixed:transfer'
+             ORDER BY event_identity COLLATE \"C\"",
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        let expected_indexed = [
+            ("bare:grant", false),
+            ("bare:owner", false),
+            ("bare:transfer", false),
+            ("long:owner", false),
+            ("long:registrant", false),
+            ("long:to", false),
+            ("mixed:transfer", true),
+            ("n:grant", false),
+            ("n:owner", false),
+            ("n:transfer", false),
+        ]
+        .map(|(identity, indexed)| (identity.to_owned(), indexed));
+        ensure!(
+            indexed == expected_indexed,
+            "key index membership {indexed:?}"
+        );
+        // The earlier kind-partial match indexes are unbounded: the same long value as a token
+        // transfer's recipient fails its insert there. No writer produces one.
+        let refused = raw_sql(
+            "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+                 manifest_version, chain_id, derivation_kind, canonicality_state, after_state)
+             SELECT 'long:old-index', 'ens', 'TokenControlTransferred', 'ens_v2_registry_l1', 1,
+                 'ethereum-mainnet', 'ens_v2_registry_resource_surface', 'canonical',
+                 jsonb_build_object('to', after_state ->> 'to')
+             FROM normalized_events WHERE event_identity = 'long:to'",
+        )
+        .execute(&mut *connection)
+        .await;
+        ensure!(
+            refused.as_ref().is_err_and(|error| error
+                .to_string()
+                .contains("normalized_events_address_token_holder_match_idx")),
+            "a long recipient on a token transfer was not refused by the kind-partial index: \
+             {refused:?}"
+        );
         let mut failures = Vec::new();
         for statistics in [Statistics::Plain, Statistics::Expressions] {
             statistics.apply(connection).await?;
@@ -556,8 +638,8 @@ async fn address_matches_rows_and_oracle_parity() -> Result<()> {
                             before.len()
                         ));
                     }
-                    if let Some(row) = rows.iter().find(|row| json_null.contains(row)) {
-                        failures.push(format!("{cell}: a JSON null key matched: {row:?}"));
+                    if let Some(row) = rows.iter().find(|row| never.contains(row)) {
+                        failures.push(format!("{cell}: a key holding no address matched: {row:?}"));
                     }
                 }
             }
@@ -575,7 +657,7 @@ async fn address_matches_rows_and_oracle_parity() -> Result<()> {
 /// The publication statement as `historical_history_relations` sends it at ccc39d88a, by the
 /// md5 of its text. The fence leaves Project's statement byte-identical: it shares only the
 /// arm and eligibility filters, which do not move.
-const PUBLICATION_STATEMENT_MD5: &str = "unpinned";
+const PUBLICATION_STATEMENT_MD5: &str = "df702d0be59ee6ea54960bac99170bc9";
 
 /// M1: Project's publication statement keeps its text, and on this fixture its rows. The run
 /// log carries the rows' digest, which the base and head runs must print alike.
@@ -635,16 +717,14 @@ async fn publication_statement_is_unchanged() -> Result<()> {
         .fetch_one(&mut *connection)
         .await
         .context("the publication statement is not prepared on this connection")?;
-        println!("PUBLICATION_STATEMENT_MD5 {digest}\n{statement}\nEND_PUBLICATION_STATEMENT");
+        // Written past the test harness's capture, so the run's log keeps the record.
+        let mut log = std::io::stderr();
+        writeln!(log, "PUBLICATION_STATEMENT_MD5 {digest}")?;
         let rows_digest: String = sqlx::query_scalar("SELECT md5($1)")
             .bind(rows.join("\n"))
             .fetch_one(&mut *connection)
             .await?;
-        println!(
-            "PUBLICATION_ROWS_MD5 {rows_digest} {}\n{}",
-            rows.len(),
-            rows.join("\n")
-        );
+        writeln!(log, "PUBLICATION_ROWS_MD5 {rows_digest} {}", rows.len())?;
         ensure!(
             digest == PUBLICATION_STATEMENT_MD5,
             "the publication statement changed: md5 {digest}\n{statement}"
@@ -691,7 +771,8 @@ async fn project_address_history_anchor_rows_digest() -> Result<()> {
         )
         .fetch_one(database.pool())
         .await?;
-        println!("PROJECT_ANCHOR_DIGEST {digest} {count}");
+        // Written past the test harness's capture, so the run's log keeps the record.
+        writeln!(std::io::stderr(), "PROJECT_ANCHOR_DIGEST {digest} {count}")?;
         ensure!(count > 0, "the publication wrote no address history anchor");
         Ok(())
     }
@@ -777,11 +858,11 @@ fn fenced_plan_failures(cell: &str, plan: &Value, form: Form) -> Vec<String> {
                                 "{index} is not read by its key: Index Cond {condition}"
                             ));
                         }
-                        // The key's presence is the index predicate, so it must not be left as a
+                        // The value's length is the index predicate, so it must not be left as a
                         // filter on the rows the index returns.
-                        if text(node, "Filter").contains(" ? ") {
+                        if text(node, "Filter").contains("length(") {
                             failures.push(format!(
-                                "{index}: the key's presence is a filter, not the index \
+                                "{index}: the value's length is a filter, not the index \
                                  predicate: {}",
                                 text(node, "Filter")
                             ));
@@ -1138,6 +1219,35 @@ SELECT pg_temp.ev('n:transfer', 810, 'TokenControlTransferred', 32257, 32257,
     '{"to": null}');
 SELECT pg_temp.ev('n:grant', 811, 'RegistrationGranted', 32258, 32258, '{"registrant": null}');
 SELECT pg_temp.ev('n:owner', 812, 'AuthorityTransferred', 32259, 32259, '{"owner": null}');
+
+-- Long: a 3,000-character string that does not compress under each key. An unbounded key index
+-- would refuse these inserts. They sit on surface bindings: the earlier kind-partial match
+-- indexes, which stay installed, are unbounded too and would refuse one on their own kinds.
+CREATE FUNCTION pg_temp.long(seed text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+    SELECT left(string_agg(replace(encode(sha512((seed || ':' || i)::bytea), 'base64'), E'\n', ''),
+        '' ORDER BY i), 3000)
+    FROM generate_series(1, 40) i
+$$;
+SELECT pg_temp.ev('long:' || label, 820 + n, kind, 32512 + n, 32512 + n,
+    jsonb_build_object(key, pg_temp.long(label)))
+FROM (VALUES
+    (1, 'to', 'SurfaceBound', 'to'),
+    (2, 'registrant', 'SurfaceBound', 'registrant'),
+    (3, 'owner', 'SurfaceBound', 'owner')
+) long(n, label, kind, key);
+
+-- Bare: 40 hex digits without 0x under each key.
+SELECT pg_temp.ev('bare:' || label, 830 + n, kind, 32528 + n, 32528 + n,
+    jsonb_build_object(key, '00000000000000000000000000000000000fedcb'))
+FROM (VALUES
+    (1, 'transfer', 'TokenControlTransferred', 'to'),
+    (2, 'grant', 'RegistrationGranted', 'registrant'),
+    (3, 'owner', 'AuthorityTransferred', 'owner')
+) bare(n, label, kind, key);
+
+-- Mixed: a recipient stored with mixed case, as a checksummed address prints.
+SELECT pg_temp.ev('mixed:transfer', 840, 'TokenControlTransferred', 32545, 32545,
+    jsonb_build_object('to', '0x00000000000000000000000000000000AbCdEf12'));
 "#;
 
 /// A small fixture for a Project publication: ENSv2 registry rows of the typical, multi-arm,
@@ -1171,7 +1281,7 @@ SELECT identity, 'ens', CASE WHEN name IS NOT NULL THEN 'ens:' || pg_temp.node(n
     pg_temp.rid(resource), kind, family, 1, 'ethereum-mainnet', 'block-' || block, block,
     'tx-' || identity, 0, 0, 'ens_v2_registry_resource_surface', 'canonical'::canonicality_state,
     visibility, CASE visibility WHEN 'candidate' THEN ARRAY['fixture'] ELSE ARRAY[]::text[] END,
-    state
+    state || jsonb_build_object('expiry', 1900000000)
 FROM (VALUES
     ('t:grant', 28929, 28929, 'RegistrationGranted', 'ens_v2_registry_l1', 100, 'activated',
         jsonb_build_object('registrant', pg_temp.addr(28673))),
