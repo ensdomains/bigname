@@ -185,8 +185,8 @@ async fn finish_unchecked(fixture: &Fixture) -> Result<FamilyOutcome> {
 }
 
 /// Each cut is a row of its own: every row runs, and the case fails naming each row whose
-/// families differ from block by block, whose pass was reset, or whose publication an oracle
-/// refuses.
+/// families differ from block by block, whose pass was reset, or whose publication one of the
+/// oracles a publication is checked against (`Fixture::apply_with`) refuses.
 async fn cuts_resume(prefix: &str, cuts: &[Cut]) -> Result<()> {
     let fixture = seeded(prefix).await?;
     let expected = block_by_block(&fixture).await?;
@@ -204,6 +204,9 @@ async fn cuts_resume(prefix: &str, cuts: &[Cut]) -> Result<()> {
             .collect();
         if finished.reset {
             differs.push("the pass was reset".to_owned());
+        }
+        if let Err(error) = fixture.assert_expiry_selector().await {
+            differs.push(format!("expiry selector oracle: {error:#}"));
         }
         if let Err(error) = fixture.assert_child_listing(CHAIN).await {
             differs.push(format!("child listing oracle: {error:#}"));
