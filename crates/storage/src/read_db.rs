@@ -2,7 +2,9 @@
 use std::ops::{Deref, DerefMut};
 
 use anyhow::{Context, Result};
-use sqlx::{PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection};
+use sqlx::{Database, PgConnection, PgPool, Postgres, TransactionManager, pool::PoolConnection};
+
+use crate::serving_pool::CancelOutcome;
 
 /// A pool, where each reader takes its own connection and, for a multi-statement read, its own
 /// REPEATABLE READ snapshot; or a caller's connection already inside one read-only REPEATABLE
@@ -106,15 +108,22 @@ async fn begin(pool: &PgPool, cancels: Option<&PgPool>) -> Result<ReadSnapshot> 
         }
         None => None,
     };
-    // What `Pool::begin` runs on the connection it acquires.
-    let transaction = Transaction::<'static, Postgres>::begin(conn, None)
+    Transactions::begin(&mut *conn, None)
         .await
         .context(BEGIN_FAILED)?;
     Ok(ReadSnapshot {
-        transaction: Some(transaction),
+        conn: Some(conn),
+        open: true,
         cancel,
     })
 }
+
+/// sqlx's own transaction control, which its `Transaction` wraps (sqlx 0.8.6,
+/// `sqlx-core/src/transaction.rs`). A read snapshot drives it on a connection it holds itself,
+/// so that a drop can close that connection rather than return it to the pool: sqlx's
+/// `Transaction` gives no access to its pool connection. It mirrors sqlx-core 0.8.6's
+/// `Transaction`, and a sqlx upgrade must re-check it (`cancel_tests.rs` pins the version).
+type Transactions = <Postgres as Database>::TransactionManager;
 
 /// A read-only REPEATABLE READ transaction one request reads on, used as its connection.
 ///
@@ -123,11 +132,15 @@ async fn begin(pool: &PgPool, cancels: Option<&PgPool>) -> Result<ReadSnapshot> 
 /// returns the connection only after that statement ends, so the statement and the connection
 /// would stay taken until `statement_timeout`. On a pool that cancels dropped reads
 /// (`crate::cancel_reads_on_drop`), a snapshot dropped before [`Self::commit`] or
-/// [`Self::rollback`] first asks the server to cancel whatever its backend runs, then drops the
-/// transaction. The cancel is sent while this snapshot still holds the connection, so it can only
-/// reach this read's own statement, never one of a later request on the same connection.
+/// [`Self::rollback`] first asks the server to cancel whatever its backend runs, then lets the
+/// connection go. The cancel is sent while this snapshot still holds the connection, which goes
+/// back to the pool only once the server has answered it. When no answer comes, the server may
+/// still run the cancel, so the connection is closed instead. Either way the cancel can only reach
+/// this read's own statement, never one of a later request.
 pub struct ReadSnapshot {
-    transaction: Option<Transaction<'static, Postgres>>,
+    conn: Option<PoolConnection<Postgres>>,
+    /// Whether the transaction has yet to end.
+    open: bool,
     /// The cancel pool and the backend pid, while a drop must cancel.
     cancel: Option<(PgPool, i32)>,
 }
@@ -135,22 +148,31 @@ pub struct ReadSnapshot {
 impl ReadSnapshot {
     pub async fn commit(mut self) -> Result<(), sqlx::Error> {
         self.cancel = None;
-        self.transaction.take().expect(OPEN).commit().await
+        Transactions::commit(self.conn.as_deref_mut().expect(OPEN)).await?;
+        self.open = false;
+        Ok(())
     }
 
     pub async fn rollback(mut self) -> Result<(), sqlx::Error> {
         self.cancel = None;
-        self.transaction.take().expect(OPEN).rollback().await
+        Transactions::rollback(self.conn.as_deref_mut().expect(OPEN)).await?;
+        self.open = false;
+        Ok(())
     }
 }
 
-const OPEN: &str = "a read snapshot holds its transaction until it ends";
+const OPEN: &str = "a read snapshot holds its connection until it is dropped";
 
 impl Drop for ReadSnapshot {
     fn drop(&mut self) {
-        let Some(transaction) = self.transaction.take() else {
+        let Some(mut conn) = self.conn.take() else {
             return;
         };
+        if self.open {
+            // As sqlx's `Transaction` does: queue a `ROLLBACK`, which goes out with the
+            // connection's next message.
+            Transactions::start_rollback(&mut *conn);
+        }
         let Some((cancels, pid)) = self.cancel.take() else {
             return;
         };
@@ -158,9 +180,13 @@ impl Drop for ReadSnapshot {
             return;
         };
         runtime.spawn(async move {
-            crate::serving_pool::cancel_statement(&cancels, pid).await;
+            if crate::serving_pool::cancel_statement(&cancels, pid).await
+                == CancelOutcome::Unsettled
+            {
+                conn.close_on_drop();
+            }
             // Only now may the connection go back to the pool.
-            drop(transaction);
+            drop(conn);
         });
     }
 }
@@ -169,13 +195,13 @@ impl Deref for ReadSnapshot {
     type Target = PgConnection;
 
     fn deref(&self) -> &PgConnection {
-        self.transaction.as_deref().expect(OPEN)
+        self.conn.as_deref().expect(OPEN)
     }
 }
 
 impl DerefMut for ReadSnapshot {
     fn deref_mut(&mut self) -> &mut PgConnection {
-        self.transaction.as_deref_mut().expect(OPEN)
+        self.conn.as_deref_mut().expect(OPEN)
     }
 }
 

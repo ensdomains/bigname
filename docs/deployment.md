@@ -1729,7 +1729,12 @@ stays out of the pool until the server answers, since the cancel could
 otherwise reach the next request on that connection. The cancel connection's
 own `statement_timeout` of 5 seconds bounds that wait while the server answers.
 A server that never answers, as on a dead socket, holds it for at most 20
-seconds, after which the cancel connection is closed. The cancel needs no
+seconds. The API then closes the request's connection and the cancel connection
+rather than reuse them, since the server could still run the cancel later. The
+closed connection's backend exits, so a late cancel reaches no other request,
+unless the OS has given that pid to a new API backend in the meantime. The
+request's transaction control follows sqlx-core 0.8.6 and must be re-checked on a
+sqlx upgrade. The cancel needs no
 privilege beyond the API role's own, and it works on a hot standby.
 
 ### Database connection budget

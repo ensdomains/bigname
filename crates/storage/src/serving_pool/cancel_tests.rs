@@ -622,6 +622,51 @@ async fn cancel_past_the_reply_backstop_frees_the_cancel_connection_for_the_next
     db.cleanup().await
 }
 
+/// The server answers no cancel within `CANCEL_REPLY_BACKSTOP`, then runs the withheld one
+/// late. The dropped read's connection must not be back in the pool by then, so a healthy read
+/// on the pool when the withheld cancel runs is not cancelled.
+#[tokio::test]
+async fn withheld_cancel_that_runs_after_the_backstop_cancels_no_later_read() -> Result<()> {
+    let delay = CANCEL_REPLY_BACKSTOP + Duration::from_secs(4);
+    let (db, pool, cancels) = late_cancel_setup(
+        "read_cancel_withheld",
+        u32::try_from(delay.as_secs())?,
+        None,
+    )
+    .await?;
+    let mut snapshot = crate::begin_read_snapshot(&pool).await?;
+    let pid = backend_pid(&mut snapshot).await?;
+    let logs = Logs::default();
+    let _capture = logs.capture();
+    drop(snapshot);
+    wait_until_logged(
+        &logs,
+        "no reply from the server",
+        CANCEL_REPLY_BACKSTOP + Duration::from_secs(3),
+    )
+    .await?;
+
+    let mut next = timeout(Duration::from_secs(5), pool.acquire())
+        .await
+        .context("the pool handed out no connection after the backstop")??;
+    let (next_pid, _) = server_state(db.pool(), &mut next).await?;
+    // The withheld cancel runs while this read does.
+    let healthy = sqlx::raw_sql("SELECT pg_sleep(6)")
+        .execute(&mut *next)
+        .await;
+    drop(next);
+    let reused = next_pid == pid;
+    ensure!(
+        healthy.is_ok() && !reused,
+        "the healthy read returned {healthy:?}; it ran on the dropped read's connection, whose \
+         cancel was still due: {reused}"
+    );
+
+    pool.close().await;
+    cancels.close().await;
+    db.cleanup().await
+}
+
 /// Fifty reads dropped at once, each mid-statement: one cancel connection serves every cancel
 /// within its wait, and every connection is free again.
 #[tokio::test]
@@ -729,4 +774,15 @@ async fn cancel_from_a_role_without_superuser_ends_that_roles_own_statement() ->
         .execute(db.pool())
         .await?;
     db.cleanup().await
+}
+
+/// The read snapshot drives sqlx's transaction control itself, as sqlx-core 0.8.6's
+/// `Transaction` does (`crate::read_db`). A sqlx upgrade must re-check that mirror, then this pin.
+#[test]
+fn read_snapshot_transaction_control_mirrors_the_locked_sqlx_core() {
+    let lock = include_str!("../../../../Cargo.lock");
+    assert!(
+        lock.contains("name = \"sqlx-core\"\nversion = \"0.8.6\"\n"),
+        "sqlx-core is no longer 0.8.6: re-check ReadSnapshot against its Transaction"
+    );
 }
