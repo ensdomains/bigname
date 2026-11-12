@@ -18,6 +18,8 @@ mod history;
 mod lifecycle;
 #[path = "v2_permissions_wrapper_registry_proof.rs"]
 mod proof;
+#[path = "v2_registries_by_role_holder_wrapper.rs"]
+mod registries_by_role_holder;
 
 const CHAIN: &str = "ethereum-sepolia";
 const BASE: i64 = 11_820_500;

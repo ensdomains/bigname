@@ -295,3 +295,6 @@ async fn v2_get_permissions_registry_namespace_reads_the_pinned_snapshot() -> Re
 
 #[path = "v2_permissions_registry_root_real.rs"]
 mod real_logs;
+
+#[path = "v2_registries_by_role_holder.rs"]
+mod registries_by_role_holder;

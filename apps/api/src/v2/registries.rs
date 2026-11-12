@@ -20,10 +20,13 @@ use super::{
 };
 use crate::AppState;
 
+#[path = "registries/by_role_holder.rs"]
+mod by_role_holder;
 #[path = "registries/labels.rs"]
 mod labels;
 #[path = "registries/role_counts.rs"]
 mod role_counts;
+pub(crate) use by_role_holder::get_registries;
 pub(crate) use labels::get_registry_labels;
 #[cfg(test)]
 pub(crate) use role_counts::test_hooks as role_counts_test_hooks;

@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use super::{ADVISORY, DROP_LIST, KEPT, PROJECT_GRANT_ADVISORY, PROJECT_GRANT_TABLE};
+use super::{
+    ADVISORY, DROP_LIST, KEPT, PROJECT_GRANT_ADVISORY, PROJECT_GRANT_ADVISORY_INSTALL,
+    PROJECT_GRANT_TABLE,
+};
 
 const DROP_SQL: &str = include_str!("../../../../ops/walk-index-set/drop.sql");
 const INSTALL_SQL: &str = include_str!("../../../../ops/walk-index-set/install.sql");
@@ -14,6 +17,27 @@ const ROLE_HOLDER_INSTALL_SQL: &str =
 const ROLE_HOLDER_MIGRATION: &str = include_str!(
     "../../../../migrations/20261112140000_project_grant_resolver_role_holder_index.sql"
 );
+const ROOT_ROLE_HOLDER_INSTALL_SQL: &str =
+    include_str!("../../../../ops/root-role-holder-index/install.sql");
+const ROOT_ROLE_HOLDER_MIGRATION: &str =
+    include_str!("../../../../migrations/20261112170000_project_grant_root_role_holder_index.sql");
+
+/// Each `project_grant` advisory index's install script path, the script and its
+/// schema-migration.
+const PROJECT_GRANT_SCRIPTS: &[(&str, &str, &str, &str)] = &[
+    (
+        "project_grant_resolver_role_holder_idx",
+        "ops/resolver-role-holder-index/install.sql",
+        ROLE_HOLDER_INSTALL_SQL,
+        ROLE_HOLDER_MIGRATION,
+    ),
+    (
+        "project_grant_root_role_holder_idx",
+        "ops/root-role-holder-index/install.sql",
+        ROOT_ROLE_HOLDER_INSTALL_SQL,
+        ROOT_ROLE_HOLDER_MIGRATION,
+    ),
+];
 
 /// The index names of every line of `script` that starts with `statement`, in script order.
 fn listed(script: &str, statement: &str) -> Vec<String> {
@@ -271,12 +295,25 @@ fn advisory_indexes_are_outside_the_walk_index_set() {
 
 /// The `project_grant` advisory indexes are on that table, outside the walk index set, and each
 /// one's statement and definition are those of its install script and its schema-migration.
-/// `docs/storage.md` names each one.
+/// The startup WARN names that install script, and `docs/storage.md` names each index.
 #[test]
 fn project_grant_advisory_indexes_match_their_scripts() {
     let walk_scripts = format!("{DROP_SQL}{INSTALL_SQL}");
-    assert!(!PROJECT_GRANT_ADVISORY.is_empty());
+    assert_eq!(PROJECT_GRANT_ADVISORY.len(), PROJECT_GRANT_SCRIPTS.len());
+    assert_eq!(
+        PROJECT_GRANT_ADVISORY.len(),
+        PROJECT_GRANT_ADVISORY_INSTALL.len()
+    );
     for index in PROJECT_GRANT_ADVISORY {
+        let (_, path, install_sql, migration) = PROJECT_GRANT_SCRIPTS
+            .iter()
+            .find(|(name, ..)| *name == index.name)
+            .unwrap_or_else(|| panic!("{} has no install script here", index.name));
+        assert!(
+            PROJECT_GRANT_ADVISORY_INSTALL.contains(&(index.name, *path)),
+            "{}: the startup WARN's install script",
+            index.name
+        );
         assert!(!walk_scripts.contains(index.name), "{}", index.name);
         assert!(
             index
@@ -286,13 +323,13 @@ fn project_grant_advisory_indexes_match_their_scripts() {
             index.name
         );
         assert!(
-            ROLE_HOLDER_INSTALL_SQL.contains(&format!("{};", index.create)),
+            install_sql.contains(&format!("{};", index.create)),
             "{}: install.sql's statement",
             index.name
         );
         for (file, text) in [
-            ("install.sql", ROLE_HOLDER_INSTALL_SQL),
-            ("the schema-migration", ROLE_HOLDER_MIGRATION),
+            ("install.sql", *install_sql),
+            ("the schema-migration", *migration),
         ] {
             assert!(
                 text.contains(&format!("$def${}$def$", index.definition)),

@@ -65,7 +65,7 @@ fn openapi_operations_equal_the_product_router_in_both_directions() {
     assert_eq!(registered, documented, "explicit product method/path pairs");
     assert_eq!(
         documented.len(),
-        21,
+        22,
         "update the selected-surface coverage deliberately"
     );
     assert!(
@@ -137,6 +137,13 @@ fn openapi_query_names_equal_every_route_specific_extractor() {
         (
             "/v1/resolvers/{chain_id}/{address}/records",
             list!("../v2/resolvers/records.rs"),
+        ),
+        (
+            "/v1/registries",
+            allowed(
+                include_str!("../v2/registries/by_role_holder.rs"),
+                "const ROLE_HOLDER_QUERY_PARAMS:",
+            ),
         ),
         (
             "/v1/registries/{chain_id}/{address}",
@@ -233,7 +240,7 @@ fn fern_sdk_names(document: &Value) -> Result<BTreeSet<(String, String)>, String
 #[test]
 fn every_operation_has_a_distinct_fern_sdk_group_and_method() {
     let names = fern_sdk_names(document()).unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(names.len(), 21, "one SDK method per operation");
+    assert_eq!(names.len(), 22, "one SDK method per operation");
     assert!(names.contains(&("lookup".into(), "lookup".into())));
 
     let spec = |operations: &[(&str, &str, Value)]| {

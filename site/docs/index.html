@@ -917,6 +917,20 @@ const ROUTES = [
   related: ['registry', 'subnames'],
 },
 {
+  id: 'registries-by-role-holder', method: 'GET', path: '/v1/registries', title: 'Registries by role holder',
+  summary: 'Lists the ENSv2 registries on which one address holds registry root roles, one row per registry. It reads the other way from <a href="#permissions">permissions</a> with <code>registry</code>.',
+  keywords: ['role_holder', 'roles', 'root', 'grant_count', 'powers', 'eac'],
+  sample: s => ({ role_holder: s.address || '0x…' }),
+  params: [{ name: 'role_holder', in: 'query', required: true, desc: 'The holder, an EVM hex address. A request without it is rejected with 400.' }, { name: 'chain_id', in: 'query', type: 'integer', desc: 'Keeps the registries on one numeric EVM chain.' }, P.cursor, P.pageSize],
+  response: {
+    fields: [['chain_id, address', 'The registry, with a lowercase address.'], ['grant_count', 'The holder\'s current ENSv2 root role grants at the address, one per registry contract.'], ['powers', 'The union of those grants\' powers. <a href="#permissions">permissions</a> with <code>registry</code> lists the root holders of one registry.'], ['page.total_count', 'Always null.']],
+    sample: { data: [{ chain_id: 1, address: '0x…', grant_count: 1, powers: ['admin_registrar', 'registrar'] }], page: { cursor: null, next_cursor: null, page_size: 50, total_count: null, has_more: false }, meta: AS_OF },
+  },
+  outcomes: [['200', 'The page, empty when the address holds no ENSv2 registry root role.'], ['400 invalid_input', '<code>role_holder</code> is missing or malformed, the chain is invalid or not served by this deployment, the cursor is invalid, or a parameter is unknown.'], ['409 stale', 'The publication is unavailable or changed during the read; retry with the same cursor.']],
+  notes: [{ h: 'What is listed', html: '<p>Only stored ENSv2 Enhanced Access Control grants on a registry\'s root resource are listed. <code>powers</code> are the roles granted there, not the holder\'s effective authority. A role on one name in a registry does not list the registry. For a <code>WrapperRegistry</code>, which wraps a name, <a href="#permissions">permissions</a> with <code>registry</code> may show other powers for the same holder, derived from the parent name, and holders this route does not list. A grant on a registry contract that no longer holds its address is still listed. Rows sort by chain, then by registry address, and the cursor binds the holder and the chain filter.</p>' }],
+  related: ['registry', 'permissions', 'registry-labels'],
+},
+{
   id: 'namespace', method: 'GET', path: '/v1/namespaces/{namespace}', title: 'Namespace',
   summary: 'Reports what this deployment can serve for a namespace, capability by capability, and which chains it maps to.',
   keywords: ['capabilities', 'networks', 'name_profile', 'subnames', 'name_history', 'verified_records', 'completeness'],
