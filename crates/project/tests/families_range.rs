@@ -1046,36 +1046,53 @@ async fn an_ensv2_path_fixture_rebuilds_equal_in_ranges_and_block_by_block() -> 
     // Each partition of the pass's catalogue build is a run under a budget of one, so the build
     // runs as one span and one key partition, 1 + 1 + 5 + 1 = 8 runs. The default 64 spans and 16
     // partitions would take 1 + 64 + 5 * 16 + 1 = 146 of the 200 runs a rebuild may take.
+    // The child listing differs from the relation at each publication a run leaves before the
+    // children stream finished (`families_support/child_listing.rs`).
+    let mut unfinished = 0;
     for events in [1, 2, families::MAX_RANGE_EVENTS, u64::MAX] {
         for budget in [1, families::MAX_BLOCKS_PER_RUN, u64::MAX] {
             let options = in_ranges(12)
                 .with_range_caps(families::MAX_RANGE_BLOCKS, events)
                 .with_max_blocks_per_run(budget)
                 .with_compose_builder_partitions(1, 1);
-            let ranges = rebuild_in_runs_equal(&fixture, 12, &options).await?;
+            let (ranges, before_children) = rebuild_in_runs_equal(&fixture, 12, &options).await?;
             ensure!(ranges > 0, "events {events}, budget {budget}: no range");
+            unfinished += before_children;
         }
     }
+    fixture.expect_listing_skips(unfinished);
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
 
 /// Rebuild at `target` with `options`, one run after another until the marker reaches it, and
 /// require every family table and the marker (without its generation) as they stood before.
-/// Returns the ranges the runs applied.
+/// Returns the ranges the runs applied and the runs that left a publication before the pass's
+/// children stream finished: still in the ranges, or in the names, leads or children stream.
 async fn rebuild_in_runs_equal(
     fixture: &Fixture,
     target: i64,
     options: &FamilyOptions,
-) -> Result<u64> {
+) -> Result<(u64, usize)> {
     let incremental = fixture.exact().await?;
-    let (mut mode, mut runs, mut ranges) = (FamilyMode::Rebuild, 0, 0);
+    let (mut mode, mut runs, mut ranges, mut unfinished) = (FamilyMode::Rebuild, 0, 0, 0);
     loop {
         let outcome = fixture.apply_with(target, mode.clone(), options).await?;
         ensure!(
             !outcome.reset || runs == 0,
             "run {runs} restarted the rebuild"
         );
+        let record = fixture.repair_record().await?.unwrap_or_default();
+        let before_children = match record["state"].as_str() {
+            Some("rebuilding") => record["composed_block"].is_null(),
+            Some("composing") => {
+                matches!(record["compose_stream"].as_i64(), None | Some(0 | 7 | 5))
+            }
+            _ => false,
+        };
+        if outcome.marker.is_some() && before_children {
+            unfinished += 1;
+        }
         ranges += outcome.ranges;
         runs += 1;
         mode = FamilyMode::Normal;
@@ -1091,5 +1108,5 @@ async fn rebuild_in_runs_equal(
             "a rebuild in {runs} runs at {target} left {table} as {now}, not {was}"
         );
     }
-    Ok(ranges)
+    Ok((ranges, unfinished))
 }
