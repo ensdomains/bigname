@@ -166,7 +166,7 @@ pub use primary_name::{
     load_primary_name_current, load_primary_name_current_snapshot,
     load_primary_name_current_snapshots, normalized_claim_name,
 };
-pub use read_db::{ReadDb, begin_read_snapshot};
+pub use read_db::{ReadDb, ReadSnapshot, begin_read_snapshot};
 #[cfg(any(test, feature = "test-support"))]
 pub use record_inventory::explain_record_inventory_abi_evidence_for_test;
 pub use record_inventory::{
@@ -198,7 +198,9 @@ pub use resolution_support::{
     supports_resolution_verified_lookup_record, try_classify_supported_resolution_topology,
 };
 pub use resolver::ResolverCurrentRow;
-pub use serving_pool::{IDLE_IN_TRANSACTION_MARGIN_MS, MAX_REQUEST_DEADLINE_MS};
+pub use serving_pool::{
+    IDLE_IN_TRANSACTION_MARGIN_MS, MAX_REQUEST_DEADLINE_MS, cancel_reads_on_drop,
+};
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, SelectedSnapshot,
     SnapshotAt, SnapshotConsistency, SnapshotPositionRequirement, SnapshotProjectionRead,
@@ -238,7 +240,9 @@ pub const fn default_database_url() -> &'static str {
 }
 
 /// The API's request pool. `request_deadline` bounds how long a session may sit idle inside a
-/// transaction (`serving_pool::idle_in_transaction_setting`).
+/// transaction (`serving_pool::idle_in_transaction_setting`). A read snapshot dropped before it
+/// ends cancels its statement through one more connection, `<application_name>-cancel`
+/// ([`cancel_reads_on_drop`]).
 pub async fn connect_phase_with_application_name_and_statement_timeout(
     config: &DatabaseConfig,
     application_name: &str,
@@ -249,14 +253,16 @@ pub async fn connect_phase_with_application_name_and_statement_timeout(
         !statement_timeout.is_zero(),
         "PostgreSQL statement timeout must be greater than zero"
     );
-    connect_phase_inner(
+    let pool = connect_phase_inner(
         config,
         application_name,
         statement_timeout,
         request_deadline,
         config.max_connections,
     )
-    .await
+    .await?;
+    cancel_reads_on_drop(&pool, &format!("{application_name}-cancel"));
+    Ok(pool)
 }
 
 pub async fn connect_phase_reserved_readiness_pool(

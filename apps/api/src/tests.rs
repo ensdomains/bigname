@@ -673,3 +673,6 @@ mod v2_ens_v1_registry_read;
 mod v2_ens_v1_registry_read_mainnet;
 #[path = "tests/v2_legacy_lease_heal.rs"]
 mod v2_legacy_lease_heal;
+
+#[path = "tests/dropped_request_cancel.rs"]
+mod dropped_request_cancel;
