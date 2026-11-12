@@ -11,10 +11,10 @@ pub(crate) async fn with_child_count_cap<F: std::future::Future>(cap: u64, futur
     CHILD_COUNT_CAP.scope(cap, future).await
 }
 
-/// The subnames `page.total_count` and the registry overview's `counts.labels` count at most
-/// this many children (registrations, for the label count) and report `null` above it, the
-/// route default count cap. The label count reads only that many, which bounds it for a registry
-/// such as the `.eth` one; the subnames page still composes every child to order its rows.
+/// The subnames `page.total_count` and the registry overview's `counts.labels` report `null`
+/// above this many children (labels, for the label count), the route default count cap. The label
+/// count and an unfiltered total are stored counts; a filtered total stops counting one child
+/// past the cap.
 pub(crate) fn child_count_cap() -> u64 {
     #[cfg(test)]
     if let Ok(cap) = CHILD_COUNT_CAP.try_with(|cap| *cap) {

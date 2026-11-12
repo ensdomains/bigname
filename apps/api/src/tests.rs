@@ -1,5 +1,7 @@
 include!("tests/support.rs");
 
+#[path = "tests/child_listing_grant.rs"]
+mod child_listing_grant;
 #[path = "tests/fixture_floor.rs"]
 mod fixture_floor;
 #[path = "tests/openapi_contract.rs"]

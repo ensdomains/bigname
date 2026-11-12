@@ -252,6 +252,8 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
+    // The child listing tables are not here: the API starts without them and their reads check
+    // the grant themselves (`bigname_storage::unreadable_child_listing_tables`).
     assert_eq!(actual.len(), 77);
     database.cleanup().await
 }

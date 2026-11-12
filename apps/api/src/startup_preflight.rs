@@ -33,6 +33,46 @@ pub(crate) async fn ensure_verified_lookup_ddl_available(pool: &PgPool) -> Resul
     Ok(())
 }
 
+/// The routes that read the stored child listing.
+const CHILD_LISTING_ROUTES: &str = "GET /v1/names/{name}/subnames, GET /v1/registries/{chain_id}/{address}/labels, include=counts on /v1/names/{name}, /v1/registries/{chain_id}/{address} and the address name lists";
+
+/// Warns once, naming the tables and [`CHILD_LISTING_ROUTES`], when the API role cannot read the
+/// stored child listing (docs/deployment.md, The child listing family and its counts). It never
+/// refuses: those routes check the grant per read and answer `internal_error` without it, and
+/// every other route serves. A catalog read that fails only warns too. Returns the tables named.
+pub(crate) async fn warn_on_unreadable_child_listing(pool: &PgPool) -> Vec<String> {
+    let unreadable = match bigname_storage::phase_schema_exists(pool).await {
+        Ok(false) => return Vec::new(),
+        Ok(true) => bigname_storage::unreadable_child_listing_tables(pool).await,
+        Err(error) => Err(error),
+    };
+    match unreadable {
+        Ok(unreadable) => {
+            if !unreadable.is_empty() {
+                tracing::warn!(
+                    service = "api",
+                    relations = %unreadable.join(","),
+                    routes = CHILD_LISTING_ROUTES,
+                    "the API role cannot read the stored child listing; these routes answer \
+                     internal_error until it is granted SELECT (docs/deployment.md, The child \
+                     listing family and its counts)"
+                );
+            }
+            unreadable
+        }
+        Err(error) => {
+            tracing::warn!(
+                service = "api",
+                error = %error,
+                routes = CHILD_LISTING_ROUTES,
+                "the API could not check its read of the stored child listing and serves \
+                 without checking it"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// Refuses to serve, unless `check` is `warn`, when an index `ops/walk-index-set/drop.sql` drops is
 /// not a valid, ready index on `normalized_events` in the database the API reads, which on a
 /// physical standby is the primary's catalog as replayed. It reads the catalog only. Returns how

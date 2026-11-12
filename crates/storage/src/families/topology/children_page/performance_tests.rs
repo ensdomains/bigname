@@ -3,12 +3,17 @@
 //! Project registry-children fixtures exercise that write path); summary composition has no
 //! surface to compose for them. The previous correlated arm fallback scanned all candidates
 //! once per child, even when the requested page had only five rows.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
 use sqlx::raw_sql;
 
+use super::super::listing_page::capped_count_query;
 use super::*;
+use super::{
+    listing_support::{checked_page, compose_listing},
+    served_page::served_page_query,
+};
 
 pub(super) const CHILDREN: i64 = 2_000;
 pub(super) const PARENT: &str = "ens:parent";
@@ -23,7 +28,7 @@ async fn a_small_child_page_does_not_rescan_all_candidates_per_child() -> Result
         let mut conn = database.pool().acquire().await?;
         install(&mut conn).await?;
         let filter = ChildrenCurrentPageFilter::default();
-        let query = page_query(PARENT, &filter, None, None, 6, None);
+        let query = served_page_query(PARENT, &filter, None, None, 6);
         raw_sql(&format!(
             "PREPARE children (text, text, bigint) AS {}",
             query.sql()
@@ -43,17 +48,16 @@ async fn a_small_child_page_does_not_rescan_all_candidates_per_child() -> Result
             .await?;
             assert_linear_candidates(&plan[0]["Plan"])?;
             ensure!(plan[0]["Plan"]["Actual Rows"] == 6, "{mode}: {plan}");
-            let first = page(&mut conn, PARENT, &filter, None, None, 5, None).await?;
+            let first = checked_page(&mut conn, PARENT, &filter, None, None, 5).await?;
             ensure!(first.total_count == CHILDREN as u64 && first.rows.len() == 5);
             ensure!(first.rows[0].child_logical_name_id == child_id(1));
-            let second = page(
+            let second = checked_page(
                 &mut conn,
                 PARENT,
                 &filter,
                 None,
                 first.next_cursor.as_ref(),
                 5,
-                None,
             )
             .await?;
             ensure!(second.total_count == first.total_count && second.rows.len() == 5);
@@ -66,9 +70,10 @@ async fn a_small_child_page_does_not_rescan_all_candidates_per_child() -> Result
     result
 }
 
-/// A capped total counts at most `cap + 1` of the parent's children, under a `Limit` above the
-/// count's scan of `children`, while the page's rows and cursors are those of the uncapped page.
-/// At the cap, the total is exact.
+/// A capped total reads at most `cap + 1`, while the page's rows and cursors are those of the
+/// uncapped page; at the cap the total is exact. The unfiltered total is the stored count, read
+/// no higher than `cap + 1`, and a filtered total counts the child listing under a `Limit` of
+/// `cap + 1` rows above its scan of `project_child_listing`.
 #[tokio::test]
 async fn a_capped_total_stops_counting_at_the_cap() -> Result<()> {
     const CAP: u64 = 200;
@@ -79,41 +84,57 @@ async fn a_capped_total_stops_counting_at_the_cap() -> Result<()> {
     let result = async {
         let mut conn = database.pool().acquire().await?;
         install(&mut conn).await?;
-        let filter = ChildrenCurrentPageFilter::default();
-        let mut cursor = None;
-        for _ in 0..2 {
-            let uncapped = page(&mut conn, PARENT, &filter, None, cursor.as_ref(), 5, None).await?;
-            let capped = page(
-                &mut conn,
-                PARENT,
-                &filter,
-                None,
-                cursor.as_ref(),
-                5,
-                Some(CAP),
-            )
-            .await?;
-            ensure!(uncapped.total_count == CHILDREN as u64);
+        compose_listing(&mut conn).await?;
+        let fenced = ChildrenCurrentPageFilter {
+            include_expired: false,
+            ..ChildrenCurrentPageFilter::default()
+        };
+        for (name, filter) in [
+            ("unfiltered", ChildrenCurrentPageFilter::default()),
+            ("fenced", fenced),
+        ] {
+            let mut cursor = None;
+            let mut exact_total = None;
+            for _ in 0..2 {
+                let uncapped =
+                    page(&mut conn, PARENT, &filter, None, cursor.as_ref(), 5, None).await?;
+                let capped = page(
+                    &mut conn,
+                    PARENT,
+                    &filter,
+                    None,
+                    cursor.as_ref(),
+                    5,
+                    Some(CAP),
+                )
+                .await?;
+                ensure!(
+                    uncapped.total_count > CAP,
+                    "{name}: uncapped total {}",
+                    uncapped.total_count
+                );
+                ensure!(
+                    capped.total_count == CAP + 1,
+                    "{name}: capped total {}",
+                    capped.total_count
+                );
+                ensure!(capped.rows == uncapped.rows && capped.next_cursor == uncapped.next_cursor);
+                exact_total = Some(uncapped.total_count);
+                cursor = capped.next_cursor;
+            }
+            let at_cap = exact_total.context("an uncapped page")?;
+            let exact = page(&mut conn, PARENT, &filter, None, None, 5, Some(at_cap)).await?;
             ensure!(
-                capped.total_count == CAP + 1,
-                "capped total {}",
-                capped.total_count
+                exact.total_count == at_cap,
+                "{name}: total at the cap {}",
+                exact.total_count
             );
-            ensure!(capped.rows == uncapped.rows && capped.next_cursor == uncapped.next_cursor);
-            cursor = capped.next_cursor;
         }
-        let at_cap = u64::try_from(CHILDREN)?;
-        let exact = page(&mut conn, PARENT, &filter, None, None, 5, Some(at_cap)).await?;
-        ensure!(
-            exact.total_count == at_cap,
-            "total at the cap {}",
-            exact.total_count
-        );
 
         let total_limit = i64::try_from(CAP + 1)?;
-        let query = page_query(PARENT, &filter, None, None, 6, Some(total_limit));
+        let query = capped_count_query(PARENT, &fenced, None, Some(total_limit));
         raw_sql(&format!(
-            "PREPARE capped_children (text, text, bigint, bigint) AS {}",
+            "PREPARE capped_total (text, text, bigint) AS {}",
             query.sql()
         ))
         .execute(&mut *conn)
@@ -123,15 +144,14 @@ async fn a_capped_total_stops_counting_at_the_cap() -> Result<()> {
                 .execute(&mut *conn)
                 .await?;
             let plan: Value = sqlx::query_scalar(&format!(
-                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE capped_children \
-                 ('{PARENT}', '{}', 6, {total_limit})",
-                bigname_content_hash::PROJECTION_CONTENT_HASH
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE capped_total \
+                 ('{PARENT}', '{PARENT}', {total_limit})"
             ))
             .fetch_one(&mut *conn)
             .await?;
             ensure!(
                 capped_total_scan(&plan[0]["Plan"], CAP + 1),
-                "{mode}: no Limit of {} rows above the total's scan of children: {plan}",
+                "{mode}: no Limit of {} rows above the total's scan of the child listing: {plan}",
                 CAP + 1
             );
         }
@@ -142,17 +162,16 @@ async fn a_capped_total_stops_counting_at_the_cap() -> Result<()> {
     result
 }
 
-/// A `Limit` returning `kept` rows directly above a scan of the `children` CTE that also
+/// A `Limit` returning `kept` rows directly above a scan of `project_child_listing` that also
 /// returned no more than `kept`.
 fn capped_total_scan(plan: &Value, kept: u64) -> bool {
     let rows = |node: &Value| node["Actual Rows"].as_u64().unwrap_or(u64::MAX);
-    let capped = plan["Node Type"] == "Limit"
-        && rows(plan) == kept
-        && plan["Plans"].as_array().into_iter().flatten().any(|child| {
-            child["Node Type"] == "CTE Scan"
-                && child["CTE Name"] == "children"
-                && rows(child) <= kept
-        });
+    let capped =
+        plan["Node Type"] == "Limit"
+            && rows(plan) == kept
+            && plan["Plans"].as_array().into_iter().flatten().any(|child| {
+                child["Relation Name"] == "project_child_listing" && rows(child) <= kept
+            });
     capped
         || plan["Plans"]
             .as_array()
@@ -277,16 +296,8 @@ async fn child_arm_selection_and_a_later_edge_under_another_parent_are_preserved
         .await?;
         let filter = ChildrenCurrentPageFilter::default();
         // Both arms, no summary: refuse the ambiguous child.
-        let ambiguous = page(
-            &mut conn,
-            PARENT,
-            &filter,
-            None,
-            None,
-            CHILDREN as u64,
-            None,
-        )
-        .await?;
+        let ambiguous =
+            checked_page(&mut conn, PARENT, &filter, None, None, CHILDREN as u64).await?;
         ensure!(ambiguous.total_count == (CHILDREN - 1) as u64);
         ensure!(
             ambiguous
@@ -309,16 +320,8 @@ async fn child_arm_selection_and_a_later_edge_under_another_parent_are_preserved
             .bind(arm)
             .execute(&mut *conn)
             .await?;
-            let selected = page(
-                &mut conn,
-                PARENT,
-                &filter,
-                None,
-                None,
-                CHILDREN as u64,
-                None,
-            )
-            .await?;
+            let selected =
+                checked_page(&mut conn, PARENT, &filter, None, None, CHILDREN as u64).await?;
             let row = selected
                 .rows
                 .iter()
@@ -350,16 +353,7 @@ async fn child_arm_selection_and_a_later_edge_under_another_parent_are_preserved
         ))
         .execute(&mut *conn)
         .await?;
-        let moved = page(
-            &mut conn,
-            PARENT,
-            &filter,
-            None,
-            None,
-            CHILDREN as u64,
-            None,
-        )
-        .await?;
+        let moved = checked_page(&mut conn, PARENT, &filter, None, None, CHILDREN as u64).await?;
         ensure!(moved.total_count == CHILDREN as u64);
         ensure!(
             moved
@@ -416,7 +410,7 @@ async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
         .execute(&mut *conn)
         .await?;
         let filter = ChildrenCurrentPageFilter::default();
-        let query = page_query(PARENT, &filter, None, None, 6, None);
+        let query = served_page_query(PARENT, &filter, None, None, 6);
         raw_sql(&format!(
             "PREPARE children (text, text, bigint) AS {}",
             query.sql()
@@ -446,12 +440,12 @@ async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
                 .find(|row| row.child_logical_name_id == child)
                 .map(|row| (row.released_lease, row.token_holder.clone()))
         };
-        let first = page(&mut conn, PARENT, &filter, None, None, 5, None).await?;
+        let first = checked_page(&mut conn, PARENT, &filter, None, None, 5).await?;
         ensure!(served(&first) == Some((true, None)), "{first:?}");
         raw_sql(&lease("again", "RegistrationGranted", 100, "0, 0"))
             .execute(&mut *conn)
             .await?;
-        let again = page(&mut conn, PARENT, &filter, None, None, 5, None).await?;
+        let again = checked_page(&mut conn, PARENT, &filter, None, None, 5).await?;
         ensure!(served(&again) == Some((false, None)), "{again:?}");
         let buyer = "0x2222222222222222222222222222222222222222";
         raw_sql(&lease_to(
@@ -463,7 +457,7 @@ async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
         ))
         .execute(&mut *conn)
         .await?;
-        let late = page(&mut conn, PARENT, &filter, None, None, 5, None).await?;
+        let late = checked_page(&mut conn, PARENT, &filter, None, None, 5).await?;
         ensure!(served(&late) == Some((false, None)), "{late:?}");
         raw_sql(&lease_to(
             "sold",
@@ -474,7 +468,7 @@ async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
         ))
         .execute(&mut *conn)
         .await?;
-        let sold = page(&mut conn, PARENT, &filter, None, None, 5, None).await?;
+        let sold = checked_page(&mut conn, PARENT, &filter, None, None, 5).await?;
         ensure!(
             served(&sold) == Some((false, Some(buyer.to_owned()))),
             "{sold:?}"
@@ -497,51 +491,57 @@ fn lifecycle_scans(plan: &Value) -> Vec<&Value> {
     scans
 }
 
-/// The child counts read no served field of a child, so the planner drops the lifecycle probes
-/// of the children relation from their statements: a parent count never probes the lifecycle
-/// table, however many of its children have no name surface.
+/// Row 26 of the TYR-455 table: a parent's count, the per-child counts and a registry's label
+/// count are primary-key reads of the counts family. They read no child row and compose no
+/// child, so no edge or lifecycle row is scanned however many children the parent has.
 #[tokio::test]
-async fn child_counts_do_not_probe_the_lifecycle_table() -> Result<()> {
+async fn child_counts_read_the_counts_by_key() -> Result<()> {
     let database = TestDatabase::create(
-        TestDatabaseConfig::new("children_count_lifecycle_plan").pool_max_connections(1),
+        TestDatabaseConfig::new("children_count_plan").pool_max_connections(1),
     )
     .await?;
     let result = async {
         let mut conn = database.pool().acquire().await?;
         install(&mut conn).await?;
-        let parents = vec![PARENT.to_owned()];
-        for (name, types, query, arguments) in [
+        super::listing_support::compose_listing(&mut conn).await?;
+        raw_sql("ANALYZE project_child_listing_count; SET enable_seqscan = off")
+            .execute(&mut *conn)
+            .await?;
+        for (name, types, sql, arguments) in [
             (
                 "one_count",
                 "text, text",
-                count_query(PARENT),
-                format!("'{PARENT}'"),
+                super::super::listing_page::COUNT,
+                format!("'{PARENT}', ''"),
             ),
             (
                 "many_counts",
-                "text[], text",
-                counts_query(&parents),
+                "text[]",
+                super::super::listing_page::COUNTS,
                 format!("ARRAY['{PARENT}']"),
             ),
         ] {
-            ensure!(
-                !query.sql().contains("wanted_node"),
-                "{name} narrows its children"
-            );
-            raw_sql(&format!("PREPARE {name} ({types}) AS {}", query.sql()))
+            raw_sql(&format!("PREPARE {name} ({types}) AS {sql}"))
                 .execute(&mut *conn)
                 .await?;
             let plan: Value = sqlx::query_scalar(&format!(
-                "EXPLAIN (FORMAT JSON) EXECUTE {name} ({arguments}, '{}')",
-                bigname_content_hash::PROJECTION_CONTENT_HASH
+                "EXPLAIN (FORMAT JSON) EXECUTE {name} ({arguments})"
             ))
             .fetch_one(&mut *conn)
             .await?;
+            let text = plan.to_string();
             ensure!(
-                lifecycle_scans(&plan[0]["Plan"]).is_empty(),
-                "{name} probes the lifecycle table: {plan}"
+                text.contains("project_child_listing_count_pkey"),
+                "{name} does not read the counts by key: {plan}"
+            );
+            ensure!(
+                edge_scans(&plan[0]["Plan"]).is_empty()
+                    && lifecycle_scans(&plan[0]["Plan"]).is_empty()
+                    && !text.contains("\"project_child_listing\""),
+                "{name} reads child rows: {plan}"
             );
         }
+        ensure!(count(&mut conn, PARENT, None).await? == CHILDREN as u64);
         Ok(())
     }
     .await;
@@ -578,7 +578,7 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
         .await?;
         let filter = ChildrenCurrentPageFilter::default();
         ensure!(
-            !page_query(PARENT, &filter, None, None, 6, None)
+            !served_page_query(PARENT, &filter, None, None, 6)
                 .sql()
                 .contains("wanted_node")
         );

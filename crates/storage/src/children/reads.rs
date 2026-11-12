@@ -47,9 +47,8 @@ pub async fn load_registry_children_current_page(
 }
 
 /// Exact count of the labels `registry_address` holds on `chain_id` at the current family
-/// publication, under the name the registry serves there, or `None` when the registry holds more
-/// than `cap` registrations under that name: the count then stops reading at `cap + 1`
-/// registrations and is not computed.
+/// publication, under the name the registry serves there, or `None` when those labels are more
+/// than `cap`. The count is stored, so the cap bounds what is served, not what is read.
 pub async fn count_registry_labels_current(
     db: impl Into<crate::ReadDb<'_>>,
     chain_id: &str,

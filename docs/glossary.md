@@ -2821,7 +2821,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
 | F15, name summary | `project_name_summary` | `derived/summary.rs` |
 | F16, ENSv2 registry entries | `project_ens_v2_entry_owner`, `project_ens_v2_registry_parent` | `ens_v2_registry.rs` |
-| F17, child listing | `project_child_listing`, `project_child_listing_count`, `project_child_preimage_watermark` (shared with F18) | `derived/children.rs` |
+| F17, child listing | `project_child_listing`, `project_child_listing_count`, `project_child_preimage_watermark` (shared with F18) | `derived/children.rs`, `derived/children/sources.rs` |
 | F18, address listing | `project_address_listing` | `derived/address_listing.rs` |
 | F20, event counts | `project_event_count` | `event_counts.rs` |
 
