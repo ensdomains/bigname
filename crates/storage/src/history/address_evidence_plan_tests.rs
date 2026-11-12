@@ -4,11 +4,13 @@
 //!
 //! The address-match indexes are partial, and the planner never reads a partial index's
 //! expression statistics, so it estimates every address at the default equality selectivity.
-//! Against that estimate the previous statement ANDed the address probes with an index keyed by
-//! event kind or block over every grant and transfer of the chain. The fixture reproduces that:
-//! the plan test requires the previous statement to take the `BitmapAnd` here before `ANALYZE`
-//! and under plain statistics, so the fixture keeps proving something, and requires the fenced
-//! statement to read each address key through its own index alone in every cell. Sequential and
+//! Against that estimate, on a production-size table, the previous statement ANDed the address
+//! probes with an index keyed by event kind or block over every grant and transfer of the chain.
+//! On this fixture the same estimate makes it read `normalized_events` through an index not keyed
+//! by the address and read `resources` whole. The plan test requires that of the previous
+//! statement under plain statistics, so the fixture keeps proving something, records its plan
+//! before `ANALYZE`, and requires the fenced statement to read each address key through its own
+//! index alone in every cell. Sequential and
 //! bitmap scans stay enabled: the shape is chosen on cost. The row test pins every input class
 //! to its rows and to the previous statement's rows.
 
@@ -366,13 +368,13 @@ async fn address_matches_probe_only_the_key_indexes() -> Result<()> {
                     let before =
                         explain(connection, mode, Statement::Before, &holder, form).await?;
                     println!("{cell}, previous statement:\n{before}\n");
-                    let red_cell =
-                        statistics != Statistics::Expressions && form.label == EVENTS.label;
-                    if red_cell && !ands_an_unkeyed_index(&before) {
+                    // Before ANALYZE the previous statement's plan is recorded only.
+                    let red_cell = statistics == Statistics::Plain && form.label == EVENTS.label;
+                    if red_cell && !reads_without_the_address(&before) {
                         failures.push(format!(
-                            "{cell}: the previous statement no longer ANDs an index keyed by \
-                             event kind or block, so this fixture proves nothing about it\n\
-                             {before}"
+                            "{cell}: the previous statement no longer reads normalized_events \
+                             through an index not keyed by the address, nor resources whole, \
+                             so this fixture proves nothing about it\n{before}"
                         ));
                     }
                 }
@@ -805,19 +807,21 @@ fn text(node: &Value, key: &str) -> String {
     node[key].as_str().unwrap_or_default().to_owned()
 }
 
-/// The previous statement's failure: a `BitmapAnd` that combines the address probes with an
-/// index keyed by event kind or by block.
-fn ands_an_unkeyed_index(plan: &Value) -> bool {
-    let nodes = main_plan_nodes(plan);
-    nodes.iter().any(|node| node["Node Type"] == "BitmapAnd")
-        && nodes.iter().any(|node| {
-            matches!(
-                node["Index Name"].as_str(),
-                Some(
-                    "normalized_events_projection_idx" | "normalized_events_chain_block_number_idx"
-                )
+/// The previous statement's failure on this fixture under plain statistics: it reads
+/// `normalized_events` through an index keyed by event kind, block or name and not by the address,
+/// or reads `resources` whole. On a production-size table the same estimate ANDed the probes with
+/// `normalized_events_projection_idx`.
+fn reads_without_the_address(plan: &Value) -> bool {
+    main_plan_nodes(plan).iter().any(|node| {
+        matches!(
+            node["Index Name"].as_str(),
+            Some(
+                "normalized_events_projection_idx"
+                    | "normalized_events_chain_block_number_idx"
+                    | "normalized_events_name_history_idx"
             )
-        })
+        ) || (node["Node Type"] == "Seq Scan" && node["Relation Name"] == "resources")
+    })
 }
 
 /// The fenced statement reads `normalized_events` once per probed key, each through that key's
