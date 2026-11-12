@@ -7289,3 +7289,23 @@ row, as block-by-block publication gives them.
   interrupted pass from going unnoticed.
 - The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
   Ingest redo.
+
+## The current-name lookup by resource is keyed by chain
+
+`GET /v1/permissions?address=…` and a resolver's `/roles` list name each row's resource
+through one lookup: the names bound to the page's resources in `project_binding_candidate`.
+Before this build it filtered on the resource id alone. Every index of that table leads with
+the chain, so the lookup walked the whole of `project_binding_candidate_resource_idx` on every
+request, and a page of five rows took seconds. The lookup now takes the chains of the
+request's publication as the leading key, so it seeks that index.
+
+- The rows are the same. A binding candidate is on its resource's chain, and both routes
+  pass every chain of their publication. No response changes.
+- It rotates the [projection content hash](glossary.md#projection-content-hash), because the
+  lookup is in a hashed composition file (`crates/storage/src/families/name/batch.rs`). The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not move.
+- The rotation is formal. Project never sends the lookup, so the full-range Project redo
+  rewrites every projected row to the same values. The release that carries the change redoes
+  Project anyway, so it adds no redo of its own.
+- It adds no schema-migration, index, table, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
