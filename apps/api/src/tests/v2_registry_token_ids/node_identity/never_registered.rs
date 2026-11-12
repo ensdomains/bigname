@@ -376,13 +376,15 @@ async fn a_never_registered_name_resolves_through_its_2017_resolver() -> Result<
     let resolves = holder_names(&database, "resolves_to").await?;
     let listed = named(&resolves, &namehash);
     assert_eq!(listed.len(), 1, "{resolves:#}");
+    // A resolver's bound names list a name with no binding only when its family enumerates
+    // bindings, which no ENSv1 resolver does, as for an ownerless name (docs/api-v1.md).
     let bound = get(
         &database,
         &format!("/v1/resolvers/1/{resolver:#x}?page_size=100"),
     )
     .await?;
     assert!(
-        bound.to_string().contains(&name_of(b"pointed")),
+        !bound.to_string().contains(&name_of(b"pointed")),
         "{bound:#}"
     );
     // What it serves as a name with no registration.
