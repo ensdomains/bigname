@@ -28,8 +28,9 @@
 //! `pg_cancel_backend` for its backend through it, and only then gives its connection back
 //! (`crate::ReadSnapshot`). The cancel waits at most `CANCEL_WAIT` for that connection and the
 //! reply together. Past that, or on an error, it logs a warning and the statement runs on as it
-//! would without the cancel. PostgreSQL ignores a cancel that reaches a backend between
-//! statements. The cancel needs no privilege beyond the role the request pool connects as, and it
+//! would without the cancel. A cancel that was sent but not answered may still reach the server
+//! later, so the read's connection and the cancel connection are then closed, not reused.
+//! PostgreSQL ignores a cancel that reaches a backend between statements. The cancel needs no privilege beyond the role the request pool connects as, and it
 //! works on a hot standby. See the PostgreSQL documentation, "Server Signaling Functions" and
 //! "Hot Standby", "Administrator's Overview".
 
@@ -159,9 +160,11 @@ pub fn cancel_reads_on_drop(requests: &PgPool, application_name: &str) {
         .as_ref()
         .clone()
         .application_name(application_name);
+    // A dead cancel connection fails the cancel itself, so no ping goes ahead of it.
     let cancels = PgPoolOptions::new()
         .max_connections(1)
         .min_connections(0)
+        .test_before_acquire(false)
         .connect_lazy_with(options);
     register_cancel_pool(requests, cancels);
 }
@@ -187,25 +190,56 @@ fn same_pool(left: &PgPool, right: &PgPool) -> bool {
 
 /// Asks the server to cancel the statement backend `pid` is running, if any. The caller still
 /// holds that backend's connection, so the pid cannot belong to another request.
-pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) {
-    let sent = tokio::time::timeout(CANCEL_WAIT, async {
-        let mut conn = cancels.acquire().await?;
+///
+/// Returns whether that connection may go back to the pool. It may not when the cancel was sent
+/// but its reply did not come: the server can still run the cancel once the connection serves
+/// another request. The cancel connection is closed then as well, since its reply is still due and
+/// the pool would wait for it before handing the connection to the next cancel.
+pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) -> bool {
+    let deadline = tokio::time::Instant::now() + CANCEL_WAIT;
+    let mut conn = match tokio::time::timeout_at(deadline, cancels.acquire()).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(error)) => {
+            tracing::warn!(pid, %error, "{CANCEL_FAILED}");
+            return true;
+        }
+        Err(_) => {
+            tracing::warn!(
+                pid,
+                reason = "timed out waiting for the cancel connection",
+                "{CANCEL_FAILED}"
+            );
+            return true;
+        }
+    };
+    let replied = tokio::time::timeout_at(
+        deadline,
         sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
             .bind(pid)
-            .fetch_one(&mut *conn)
-            .await
-    })
+            .fetch_one(&mut *conn),
+    )
     .await;
-    match sent {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => tracing::warn!(pid, reason = "no such backend", "{CANCEL_FAILED}"),
-        Ok(Err(error)) => tracing::warn!(pid, %error, "{CANCEL_FAILED}"),
-        Err(_) => tracing::warn!(
-            pid,
-            reason = "timed out",
-            wait_ms = CANCEL_WAIT.as_millis() as u64,
-            "{CANCEL_FAILED}"
-        ),
+    match replied {
+        Ok(Ok(true)) => true,
+        Ok(Ok(false)) => {
+            tracing::warn!(pid, reason = "no such backend", "{CANCEL_FAILED}");
+            true
+        }
+        Ok(Err(error)) => {
+            conn.close_on_drop();
+            tracing::warn!(pid, %error, closed = true, "{CANCEL_FAILED}");
+            false
+        }
+        Err(_) => {
+            conn.close_on_drop();
+            tracing::warn!(
+                pid,
+                reason = "timed out waiting for the cancel reply",
+                closed = true,
+                "{CANCEL_FAILED}"
+            );
+            false
+        }
     }
 }
 

@@ -390,6 +390,7 @@ async fn read_dropped_while_the_cancel_pool_is_closed_warns_once_and_ends_its_st
 }
 
 /// The cancel waits at most `CANCEL_WAIT` for its connection, then lets the drop end as before.
+/// Nothing was sent, so the connection goes back to the pool.
 #[tokio::test]
 async fn read_dropped_while_the_cancel_connection_is_busy_gives_up_after_the_wait() -> Result<()> {
     let db = database("read_cancel_busy").await?;
@@ -402,9 +403,133 @@ async fn read_dropped_while_the_cancel_connection_is_busy_gives_up_after_the_wai
     ensure_active(db.pool(), pid).await?;
     let logged = logs.text();
     assert_eq!(logged.matches(CANCEL_FAILED).count(), 1, "{logged}");
-    assert!(logged.contains("timed out"), "{logged}");
-    acquire_by(&pool, Instant::now() + Duration::from_secs(5)).await?;
+    assert!(
+        logged.contains("timed out waiting for the cancel connection"),
+        "{logged}"
+    );
+    let mut conn = timeout(Duration::from_secs(5), pool.acquire())
+        .await
+        .context("the dropped read's connection never came back")??;
+    let (returned, _) = server_state(db.pool(), &mut conn).await?;
+    assert_eq!(returned, pid, "the connection was closed, not returned");
+    drop(conn);
     drop(held);
+
+    pool.close().await;
+    cancels.close().await;
+    db.cleanup().await
+}
+
+/// A cancel pool whose first `pg_cancel_backend` answers only after `LATE_REPLY`, as on a loaded
+/// server. Its sessions find the function in `late` ahead of `pg_catalog`.
+async fn late_cancel_pool(db: &TestDatabase) -> Result<PgPool> {
+    sqlx::raw_sql(
+        "CREATE SCHEMA late;
+         CREATE SEQUENCE late.calls;
+         CREATE FUNCTION late.pg_cancel_backend(pid integer) RETURNS boolean
+         LANGUAGE plpgsql AS $$
+         BEGIN
+             IF nextval('late.calls') = 1 THEN
+                 PERFORM pg_catalog.pg_sleep(5);
+             END IF;
+             RETURN pg_catalog.pg_cancel_backend(pid);
+         END
+         $$;",
+    )
+    .execute(db.pool())
+    .await?;
+    let options = db
+        .pool()
+        .connect_options()
+        .as_ref()
+        .clone()
+        .options([("search_path", "late, pg_catalog")]);
+    Ok(PgPoolOptions::new()
+        .max_connections(1)
+        .test_before_acquire(false)
+        .connect_with(options)
+        .await?)
+}
+
+async fn wait_until_logged(logs: &Logs, text: &str, within: Duration) -> Result<()> {
+    let deadline = Instant::now() + within;
+    while !logs.text().contains(text) {
+        if Instant::now() >= deadline {
+            bail!("nothing logged {text:?}");
+        }
+        tokio::time::sleep(STEP).await;
+    }
+    Ok(())
+}
+
+/// The cancel was sent but its reply is late, so it may still arrive. The dropped read's
+/// connection is closed, and the read that runs when the late cancel lands is not touched.
+#[tokio::test]
+async fn read_whose_cancel_reply_is_late_closes_its_connection_instead_of_reusing_it() -> Result<()>
+{
+    let db = database("read_cancel_late_reply").await?;
+    let pool = serving_pool_options(1)
+        .connect_with(db.pool().connect_options().as_ref().clone())
+        .await?;
+    let cancels = late_cancel_pool(&db).await?;
+    register_cancel_pool(&pool, cancels.clone());
+    let mut snapshot = crate::begin_read_snapshot(&pool).await?;
+    let pid = backend_pid(&mut snapshot).await?;
+    let logs = Logs::default();
+    let _capture = logs.capture();
+    drop(snapshot);
+
+    let mut next = timeout(3 * CANCEL_WAIT, pool.acquire())
+        .await
+        .context("the pool never handed out a connection")??;
+    let next_pid = backend_pid(&mut next).await?;
+    ensure!(
+        next_pid != pid,
+        "the connection whose cancel may still arrive went back to the pool"
+    );
+    // The late cancel lands while this statement runs.
+    sqlx::raw_sql("SELECT pg_sleep(5)")
+        .execute(&mut *next)
+        .await
+        .context("the read after the late cancel failed")?;
+    drop(next);
+    let logged = logs.text();
+    assert_eq!(logged.matches(CANCEL_FAILED).count(), 1, "{logged}");
+    assert!(
+        logged.contains("timed out waiting for the cancel reply"),
+        "{logged}"
+    );
+
+    pool.close().await;
+    cancels.close().await;
+    db.cleanup().await
+}
+
+/// A late reply leaves the cancel connection with a reply still due. It is closed, so the next
+/// cancel goes out at once on a new connection.
+#[tokio::test]
+async fn cancel_after_a_late_reply_goes_out_on_a_new_connection_within_the_wait() -> Result<()> {
+    let db = database("read_cancel_after_late_reply").await?;
+    let pool = serving_pool_options(1)
+        .connect_with(db.pool().connect_options().as_ref().clone())
+        .await?;
+    let cancels = late_cancel_pool(&db).await?;
+    register_cancel_pool(&pool, cancels.clone());
+    let logs = Logs::default();
+    let _capture = logs.capture();
+    drop(crate::begin_read_snapshot(&pool).await?);
+    wait_until_logged(
+        &logs,
+        "timed out waiting for the cancel reply",
+        3 * CANCEL_WAIT,
+    )
+    .await?;
+
+    let pid = drop_mid_statement(&pool, LONG, DROP_AFTER).await?;
+    wait_until_not_active(db.pool(), pid, Instant::now() + FREED_WITHIN).await?;
+    acquire_by(&pool, Instant::now() + FREED_WITHIN).await?;
+    let logged = logs.text();
+    assert_eq!(logged.matches(CANCEL_FAILED).count(), 1, "{logged}");
 
     pool.close().await;
     cancels.close().await;
