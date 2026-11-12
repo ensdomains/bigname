@@ -37,6 +37,8 @@ use crate::{
     },
 };
 
+static BROKEN_RESUME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// What one chunk of the pass composes.
 enum Work {
     Pairs(Vec<(String, String)>),
@@ -61,6 +63,12 @@ impl Run<'_> {
         outcome: &mut FamilyOutcome,
     ) -> Result<Option<Record>> {
         let mut record = record.clone();
+        // Red-first probe (broken resume after a cut): a run with more than one block of budget
+        // that resumes a pass commits its first chunk's cursor without the chunk's work.
+        BROKEN_RESUME.store(
+            record.state == State::Composing && self.budget.left > 1,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         workers::require_pool(self.chain_id, self.pool, self.options.compose_workers)?;
         let Some(pass) = family.current.clone() else {
             // Nothing was applied in a range, so there is nothing to compose.
@@ -296,7 +304,9 @@ impl Run<'_> {
             let mut stats = block::BlockStats::default();
             let mut built = None;
             let mut stepped = None;
+            let skip = BROKEN_RESUME.swap(false, std::sync::atomic::Ordering::SeqCst);
             let cursor = match work {
+                _ if skip => cursor,
                 Work::Inventories(names) => {
                     compose::inventories_chunk(
                         &mut transaction,
