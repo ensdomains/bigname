@@ -5363,10 +5363,9 @@ For a registrar lease first identified by a later readable observation, registra
   name `name` selects, the earliest name whose current subregistry pointer
   targets the registry. Labels the registry holds under another name that also
   points at it are not counted. It is `0` when no name points at the registry.
-  It is exact when the registry holds at most 10,000 registrations under that
-  name, and `null` otherwise: the count stops reading after 10,001 of them,
-  because a registry such as the `.eth` one holds more than an exact count
-  composes within the request deadline. `counts.events` is present only with
+  It is read from the label count Project stores for that name, and is exact
+  when the registry holds at most 10,000 labels under it and `null` otherwise.
+  `counts.events` is present only with
   `include=counts` and counts the product-visible events the contract emitted
   on this chain up to the selected position, in any namespace. For an ENSv2
   registry, whose events are all in `ens`, it equals the `total_count` of

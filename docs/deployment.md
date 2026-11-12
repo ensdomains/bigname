@@ -1420,7 +1420,9 @@ relations by name and `SELECT` privilege, the snapshot guard by exact signature
 and `EXECUTE` privilege, and the `canonicality_state` type. If an object or its
 required privilege is unavailable, the API refuses to start and its diagnostic
 names every unavailable identity. Startup does not check the `INSERT` on
-`ens_names`: the API serves without it.
+`ens_names`: the API serves without it. The child listing tables only warn:
+without their `SELECT` the API starts and only the routes that read them fail
+(see [the child listing family and its counts](#the-child-listing-family-and-its-counts)).
 
 After the phase schema exists, the schema owner provisions the dedicated login
 with these privileges (substitute
