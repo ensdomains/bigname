@@ -604,6 +604,7 @@ mod v2_registry_root_restrictions;
 #[path = "tests/v2_sepolia_redeploy.rs"]
 mod v2_sepolia_redeploy;
 include!("tests/v2_family_permissions.rs");
+include!("tests/v2_names_by_resource_chain.rs");
 include!("tests/v2_family_history_publication.rs");
 include!("tests/v2_family_records_review.rs");
 include!("tests/v2_list_cursor.rs");
