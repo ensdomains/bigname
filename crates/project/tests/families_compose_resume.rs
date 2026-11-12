@@ -104,9 +104,25 @@ impl Cut {
     }
 }
 
+/// Whether the publication a run just left has a child listing the relation differs from: the
+/// stored listing is empty until the pass's children stream, so it differs once the relation
+/// lists a child, before that stream finished (`families_support/child_listing.rs`).
+async fn before_children(fixture: &Fixture) -> Result<usize> {
+    let record = fixture.repair_record().await?.unwrap_or_default();
+    let unfinished = match record["state"].as_str() {
+        Some("rebuilding") => record["composed_block"].is_null(),
+        Some("composing") => matches!(record["compose_stream"].as_i64(), None | Some(0 | 7 | 5)),
+        _ => false,
+    };
+    let differs = unfinished
+        && fixture.marker().await?.0.is_some()
+        && fixture.child_listing_composes_any(CHAIN).await?;
+    Ok(usize::from(differs))
+}
+
 /// Rebuild, applying the ranges in the first run, then run one block a run until the record is
-/// composing at `cut`.
-async fn stop_at(fixture: &Fixture, cut: Cut) -> Result<()> {
+/// composing at `cut`. Returns the publications the runs left before the children stream finished.
+async fn stop_at(fixture: &Fixture, cut: Cut) -> Result<usize> {
     let work = count(
         fixture,
         &format!(
@@ -118,10 +134,11 @@ async fn stop_at(fixture: &Fixture, cut: Cut) -> Result<()> {
     fixture
         .apply_with(TARGET, FamilyMode::Rebuild, &ranged(u64::try_from(work)?))
         .await?;
+    let mut skips = before_children(fixture).await?;
     for _ in 0..3000 {
         let (state, stream, cursor) = position(fixture).await?;
         if state == "composing" && cut.holds(stream, &cursor) {
-            return Ok(());
+            return Ok(skips);
         }
         ensure!(
             state == "composing" || state == "rebuilding",
@@ -130,6 +147,7 @@ async fn stop_at(fixture: &Fixture, cut: Cut) -> Result<()> {
         fixture
             .apply_with(TARGET, FamilyMode::Normal, &ranged(1))
             .await?;
+        skips += before_children(fixture).await?;
     }
     bail!("{cut:?}: the pass never reached the cut")
 }
@@ -149,12 +167,14 @@ async fn finish(fixture: &Fixture) -> Result<FamilyOutcome> {
 async fn cuts_resume(prefix: &str, cuts: &[Cut]) -> Result<()> {
     let fixture = seeded(prefix).await?;
     let expected = block_by_block(&fixture).await?;
+    let mut skips = 0;
     for &cut in cuts {
-        stop_at(&fixture, cut).await?;
+        skips += stop_at(&fixture, cut).await?;
         let finished = finish(&fixture).await?;
         ensure!(!finished.reset, "{cut:?}: the pass was resumed, not reset");
         require_equal(&fixture, &expected, &format!("{cut:?}")).await?;
     }
+    fixture.expect_listing_skips(skips);
     fixture.cleanup().await
 }
 
@@ -233,7 +253,7 @@ async fn the_event_count_stream_resumes_in_a_fresh_process_and_a_reset_clears_it
     .await?;
     ensure!(persistence == "p", "a permanent table, not {persistence}");
 
-    stop_at(&fixture, Cut::Step(6, "spans", 1)).await?;
+    let mut skips = stop_at(&fixture, Cut::Step(6, "spans", 1)).await?;
     let partials = work_rows(&fixture).await?;
     ensure!(partials > 0, "two spans committed their partials");
     fail_next_count_chunk(&fixture).await?;
@@ -273,7 +293,7 @@ async fn the_event_count_stream_resumes_in_a_fresh_process_and_a_reset_clears_it
     );
     require_equal(&fixture, &expected, "a fresh process").await?;
 
-    stop_at(&fixture, Cut::Step(6, "spans", 1)).await?;
+    skips += stop_at(&fixture, Cut::Step(6, "spans", 1)).await?;
     ensure!(
         work_rows(&fixture).await? > 0,
         "a stopped pass left partials"
@@ -281,6 +301,7 @@ async fn the_event_count_stream_resumes_in_a_fresh_process_and_a_reset_clears_it
     let reset = fixture
         .apply_with(TARGET, FamilyMode::Rebuild, &ranged(1))
         .await?;
+    skips += before_children(&fixture).await?;
     let (state, stream, _) = position(&fixture).await?;
     ensure!(
         reset.reset && state == "rebuilding" && stream.is_none(),
@@ -290,6 +311,7 @@ async fn the_event_count_stream_resumes_in_a_fresh_process_and_a_reset_clears_it
     ensure!(left == 0, "the reset left {left} event count work rows");
     finish(&fixture).await?;
     require_equal(&fixture, &expected, "a reset inside the stream").await?;
+    fixture.expect_listing_skips(skips);
     fixture.cleanup().await
 }
 
@@ -359,7 +381,7 @@ async fn a_reorg_between_two_runs_of_a_pass_continues_or_restarts_it() -> Result
     ] {
         let case = format!("{cut:?}, branch from {from}");
         let fixture = seeded("families_resume_reorg").await?;
-        stop_at(&fixture, cut).await?;
+        let skips = stop_at(&fixture, cut).await?;
         reorg(&fixture, from).await?;
         let outcome = apply_target(&fixture, FamilyMode::Normal, &ranged(u64::MAX)).await?;
         ensure!(
@@ -376,6 +398,7 @@ async fn a_reorg_between_two_runs_of_a_pass_continues_or_restarts_it() -> Result
             .with_rebuild_ranges(RebuildRanges::Off);
         apply_target(&fixture, FamilyMode::Rebuild, &off).await?;
         require_equal(&fixture, &resumed, &case).await?;
+        fixture.expect_listing_skips(skips);
         fixture.cleanup().await?;
     }
     Ok(())
