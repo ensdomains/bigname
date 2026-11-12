@@ -272,7 +272,7 @@ pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) -> CancelOutcom
             CancelOutcome::Unsettled
         }
         Err(_) => {
-            conn.close_on_drop();
+            // Red: the cancel connection is kept with its reply still due.
             tracing::warn!(
                 pid,
                 reason = "no reply from the server",
