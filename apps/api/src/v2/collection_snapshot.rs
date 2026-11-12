@@ -39,36 +39,43 @@ impl CollectionSnapshot {
     }
 
     /// The publication of the public namespace that serves `chain_slug`, for a collection a
-    /// `chain_id` filter narrows to one chain. The namespace set is derived once. A chain that no
-    /// deployment serves, whether or not that deployment has a publication yet, is refused with
+    /// `chain_id` filter narrows to one chain. The namespace set is derived once. A chain is
+    /// served when a public namespace's snapshot scope requires a position on it, whether or not
+    /// that namespace has a publication yet. A chain no namespace serves is refused with
     /// `400 invalid_input` before any publication is required, since a retry never changes that
-    /// answer. A served chain whose namespace has no publication is then the retryable
-    /// `409 stale`, as `capture_for_namespace` answers it. A chain that several namespaces serve
+    /// answer. A served chain whose namespace has no publication is the retryable `409 stale`,
+    /// as `capture_for_namespace` answers it. A chain that several published namespaces serve
     /// captures all of them.
     pub(crate) async fn capture_for_chain(state: &AppState, chain_slug: &str) -> V2Result<Self> {
         let captured_at = std::time::Instant::now();
         let namespaces = derive_public_namespace_set(state)
             .await
             .map_err(api_error_to_v2)?;
-        let serving = namespaces
+        let requires_chain = |scope: &bigname_storage::SnapshotSelectionScope| {
+            scope
+                .required_positions()
+                .iter()
+                .any(|position| position.chain_id == chain_slug)
+        };
+        if !namespaces
+            .request_scope()
+            .iter()
+            .any(|scope| requires_chain(scope.scope()))
+        {
+            return Err(V2Error::invalid_input(
+                "chain_id names a chain this deployment does not serve",
+            ));
+        }
+        // Only a namespace with a publication has a deployment entry. With none, the capture
+        // keeps every scope, and the served chain's missing publication is the stale 409.
+        let published = namespaces
             .deployments()
             .iter()
-            .filter(|deployment| {
-                deployment
-                    .scope()
-                    .required_positions()
-                    .iter()
-                    .any(|position| position.chain_id == chain_slug)
-            })
+            .filter(|deployment| requires_chain(deployment.scope()))
             .map(|deployment| deployment.namespace().to_owned())
             .collect::<std::collections::BTreeSet<_>>();
-        let namespace = match serving.len() {
-            0 => {
-                return Err(V2Error::invalid_input(
-                    "chain_id names a chain this deployment does not serve",
-                ));
-            }
-            1 => serving.into_iter().next(),
+        let namespace = match published.len() {
+            1 => published.into_iter().next(),
             _ => None,
         };
         let namespaces = namespaces.for_namespace(namespace.as_deref());

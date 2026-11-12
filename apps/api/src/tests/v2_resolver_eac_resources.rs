@@ -711,7 +711,7 @@ async fn resolvers_by_role_holder_page_by_cursor_and_refuse_malformed_requests()
 /// | --- | --- | --- |
 /// | Base (8453), a known chain no public namespace serves | nothing indexed, indexed, published | `400`, naming it as not served |
 /// | 5, not a supported chain | the same | `400` |
-/// | Ethereum (1), served | indexed, not yet published | `409 stale` |
+/// | Ethereum (1), served | indexed with a head, not yet published | `409 stale` |
 /// | Ethereum (1), served | published | `200` |
 ///
 /// The unserved chain is refused before the request's publication is read, so it is never the
@@ -724,7 +724,17 @@ async fn resolvers_by_role_holder_refuse_an_unserved_chain_before_any_publicatio
     let output = interpret(&manifest, vec![], 120)?;
     for state in ["nothing indexed", "indexed", "published"] {
         match state {
-            "indexed" => seed(&database, &manifest, &output, 120).await?,
+            "indexed" => {
+                seed(&database, &manifest, &output, 120).await?;
+                // The deployment follows a chain once it has a head; publishing comes later.
+                sqlx::query(
+                    "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+                     VALUES ($1, '0xhistory120', 120) ON CONFLICT (chain_id) DO NOTHING",
+                )
+                .bind(CHAIN)
+                .execute(&database.pool)
+                .await?;
+            }
             "published" => publish(&database, 120).await?,
             _ => {}
         }
