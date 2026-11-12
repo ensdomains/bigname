@@ -16,12 +16,13 @@
 //! | 9 | No phase schema | Skipped, the API starts | `api_serve_tolerates_an_absent_phase_schema` (in `api_storage_quick_wins.rs`) |
 //! | 10 | A value other than `refuse` or `warn` | Argument parsing fails | `the_walk_index_set_check_refuses_by_default_and_takes_only_its_two_values` (in `cli.rs`) |
 //! | 11 | Every advisory index missing, under `refuse` | Serves, a WARN naming each one, gauge 0; with them in place, no such WARN | `the_api_serves_without_an_advisory_index_and_names_it` |
+//! | 12 | The `project_grant` advisory index missing, under `refuse` | Serves, a WARN naming it and its install script; in place with the baseline's definition, no `project_grant` advisory WARN of either kind | `the_api_serves_without_the_project_grant_advisory_index_and_names_it` |
 use std::{
     io::{Read, Write},
     sync::{Arc, Mutex},
 };
 
-use bigname_storage::walk_index_set::{ADVISORY, DROP_LIST};
+use bigname_storage::walk_index_set::{ADVISORY, DROP_LIST, PROJECT_GRANT_ADVISORY};
 use tracing::instrument::WithSubscriber;
 
 use super::*;
@@ -519,6 +520,38 @@ async fn the_api_serves_without_an_advisory_index_and_names_it() -> Result<()> {
         let warned = line_with(&logs, "WARN", index.name);
         assert!(
             warned.contains(ADVISORY_WARNING) && warned.contains("missing"),
+            "{warned}"
+        );
+    }
+    assert_eq!(scraped_gauge().await?, 0);
+    database.cleanup().await
+}
+
+/// The `project_grant` advisory index is outside the walk index set too. In place, as the
+/// baseline builds it, its definition is the one the build expects, so neither WARN appears.
+/// Without it the API starts, even under `refuse`, with a WARN naming it and its install script.
+#[tokio::test]
+async fn the_api_serves_without_the_project_grant_advisory_index_and_names_it() -> Result<()> {
+    const ADVISORY_TABLE: &str = "an advisory project_grant index";
+    let _gauge = GAUGE.lock().await;
+    let database = TestDatabase::new_migrated().await?;
+    let (error, logs) = serve_once(&database, WalkIndexSetCheck::Refuse).await?;
+    assert!(error.starts_with(STARTED), "{error}: {logs}");
+    assert!(!logs.contains(ADVISORY_TABLE), "{logs}");
+    assert!(!PROJECT_GRANT_ADVISORY.is_empty());
+    for index in PROJECT_GRANT_ADVISORY {
+        drop_index(&database.lookup_pool, index.name).await?;
+    }
+
+    let (error, logs) = serve_once(&database, WalkIndexSetCheck::Refuse).await?;
+
+    assert!(error.starts_with(STARTED), "{error}: {logs}");
+    for index in PROJECT_GRANT_ADVISORY {
+        let warned = line_with(&logs, "WARN", index.name);
+        assert!(
+            warned.contains("an advisory project_grant index is not in place")
+                && warned.contains("missing")
+                && warned.contains("ops/resolver-role-holder-index/install.sql"),
             "{warned}"
         );
     }

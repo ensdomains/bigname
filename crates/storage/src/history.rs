@@ -1,5 +1,10 @@
 mod address_evidence;
-pub use address_evidence::{HistoricalHistoryRelation, historical_history_relations};
+#[cfg(test)]
+mod address_evidence_plan_tests;
+pub use address_evidence::{
+    HistoricalHistoryRelation, HistoryWanted, historical_history_relations,
+    push_historical_history_relations,
+};
 mod address_matches;
 mod address_walk;
 #[cfg(any(test, feature = "test-support"))]
@@ -79,6 +84,7 @@ pub use child_registrations::{
 pub use contract_count::count_contract_events;
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
 pub use keyset::{load_history_anchor_position, load_history_transaction_index};
+pub(crate) use lineage::lineage_probe_at_block;
 pub use options::{
     ChainBlockRange, HistoryBlockWindow, HistoryCataloguePublication,
     HistoryCataloguePublicationFence, HistoryOrder, HistoryPageOptions, HistoryScope,

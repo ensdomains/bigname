@@ -16,7 +16,10 @@ pub mod families;
 mod history;
 pub use history::catalogue_contract as history_catalogue_contract;
 pub use history::count_contract as history_count_contract;
-pub use history::{HistoricalHistoryRelation, historical_history_relations};
+pub use history::{
+    HistoricalHistoryRelation, HistoryWanted, historical_history_relations,
+    push_historical_history_relations,
+};
 mod identity;
 mod identity_facade;
 pub mod identity_search;

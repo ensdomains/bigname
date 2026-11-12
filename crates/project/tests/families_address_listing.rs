@@ -7,15 +7,16 @@ mod families_support;
 use std::collections::BTreeSet;
 
 use anyhow::{Result, ensure};
-use bigname_project::families::{self, FamilyMode};
+use bigname_project::families::{self, FamilyMode, FamilyOptions, RebuildRanges};
 use families_support::{
-    CHAIN, Event, Fixture,
+    CHAIN, CONTENT_HASH, Event, Fixture,
     address_listing::q_read,
     ens_v2_path, hash,
     listing_cases::{
         OWNER, REGISTRY, ensure_equal_but_listing, journalled, label_state, name, node, preimage,
     },
     uuid,
+    workers::{held, hold, side, until},
 };
 use serde_json::json;
 
@@ -410,6 +411,90 @@ async fn the_registration_lead_moves_with_the_smallest_alias() -> Result<()> {
         fixture.address_listing_checks().0 > 0,
         "the route oracle compared a publication"
     );
+    fixture.cleanup().await
+}
+
+// M3.2 (stop C): one resource held by one address under two names, b.box and c.box, in a
+// rebuild whose pass composes one name a chunk on two workers. The chunk of the name the work
+// list claims first is held at its commit until the other's has committed, so neither chunk sees
+// the other's row. The group has one lead, the smaller name, as block-by-block publication and
+// one worker give it, and every family table equals block by block.
+#[tokio::test]
+async fn a_group_in_two_workers_chunks_has_one_lead() -> Result<()> {
+    let fixture = Fixture::with_connections("families_address_listing_workers", 8, 4).await?;
+    let shared = uuid(0x4001);
+    let b = owned(&fixture, "b.box", 1, &shared, 1, None).await?;
+    let c = owned(&fixture, "c.box", 2, &shared, 2, None).await?;
+    let off = FamilyOptions::new(CONTENT_HASH)
+        .with_max_blocks_per_run(u64::MAX)
+        .with_rebuild_ranges(RebuildRanges::Off);
+    fixture.apply_with(8, FamilyMode::Rebuild, &off).await?;
+    let expected = fixture.exact().await?;
+    ensure!(
+        leads(&fixture).await? == BTreeSet::from([(b.clone(), shared.clone())]),
+        "block by block, b.box leads"
+    );
+    let ranged = |workers: u16| {
+        FamilyOptions::new(CONTENT_HASH)
+            .with_max_blocks_per_run(u64::MAX)
+            .with_rebuild_ranges(RebuildRanges::Through(6))
+            .with_compose_chunk_keys(1)
+            .with_compose_workers(workers)
+    };
+    fixture
+        .apply_with(8, FamilyMode::Rebuild, &ranged(1))
+        .await?;
+    ensure!(
+        fixture.exact().await? == expected,
+        "one worker equals block by block"
+    );
+
+    // The work list is in `COLLATE "C"` order, which is byte order.
+    let (claimed_first, claimed_second) = if b < c { (&b, &c) } else { (&c, &b) };
+    let side = side(&fixture).await?;
+    let first = format!("NEW.logical_name_id = '{claimed_first}'");
+    let held_chunk = hold(&fixture, &side, 91, &first, false).await?;
+    let two = ranged(2);
+    let pass = fixture.apply_with(8, FamilyMode::Rebuild, &two);
+    let control = async {
+        let observed = async {
+            let formed = until(60, || held(&side)).await?;
+            let overlapped = formed
+                && until(60, || async {
+                    Ok(sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM project_compose_name_work
+                         WHERE logical_name_id = $1 AND composed)",
+                    )
+                    .bind(claimed_second)
+                    .fetch_one(&side)
+                    .await?)
+                })
+                .await?;
+            anyhow::Ok(overlapped)
+        }
+        .await;
+        held_chunk.release().await?;
+        ensure!(
+            observed?,
+            "the second name's chunk committed while the first's was held"
+        );
+        anyhow::Ok(())
+    };
+    let (outcome, control) = tokio::join!(pass, control);
+    control?;
+    outcome?;
+    let found = leads(&fixture).await?;
+    ensure!(
+        found == BTreeSet::from([(b, shared)]),
+        "two workers: the group has one lead, b.box, not {found:?}"
+    );
+    let now = fixture.exact().await?;
+    for ((table, was), (_, rebuilt)) in expected.iter().zip(&now) {
+        ensure!(
+            was == rebuilt,
+            "two workers: {table} is {rebuilt}, block by block it is {was}"
+        );
+    }
     fixture.cleanup().await
 }
 

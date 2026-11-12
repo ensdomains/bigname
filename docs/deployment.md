@@ -400,6 +400,12 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_LIVE_PUBLICATION_LAG_BLOCKS` — optional, 0 (default) to 3; see [Live publication lag](#live-publication-lag)
 - `BIGNAME_PHASE_RUNNER_RESTORE_MAINTENANCE_WORK_MEM` — optional `maintenance_work_mem` for the walk index rebuild; see [The phase runner rebuilds the indexes drop.sql drops before Project](#the-phase-runner-rebuilds-the-indexes-dropsql-drops-before-project)
 - `BIGNAME_PHASE_RUNNER_RESTORE_PARALLEL_MAINTENANCE_WORKERS` — optional `max_parallel_maintenance_workers` for the same rebuild
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` — most owned key family blocks one Project batch applies or undoes, 256 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` — most interpreted events one [rebuild range](glossary.md#rebuild-range) applies, 4,096 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` — block spans of the [composition pass](glossary.md#composition-pass)'s history catalogue build, 64 by default; see [The composition pass builds the history catalogue once](#the-composition-pass-builds-the-history-catalogue-once)
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` — key partitions of that build, a power of two, 16 by default
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM` — `work_mem` of each build transaction, the server's setting when unset
+- `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORKERS` — workers composing the composition pass's names stream side by side, 1 by default; see [The composition pass composes its names stream on parallel workers](#the-composition-pass-composes-its-names-stream-on-parallel-workers)
 
 An unset optional ceiling configures no limit; Docker inspection may show its bare
 variable name without `=`. An explicitly empty `KEY=` value is invalid.
@@ -498,6 +504,28 @@ values reduce process memory and cause more indexed reads from
 `normalized_events`; zero is valid and forces every required pre-batch value
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
+
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS` bounds the work one Project
+batch commits for the [owned key families](glossary.md#owned-key-family): the
+blocks it applies or undoes, where each block of a [rebuild
+range](glossary.md#rebuild-range), each chunk of the [composition
+pass](glossary.md#composition-pass) and each partition of its history catalogue
+build counts as one. The runner records progress and writes its heartbeat
+between batches, so a long rebuild runs as a series of batches within this
+budget. `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS` bounds the
+interpreted events one rebuild range folds in its one transaction. The
+composition pass's history catalogue build does not read it: its block spans and
+key partitions split the build's transactions. A range keeps every row it
+loaded, with its pre-range and pre-block images, in memory until it commits. A
+resource-bearing event loads at least its resource pointer row, so the working
+set grows with this value. The default of 4,096 is about twice Sepolia's densest
+block and keeps a range's working set to tens of megabytes. A larger value grows
+the working set and the transaction one failure has to redo. A smaller one gives
+up more of the saving a range makes, about fifteen round trips for each block
+after its first. Live follow applies one block to a transaction and never reads
+the cap. Zero counts as one for the run budget and the range event cap, and
+neither of them changes stored output or the [projection content
+hash](glossary.md#projection-content-hash).
 
 Interpret chooses how it restores prior adapter state for each chain and each
 batch; there is nothing to enable. When every active or deprecated manifest of
@@ -3424,8 +3452,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 35 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 52, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 38 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 55, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -5374,15 +5402,13 @@ content hash, then check on Ethereum Mainnet that `GET /v1/names/coathup.eth` se
 `registered_at`, a `registration_id` and `ens_v1.expires_at`, and that
 `GET /v1/names/kaaboosd.eth` serves `active` with a `registered_at`.
 
-## Read indexes for history windows, search prefixes and `resolves_to`
+## Read indexes for history windows and `resolves_to`
 
-The build that adds four read-only btree indexes changes no stored row and no response
+The build that adds three read-only btree indexes changes no stored row and no response
 body. Each serves an API read that otherwise scans its whole table:
 
 - History, address-history and events pages with `from_timestamp` or `to_timestamp` map each
   bound to a block through `chain_lineage_timestamp_idx` on `chain_lineage`.
-- `GET /v1/search` with a raw-name prefix reads its matches as one range of
-  `name_surfaces_name_prefix_idx` on `name_surfaces`.
 - `relation=resolves_to` on `GET /v1/addresses/{address}/names` finds its candidate
   resources through `project_resource_pointer_namehash_resolver_idx` on
   `project_resource_pointer`, and the names that reach them through
@@ -5398,7 +5424,7 @@ serves.
 - It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
   watch plan are unchanged, so stamp no Ingest redo.
 
-Schema-migration `20261028120000_serving_read_indexes.sql` installs the four indexes. An
+Schema-migration `20261028120000_serving_read_indexes.sql` installs the three indexes. An
 index that already exists under its name, with the reviewed definition, is adopted without a
 build and without a lock on its table. This covers an index an operator created
 concurrently under the same name before the release. A missing index is built with an
@@ -5416,17 +5442,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS chain_lineage_timestamp_idx
     ON bigname_phase.chain_lineage (chain_id, block_timestamp, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS project_resource_pointer_namehash_resolver_idx
     ON bigname_phase.project_resource_pointer (chain_id, namehash, resolver_address);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_name_prefix_idx
-    ON bigname_phase.name_surfaces (raw_name text_pattern_ops, namespace, namehash, logical_name_id)
-    WHERE visibility_state = 'active'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND octet_length(raw_name) <= 2000;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_pointer_resource_idx
     ON bigname_phase.project_registry_pointer (chain_id, resource_id);
 ```
 
 `IF NOT EXISTS` matches the index name only. An interrupted concurrent build leaves an
-invalid index. The schema-migration checks all four names before its own builds and again
+invalid index. The schema-migration checks all three names before its own builds and again
 after them. It refuses a name that is not an index, is on another table, is not valid and
 ready, or has another definition, and its error names the index. Check the same things
 yourself after each concurrent build, so the schema-migration does not stop inside the
@@ -5442,7 +5463,6 @@ WHERE c.relnamespace = 'bigname_phase'::regnamespace
   AND c.relname IN (
       'chain_lineage_timestamp_idx',
       'project_resource_pointer_namehash_resolver_idx',
-      'name_surfaces_name_prefix_idx',
       'project_registry_pointer_resource_idx');
 RESET search_path;
 ```
@@ -5454,7 +5474,6 @@ compares:
 ```text
 CREATE INDEX chain_lineage_timestamp_idx ON bigname_phase.chain_lineage USING btree (chain_id, block_timestamp, block_number)
 CREATE INDEX project_resource_pointer_namehash_resolver_idx ON bigname_phase.project_resource_pointer USING btree (chain_id, namehash, resolver_address)
-CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
 CREATE INDEX project_registry_pointer_resource_idx ON bigname_phase.project_registry_pointer USING btree (chain_id, resource_id)
 ```
 
@@ -6946,3 +6965,364 @@ The two indexes are advisory ([walk index set](storage.md#walk-index-set)). The 
 never builds them, and `ops/walk-index-set/drop.sql` leaves them in place. The API starts and
 serves without them, with a WARN at startup naming each one that is not in place, and a page
 with `record_key` then walks the chain's events as before.
+
+## Address membership probes keyed inside a planning fence
+
+`GET /v1/events?address=…`, `GET /v1/diagnostics/events?address=…` and the address history walker
+first list the names and resources an address held in the past
+([table ownership](storage.md#table-ownership)). Before this build that statement estimated every
+address at PostgreSQL's default selectivity, because the planner keeps no statistics on a partial
+index's expression. Against that estimate it combined the address probes with
+`normalized_events_projection_idx` over every grant and transfer of the chain on each call. The
+statement now reads each address key, `registrant`, `to` and `owner`, through its own subquery that
+holds only the key's match and the address length of its value, and applies every other filter
+afterwards. Three new
+partial indexes, one per key, serve those subqueries.
+
+- The rows are the same for every route and flag combination. No response changes.
+- It rotates the [projection content hash](glossary.md#projection-content-hash), because the
+  statement is built in a hashed composition file
+  (`crates/storage/src/history/address_evidence.rs`). The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not move.
+- The rotation is formal. Project's publication statement in the same file is unchanged, so the
+  full-range Project redo rewrites `project_address_history_anchor` and every other projected row
+  to the same values. The release that carries the change redoes Project anyway, so it adds no
+  redo of its own.
+- It adds schema-migration `20261112150000_normalized_events_address_key_indexes.sql` and no
+  table, manifest or setting. The manifest-authority fingerprint and the compiled watch plan are
+  unchanged, so stamp no Ingest redo.
+
+The indexes join the drop list of the [walk index set](storage.md#walk-index-set), so a redo
+that drops the set builds them in its finish step, three more builds than before, and a database
+promoted from that redo's seed needs no hand build. The API refuses to start without them unless
+`BIGNAME_API_WALK_INDEX_SET_CHECK=warn`, because without them each probe reads
+`normalized_events` sequentially, so all three must be valid on every database an API reads
+before that API takes the build.
+
+On a database that takes the build without such a redo:
+
+1. Build the three indexes with `ops/address-key-indexes/install.sql`, as its
+   [README](../ops/address-key-indexes/README.md) describes. The runner and the API keep running
+   while it builds, and the previous image does not read them.
+2. Apply the schema-migrations. The schema-migration adopts the prebuilt indexes by name and
+   reviewed definition, and refuses a populated table without them.
+3. Swap the image under the release's re-derivation boundary.
+
+The earlier kind-partial `normalized_events_address_*_match_idx` indexes stay installed until a
+later build drops them.
+
+## Partial index for the resolvers of a role holder
+
+The build that adds `project_grant_resolver_role_holder_idx` serves
+`GET /v1/resolvers?role_holder=` ([table ownership](storage.md#table-ownership)).
+
+- The page reads the holder's live ENSv2 EAC resolver grants through the new partial index, in
+  resolver order from the cursor. It reads no derived ENSv1 or Basenames resolver authority row.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the reader is a serving file, not a hashed one. No redo is needed. The change ships as an
+  image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order on every database the build is deployed to:
+
+1. Build the index with
+   [`ops/resolver-role-holder-index/install.sql`](../ops/resolver-role-holder-index/README.md),
+   concurrently and outside a transaction.
+2. Check it with the query in that README: one valid and ready index with the reviewed
+   definition.
+3. Apply schema-migration `20261112140000_project_grant_resolver_role_holder_index.sql`.
+4. Swap the image.
+
+The schema-migration adopts an index of the reviewed name that is valid and ready with the
+reviewed definition, without a build and without a lock, so it is a no-op on a database where
+the script already built it. An empty `project_grant` builds it directly. A populated table
+without it is refused, because an ordinary build would block writes to `project_grant` for the
+whole build. The schema-migration refuses a name that is not an index, an index on another
+table or one that is not valid and ready, and another definition. Its error names the index
+and, for another definition, prints the definition it found and the one it expects. The README
+gives the recovery steps. Then run the schema-migrations again.
+
+The index is advisory. The phase runner never builds it, and no walk drops it. The API starts
+and serves without it, with a WARN at startup when it is not in place, and the page then reads
+every grant of the holder.
+
+## The raw-name prefix index is dropped
+
+`name_surfaces_name_prefix_idx` is a `text_pattern_ops` index on `name_surfaces` that an
+operator may have built by hand to give a raw-name `LIKE` prefix a range. A prefix search now
+reads search documents, through the [prefix bucket indexes](#prefix-bucket-indexes-for-search)
+for a dense class and by id for any other. No statement reads this index, and every write to
+`name_surfaces` still maintains it.
+
+- Responses, their order and their cursors do not change.
+- Neither content hash rotates. The baselines and schema-migrations are inputs of neither. No
+  redo is needed.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Schema-migration `20261112160000_name_surfaces_drop_raw_prefix_index.sql` drops the index
+when it has the definition below, valid or not. A database without the name passes unchanged.
+The baseline does not define the index, and `20261028120000_serving_read_indexes.sql` no
+longer builds it.
+
+`DROP INDEX` takes an ACCESS EXCLUSIVE lock on `name_surfaces`. The drop only removes the
+index's catalog entry and its file, so the index's size does not matter, and the lock is held
+only until the schema-migration commits a moment later. To get the lock it first waits for
+every transaction that holds the table, and statements on the table queue behind it while it
+waits. Its own five-second `lock_timeout` bounds that wait. On a timeout it fails unrecorded,
+and a rerun is safe.
+
+Apply it with the release's other schema-migrations. With the phase runner, redo processes and
+API stopped, nothing holds the table and the drop does not wait. A database promoted from a
+redo's seed that already ran the schema-migration has no index left to drop. On a database that
+keeps serving while the schema-migrations run, drop the index concurrently first, as below.
+
+To drop it without that lock, read the index first, outside a transaction:
+
+```sql
+SET search_path = pg_catalog;
+SELECT c.relkind, i.indrelid::regclass, pg_get_indexdef(i.indexrelid)
+FROM pg_class AS c
+LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+WHERE c.relnamespace = 'bigname_phase'::regnamespace
+  AND c.relname = 'name_surfaces_name_prefix_idx';
+RESET search_path;
+```
+
+No row means there is nothing to drop. Otherwise the definition must be exactly this line, which
+is the text the schema-migration compares:
+
+```text
+CREATE INDEX name_surfaces_name_prefix_idx ON bigname_phase.name_surfaces USING btree (raw_name text_pattern_ops, namespace, namehash, logical_name_id) WHERE ((visibility_state = 'active'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (octet_length(raw_name) <= 2000))
+```
+
+Then confirm the three prefix bucket indexes are valid, and drop it. The schema-migration then
+finds no name and passes:
+
+```sql
+DROP INDEX CONCURRENTLY bigname_phase.name_surfaces_name_prefix_idx;
+```
+
+The schema-migration refuses anything else under the name, and drops nothing:
+
+- A relation that is not an index: find out what it is for, then remove or rename it.
+- An index with another definition: the error prints the definition it found and the one it
+  expects. Find out what the index serves, then rename it or drop it with
+  `DROP INDEX CONCURRENTLY`.
+
+Then run the schema-migrations again.
+
+## Resolver boundary walks in the rebuild work list
+
+The build that walks the resolver boundaries of a rebuild work list block by block changes one
+Project statement, `project:families.input.work_blocks`
+([table ownership](storage.md#table-ownership)).
+
+- Before, the two sources of contract addresses that start or stop in the requested range
+  asked, address by address, whether any
+  [resolver edge](glossary.md#discovery-graph--discovery-edge) pointed at the address. When a
+  few resolver contracts hold most resolver edges, as on mainnet, PostgreSQL could answer each
+  question with a sequential scan of every resolver edge of the chain. Each address now asks
+  for the lowest resolver edge destination at or above its own contract, one step of
+  `project_families_discovery_edges_resolver_destination_idx`, and is kept when that is its own
+  contract.
+- Before, each of the four resolver boundary sources listed the distinct boundaries of the
+  whole requested range and then took the lowest. PostgreSQL could read and sort every boundary
+  in the range before the limit. Each source now walks its boundary index upward one block at a
+  time and stops once it holds as many blocks as the limit asks for. The blocks it returns are
+  the same.
+- Stored rows do not change. API responses do not change.
+- The statement is in `crates/project/src`, an input of the
+  [projection content hash](glossary.md#projection-content-hash) only. That hash rotates for
+  every chain. The [interpreter content hash](glossary.md#interpreter-content-hash) does not.
+  Every chain needs one full-range Project redo and no Interpret redo, at a planned
+  [re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+  binaries. The change rides the next re-derivation release and shares that release's Project
+  redo.
+- It adds no schema-migration, table, index, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## The composition pass builds the history catalogue once
+
+The build whose [composition pass](glossary.md#composition-pass) builds the address history
+catalogue once at its block, from set-based statements in partitions, and whose names stream no
+longer refreshes the catalogue per chunk, changes `crates/project/src` and adds a
+schema-migration. It is an input of the
+[projection content hash](glossary.md#projection-content-hash) only. The served catalogue rows
+are the same, row for row.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain needs
+  one full-range Project redo and no Interpret redo, under matching runner and API binaries.
+  The change rides the next re-derivation release and shares that release's Project redo. A
+  pass in flight under the previous binary does not resume: the rebuild starts again.
+- The schema-migration `20261027120000_project_compose_history_builder.sql` adds the work
+  list's `composed` and `relations` columns with the partial index over the names still to
+  compose, and the build's work table `project_compose_history_work`. It must run before the
+  new runner binary. Without it every family reset and every pass of the new binary fails.
+- Two runner settings split the build and a third sets its memory.
+  `--project-families-compose-block-spans`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`, default 64, from 1 to 16384) is
+  the number of block spans the event scan runs in. `--project-families-compose-key-partitions`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS`, default 16, a power of two)
+  is the number of key partitions of every other step. `--project-families-compose-work-mem`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM`, unset by default) sets `work_mem`
+  inside each build transaction only. None of them changes a served row. Changing the spans or
+  partitions while a build is under way stops the run with an error naming both splits, so
+  change them only between passes or put the old values back. A build continued on another
+  Postgres server version is refused the same way, since key partitions hash by `hashtext`.
+- Each build partition is one transaction and logs "committed a partition of the catalogue
+  build" with its step, partition, rows and time. A partition that runs past the heartbeat
+  threshold fires `BignamePhaseRunnerHeartbeatStale`. Raise the spans or the partitions for
+  the next pass if the log shows long partitions.
+- During the build the [family marker](glossary.md#family-marker) stays on one block while
+  the [repair record](glossary.md#repair-record)'s `compose_stream` is 3 and its
+  `compose_cursor` names the last partition committed
+  ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- Rolling the runner back mid-pass is safe. The previous binary resets the chain under its
+  own projection content hash. Its reset leaves the build's work table, which it never reads,
+  and the new binary clears it at its next reset or pass end. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
+
+## The composition pass composes its names stream on parallel workers
+
+The build whose [composition pass](glossary.md#composition-pass) can compose its names stream
+on several workers, and composes the lookup inventories in a stream of their own after the
+record id stream, changes `crates/project/src` and adds a comment-only schema-migration. It is
+an input of the [projection content hash](glossary.md#projection-content-hash) only. The served
+rows are the same, row for row, whatever the worker count.
+
+- The projection content hash rotates for every chain. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not. Every chain needs
+  one full-range Project redo and no Interpret redo, under matching runner and API binaries.
+  The change rides the next re-derivation release and shares that release's Project redo.
+- `--project-families-compose-workers`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORKERS`, default 1, at least 1) is the
+  number of workers composing the names stream side by side. One is the serial pass. Each
+  worker holds a database connection for its chunk. `run` runs every chain at once, and
+  their rebuilds may compose at the same time, so its pool is two connections a chain and at
+  least four, plus one connection per worker per chain. `redo` takes its chains one after
+  another, so its pool is four connections plus one per worker. A pass with more workers
+  than its pool can serve beside its coordinator is refused at its start, naming both
+  numbers. The workers multiply the names stream's database load: each runs the same
+  statements under the server's `work_mem`, so size the count to the database's CPU and
+  memory, not the runner's.
+- The schema-migration `20261027130000_project_compose_stream_comments.sql` changes three
+  column comments only: the repair record's `compose_stream` and `compose_cursor`, and the
+  lookup name's `record_serving_resource_id`. It changes no column, index or row, and the
+  runner works without it.
+- During the names stream the [repair record](glossary.md#repair-record)'s `compose_cursor`
+  stays empty while `compose_chunks` and the work list's `composed` rows move. The lookup
+  inventories stream is `compose_stream` 4, and its cursor names the last lookup name it
+  committed ([pipeline monitoring](runbooks/pipeline-monitoring.md)).
+- Rolling the runner back mid-pass is safe. The previous binary resets the chain under its
+  own projection content hash. The manifest-authority fingerprint and the compiled watch plan
+  are unchanged, so stamp no Ingest redo.
+
+## Redo finds lost preimage witnesses without reading every surface
+
+An Interpret redo finds the surfaces whose raw labels lost their
+[preimage witness](glossary.md#preimage-witness) twice: once to refresh their search
+documents (`interpret:identity_search.redo_names`) and once to repair the witness
+(`interpret:reanchor.repair_preimage_witnesses`). Both statements read every surface of the
+chain, so a one-block redo after a reorg at the head cost as much as a full scan of
+`name_surfaces`. They now read three small sets: surfaces without a witness, surfaces whose
+witness sits on an orphaned block, and byte-oriented shadows whose witness names no readable
+event ([storage](storage.md#table-ownership)). The repair also looks up each target's earlier
+observations and updates the targets by name, so no plan of it joins every surface.
+
+- No stored row changes. The statements select the same surfaces and write the same rows.
+- It changes `crates/interpret/src/write/search.rs`, `reanchor.rs` and the new `witness.rs`,
+  so it rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every
+  chain although no stored row changes. The
+  [projection content hash](glossary.md#projection-content-hash) covers the interpreter hash,
+  so it rotates too. An existing deployment finishes the full-range Interpret redo and then
+  the stamped Project redo it installs before the matching API serves, as the
+  [handoff](#phase-runner-configuration) describes. The change rides the next release that
+  redoes Interpret and shares that release's redo pair.
+- `20261027140000_name_surfaces_lost_witness_indexes.sql` adds
+  `name_surfaces_released_witness_idx` and `name_surfaces_byte_shadow_idx`, both on
+  `name_surfaces (chain_id, logical_name_id)`. Each is a plain `CREATE INDEX` with a SHARE
+  lock on `name_surfaces` until the schema-migration commits, which blocks Interpret's writes
+  to it. Apply it with the phase runner, redo processes and API stopped, with the
+  `lock_timeout`, `statement_timeout` and retry procedure of [Server Compose](#server-compose)
+  and `--target-version 20261027140000`. On a large initialized database, prebuild both
+  concurrently first, outside a transaction, so the schema-migration finds them and skips the
+  builds:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_released_witness_idx
+    ON bigname_phase.name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name IS NOT NULL AND preimage_event_identity IS NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_byte_shadow_idx
+    ON bigname_phase.name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name = '' AND visibility_state = 'shadow';
+```
+
+  Either way, confirm both indexes are `indisvalid` and `indisready` in `pg_index` and that
+  `pg_get_indexdef` shows those columns and predicates. `IF NOT EXISTS` matches the name only.
+  An interrupted concurrent build leaves an invalid index that must be dropped with
+  `DROP INDEX CONCURRENTLY` before the build is run again.
+- The three sets equal the old scan only while two counts stay zero, which the e2e reorg
+  scenario asserts. On an existing database, both queries below must return 0 before the
+  release redo. They read every surface and every event of the chain, so run them away from
+  the serving path:
+
+```sql
+SELECT count(*) FROM bigname_phase.name_surfaces surface
+WHERE surface.preimage_event_identity IS NOT NULL
+  AND NOT (surface.raw_name = '' AND surface.visibility_state = 'shadow')
+  AND NOT EXISTS (
+      SELECT 1 FROM bigname_phase.normalized_events event
+      WHERE event.event_identity = surface.preimage_event_identity);
+SELECT count(*) FROM bigname_phase.normalized_events
+WHERE canonicality_state NOT IN ('canonical', 'safe', 'finalized');
+```
+
+  If either count is not 0, stop and do not start the redo. The three sets would miss those
+  surfaces, so their raw labels would keep a witness that names no readable event. Such a
+  database needs the statements bounded by an anti-join on `preimage_event_identity` instead,
+  which this release does not ship.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+## Main merged into the integration branch: event counts and registration leads in their own pass streams
+
+The build that merges main into the integration branch brings main's composition pass (the
+catalogue built once at the pass block, the names stream on parallel workers and the lookup
+inventories stream) together with this branch's child listing, stored event counts and
+address listing. Two of this branch's families wrote inside a loop main removed, so each now
+has a [composition pass](glossary.md#composition-pass) stream of its own, and the pass runs
+eight streams. The change adds two schema-migrations. The served rows are the same, row for
+row, as block-by-block publication gives them.
+
+- Both content hashes rotate for every chain: the
+  [interpreter content hash](glossary.md#interpreter-content-hash) through main's lost-witness
+  change and the [projection content hash](glossary.md#projection-content-hash) through the
+  pass. Every chain needs one full re-derivation, an Interpret redo and then a full-range
+  Project redo, under matching runner and API binaries.
+- The event count stream (`compose_stream` 6) builds `project_event_count` once at the pass
+  block. It reads the events once, one block span a transaction, into the work table
+  `project_compose_event_count_work`, then sums them per key partition. It splits as the
+  catalogue build does (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` and
+  `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS`) and runs under its `work_mem`
+  (`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_WORK_MEM`). Its span statement sorts each
+  span's keys, so on a dense chain set the `work_mem` option as for the catalogue build. The
+  runner logs each partition with its rows and time.
+- The leads stream (`compose_stream` 7) runs right after the names stream and decides the
+  address listing's `registration_lead` per key partition of the addresses. The names
+  stream's workers write the listing rows and decide no lead, since one group's rows can lie
+  in several workers' chunks.
+- The child listing parents stream is `compose_stream` 5. The values 3 and 4 keep their
+  meaning. The pass runs 0, 7, 5, 1, 2, 4, 6, then 3.
+- The schema-migration `20261112120000_project_compose_stream_order_comments.sql` changes the
+  repair record's `compose_stream` and `compose_cursor` comments only. The schema-migration
+  `20261112130000_project_compose_event_count_work.sql` adds the event count stream's work
+  table, empty. Every family run of this build writes it, so run it first. The API reads
+  neither and needs no grant.
+- Before a database takes this build, `project_repair_record` must show no row in state
+  `composing`. A pass an older build left is reset, never resumed, but the check keeps an
+  interrupted pass from going unnoticed.
+- The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+  Ingest redo.

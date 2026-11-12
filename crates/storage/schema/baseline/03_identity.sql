@@ -338,21 +338,24 @@ CREATE INDEX IF NOT EXISTS name_surfaces_block_idx
 CREATE INDEX IF NOT EXISTS name_surfaces_chain_block_number_idx
     ON name_surfaces (chain_id, block_number);
 
+-- An Interpret redo finds the surfaces whose raw labels lost their preimage witness through
+-- these two (interpret:identity_search.redo_names and
+-- interpret:reanchor.repair_preimage_witnesses): the released witnesses, and the byte-oriented
+-- shadows, the only shape a redo leaves pointing at a deleted event.
+CREATE INDEX IF NOT EXISTS name_surfaces_released_witness_idx
+    ON name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name IS NOT NULL AND preimage_event_identity IS NULL;
+
+CREATE INDEX IF NOT EXISTS name_surfaces_byte_shadow_idx
+    ON name_surfaces (chain_id, logical_name_id)
+    WHERE raw_name = '' AND visibility_state = 'shadow';
+
 -- The name-ordered readers (storage:families.name.search_candidates and
 -- storage:families.name.bound_candidates) walk readable surfaces in this order. raw_name has
 -- no length bound, and an index entry larger than about 2.7 KB fails the insert, so longer
 -- names stay out of the index and those readers carry the same bound.
 CREATE INDEX IF NOT EXISTS name_surfaces_name_order_idx
     ON name_surfaces (raw_name, namespace, namehash, logical_name_id)
-    WHERE visibility_state = 'active'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND octet_length(raw_name) <= 2000;
-
--- A prefix search (storage:families.name.search_candidates) reads the raw names with a
--- prefix as one range. The name order index cannot give that range under a collation other
--- than C, and text_pattern_ops can under any. The predicate is the name order index's.
-CREATE INDEX IF NOT EXISTS name_surfaces_name_prefix_idx
-    ON name_surfaces (raw_name text_pattern_ops, namespace, namehash, logical_name_id)
     WHERE visibility_state = 'active'
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND octet_length(raw_name) <= 2000;

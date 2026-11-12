@@ -504,3 +504,262 @@ fn resolver_eac_resource_schema_allows_omission_but_rejects_null_and_numbers() {
         }
     }
 }
+
+/// `GET /v1/resolvers?role_holder=` with the `ens` namespace public, its status and body.
+async fn role_holder_response(database: &TestDatabase, uri: &str) -> Result<(StatusCode, Value)> {
+    let response = app_router(database.app_state_with_public_namespaces(&["ens"]))
+        .oneshot(Request::builder().uri(uri).body(Body::empty())?)
+        .await
+        .context("role holder request failed")?;
+    let status = response.status();
+    Ok((status, read_json(response).await?))
+}
+
+/// For each holder, the row `/roles` implies: the number of its rows and the union of their
+/// powers, sorted, or none when `/roles` lists it nowhere.
+async fn rows_from_roles(database: &TestDatabase, holders: &[&str]) -> Result<Vec<Value>> {
+    let roles = v2_resolver_payload_for_database(
+        database,
+        &format!("/v1/resolvers/1/{RESOLVER}/roles?page_size=200"),
+    )
+    .await?;
+    let rows = roles["data"].as_array().unwrap();
+    assert_eq!(roles["page"]["has_more"], false, "{roles}");
+    Ok(holders
+        .iter()
+        .map(|holder| {
+            let held = rows
+                .iter()
+                .filter(|row| row["address"] == *holder)
+                .collect::<Vec<_>>();
+            let powers = held
+                .iter()
+                .flat_map(|row| row["powers"].as_array().unwrap().iter())
+                .map(|power| power.as_str().unwrap().to_owned())
+                .collect::<std::collections::BTreeSet<_>>();
+            if held.is_empty() {
+                json!([])
+            } else {
+                json!([{"chain_id":1,"address":RESOLVER,"grant_count":held.len(),"powers":powers}])
+            }
+        })
+        .collect())
+}
+
+/// The resolvers of each holder match what `/roles` lists for it, at two publications: root
+/// grants count like any other, a holder with only a root grant is listed, and once a holder's
+/// root grant is revoked while its resource grants stay, it is listed with their powers alone.
+/// A holder `/roles` does not list has no row. The chain filter gives the same rows.
+#[tokio::test]
+async fn resolvers_by_role_holder_match_the_roles_of_each_holder() -> Result<()> {
+    let zero = U256::ZERO;
+    let (address, address_arg) = argument(&U256::from(60).to_be_bytes::<32>(), 121);
+    let (shared, shared_arg) = argument(b"url", 122);
+    let root = bit(4) | bit(132) | bit(28);
+    let logs = vec![
+        roles(zero, HOLDER, zero, root, 120, 0),
+        roles(zero, ADMIN, zero, bit(132), 120, 1),
+        roles(zero, LINKER, zero, bit(28), 120, 2),
+        address_arg,
+        roles(address, HOLDER, zero, bit(0), 121, 1),
+        shared_arg,
+        roles(shared, HOLDER, zero, bit(4), 122, 1),
+        roles(zero, HOLDER, root, zero, 123, 0),
+        roles(zero, ADMIN, bit(132), zero, 123, 1),
+    ];
+    let manifest = manifest(false);
+    let output = interpret(&manifest, logs, 123)?;
+    let database = TestDatabase::new_migrated().await?;
+    seed(&database, &manifest, &output, 123).await?;
+    let holders = [HOLDER, ADMIN, LINKER, RESOLVER];
+    for (block, holder_row) in [
+        (
+            122,
+            json!({"chain_id":1,"address":RESOLVER,"grant_count":3,
+                   "powers":["admin_set_text","link","set_addr","set_text"]}),
+        ),
+        (
+            123,
+            json!({"chain_id":1,"address":RESOLVER,"grant_count":2,
+                   "powers":["set_addr","set_text"]}),
+        ),
+    ] {
+        publish(&database, block).await?;
+        let expected = rows_from_roles(&database, &holders).await?;
+        assert_eq!(expected[0], json!([holder_row]), "block {block}");
+        assert_eq!(expected[2][0]["grant_count"], 1, "block {block}");
+        assert_eq!(expected[3], json!([]), "block {block}");
+        for (holder, expected) in holders.iter().zip(&expected) {
+            for filter in ["", "&chain_id=1"] {
+                let (status, body) = role_holder_response(
+                    &database,
+                    &format!("/v1/resolvers?role_holder={holder}{filter}"),
+                )
+                .await?;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                assert_eq!(
+                    &body["data"], expected,
+                    "block {block} {holder}{filter}: {body}"
+                );
+                assert_eq!(body["page"]["total_count"], Value::Null, "{body}");
+                assert_eq!(body["page"]["has_more"], false, "{body}");
+            }
+        }
+    }
+    database.cleanup().await
+}
+
+/// A holder on three resolvers pages one at a time in address order, with and without the
+/// chain filter, and each cursor binds the holder and the filter. A request without a holder,
+/// with a malformed holder, chain, page size or cursor, or with a parameter the route does not
+/// take is `400 invalid_input`.
+#[tokio::test]
+async fn resolvers_by_role_holder_page_by_cursor_and_refuse_malformed_requests() -> Result<()> {
+    const PAGER: &str = "0x00000000000000000000000000000000000002a0";
+    let manifest = manifest(false);
+    let output = interpret(&manifest, vec![], 120)?;
+    let database = TestDatabase::new_migrated().await?;
+    seed(&database, &manifest, &output, 120).await?;
+    publish(&database, 120).await?;
+    let resolvers = [
+        "0x0000000000000000000000000000000000000301",
+        "0x0000000000000000000000000000000000000302",
+        "0x0000000000000000000000000000000000000303",
+    ];
+    for (index, resolver) in resolvers.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO project_grant (chain_id, resource_id, subject, scope, block_number,
+                 event_identity, event_kind, scope_kind, effective_powers, grant_source, revoked)
+             VALUES ($1, $2, $3, $4, 120, $5, 'PermissionChanged', 'resolver', '[\"set_addr\"]',
+                 '{\"kind\": \"raw_log\", \"source_event\": \"EACRolesChanged\",
+                   \"root_resource\": true}', false)",
+        )
+        .bind(CHAIN)
+        .bind(Uuid::from_u128(0x2a0_000 + index as u128))
+        .bind(PAGER)
+        .bind(format!("resolver:{CHAIN}:{resolver}"))
+        .bind(format!("role-holder-pager:{index}"))
+        .execute(&database.pool)
+        .await?;
+    }
+    let mut cursors = Vec::new();
+    for filter in ["", "&chain_id=1"] {
+        let base = format!("/v1/resolvers?role_holder={PAGER}{filter}&page_size=1");
+        let mut route = base.clone();
+        let mut walked = Vec::new();
+        loop {
+            let (status, body) = role_holder_response(&database, &route).await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            walked.extend(body["data"].as_array().unwrap().iter().cloned());
+            if body["page"]["has_more"] == false {
+                assert!(body["page"]["next_cursor"].is_null(), "{body}");
+                break;
+            }
+            let cursor = body["page"]["next_cursor"].as_str().unwrap().to_owned();
+            route = format!("{base}&cursor={cursor}");
+            cursors.push((filter, cursor));
+        }
+        assert_eq!(
+            walked,
+            resolvers
+                .iter()
+                .map(
+                    |resolver| json!({"chain_id":1,"address":resolver,"grant_count":1,
+                                       "powers":["set_addr"]})
+                )
+                .collect::<Vec<_>>(),
+            "{filter}"
+        );
+    }
+    let mut refused = vec![
+        "/v1/resolvers".to_owned(),
+        "/v1/resolvers?role_holder=".to_owned(),
+        "/v1/resolvers?role_holder=0x12".to_owned(),
+        format!("/v1/resolvers?role_holder={PAGER}&chain_id=5"),
+        format!("/v1/resolvers?role_holder={PAGER}&chain_id=11155111"),
+        format!("/v1/resolvers?role_holder={PAGER}&chain_id=8453"),
+        format!("/v1/resolvers?role_holder={PAGER}&chain_id=ethereum-mainnet"),
+        format!("/v1/resolvers?role_holder={PAGER}&page_size=0"),
+        format!("/v1/resolvers?role_holder={PAGER}&namespace=ens"),
+        format!("/v1/resolvers?role_holder={PAGER}&cursor=zz"),
+        format!("/v1/resolvers?role_holder={HOLDER}&cursor={}", cursors[0].1),
+    ];
+    // A cursor from the unfiltered list does not continue the filtered one, nor the reverse.
+    for (filter, cursor) in &cursors {
+        let other = if filter.is_empty() { "&chain_id=1" } else { "" };
+        refused.push(format!(
+            "/v1/resolvers?role_holder={PAGER}{other}&cursor={cursor}"
+        ));
+    }
+    for uri in refused {
+        let (status, body) = role_holder_response(&database, &uri).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_input", "{uri}: {body}");
+    }
+    let (_, body) = role_holder_response(&database, "/v1/resolvers").await?;
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("role_holder is required")),
+        "{body}"
+    );
+    database.cleanup().await
+}
+
+/// How a `chain_id` filter is answered on an `ens`-only deployment:
+///
+/// | Chain | State | Answer |
+/// | --- | --- | --- |
+/// | Base (8453), a known chain no public namespace serves | nothing indexed, indexed, published | `400`, naming it as not served |
+/// | 5, not a supported chain | the same | `400` |
+/// | Ethereum (1), served | indexed with a head, not yet published | `409 stale` |
+/// | Ethereum (1), served | published | `200` |
+///
+/// The unserved chain is refused before the request's publication is read, so it is never the
+/// `409 stale` a client would retry.
+#[tokio::test]
+async fn resolvers_by_role_holder_refuse_an_unserved_chain_before_any_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let route = |chain: &str| format!("/v1/resolvers?role_holder={HOLDER}&chain_id={chain}");
+    let manifest = manifest(false);
+    let output = interpret(&manifest, vec![], 120)?;
+    for state in ["nothing indexed", "indexed", "published"] {
+        match state {
+            "indexed" => {
+                seed(&database, &manifest, &output, 120).await?;
+                // The deployment follows a chain once it has a head; publishing comes later.
+                sqlx::query(
+                    "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+                     VALUES ($1, '0xhistory120', 120) ON CONFLICT (chain_id) DO NOTHING",
+                )
+                .bind(CHAIN)
+                .execute(&database.pool)
+                .await?;
+            }
+            "published" => publish(&database, 120).await?,
+            _ => {}
+        }
+        let (status, body) = role_holder_response(&database, &route("8453")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{state}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_input", "{state}: {body}");
+        assert_eq!(
+            body["error"]["message"], "chain_id names a chain this deployment does not serve",
+            "{state}: {body}"
+        );
+        let (status, body) = role_holder_response(&database, &route("5")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{state}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_input", "{state}: {body}");
+        if state == "nothing indexed" {
+            continue;
+        }
+        let (status, body) = role_holder_response(&database, &route("1")).await?;
+        if state == "published" {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"], json!([]), "{body}");
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"]["code"], "stale", "{body}");
+        }
+    }
+    database.cleanup().await
+}

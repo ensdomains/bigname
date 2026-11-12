@@ -25,7 +25,9 @@
 //! nothing (`derive_heals`).
 //!
 //! `registration_lead` is decided last, from the stored rows of every (address, resource) group a
-//! change touched, never from a chunk's partial view.
+//! change touched, never from a chunk's partial view. A rebuild's composition pass writes the rows
+//! with no lead and decides every group's lead in its leads stream (`compose_leads.rs`), by the
+//! same rank (`lead_rank`).
 use bigname_storage::families::{
     name::{FamilyPublication, compose_address_listing},
     records::{
@@ -41,6 +43,7 @@ use crate::{ProjectError, Result, families::input};
 #[cfg(test)]
 mod plan_tests;
 mod statements;
+pub(crate) use statements::lead_rank;
 use statements::{
     CHANGES, CLEAR_CHANGES, COMPOSED, DELETE, EXTRA, GROUPS, HEALS_ONLY, INSERT, JOURNAL,
     KEY_TARGET, LABEL_TARGET, LEADS, NAME, OBSERVED_LABELS, PREPARE, REGISTRY_CHILD,
@@ -215,7 +218,9 @@ pub(crate) async fn refresh(
 
 /// Derive the listing rows of one chunk of a rebuild's composition pass at the pass block
 /// `block`, after the chunk's summaries staged the names they composed: `others` are the chunk's
-/// ids the summaries do not compose, each of which can be a surface-less registry child.
+/// ids the summaries do not compose, each of which can be a surface-less registry child. The
+/// chunk decides no registration lead: a group's rows can lie in several workers' chunks, so the
+/// pass's leads stream decides them once every chunk committed (`compose_leads.rs`).
 pub(crate) async fn pass_chunk(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -223,9 +228,7 @@ pub(crate) async fn pass_chunk(
     others: &[String],
 ) -> Result<Refreshed> {
     scope(transaction, NAME, others).await?;
-    let mut refreshed = finish(transaction, chain_id, block, &[], &[], false).await?;
-    refreshed += leads(transaction, chain_id, block).await?;
-    Ok(refreshed)
+    finish(transaction, chain_id, block, &[], &[], false).await
 }
 
 /// `refresh` for an undo (`families/undo.rs`): at the restored block `block`, which journals

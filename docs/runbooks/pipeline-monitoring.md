@@ -471,12 +471,23 @@ target. While a rebuild applies its ranges, the composed tables (name
 summaries, lookup rows, address indexes and the history catalogue) read zero
 rows. During the [composition pass](../glossary.md#composition-pass) the
 marker sits still on one block for hours while the repair record's
-`compose_stream`, `compose_cursor` and `compose_chunks` move. That is progress,
+`compose_stream`, `compose_cursor` and `compose_chunks` move. In the names
+stream, `compose_stream` 0, the cursor stays empty and `compose_chunks` and the
+work list's `composed` rows move instead. That is progress,
 not a stall, and the runner continues through runs that only compose.
 On a mainnet-sized corpus `BignamePhaseRunnerHeartbeatStale` can fire once as
 the pass begins, because the batch that begins it also lists every name to
 compose in the same transaction. It clears when that batch ends and needs no
-action.
+action. The streams then run in this order: the address listing leads
+(`compose_stream` 7), the child listing parents (5), the record nodes (1), the
+record ids (2), the lookup inventories (4), the event counts (6) and last the
+history catalogue build (3). In the leads, event count and catalogue streams
+the cursor names the step and partition, and the runner logs each partition it
+commits with its rows and time. A partition longer than the heartbeat threshold fires
+the same alert. Raise
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS` or
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` for the next
+pass, not during one ([deployment](../deployment.md)).
 Failures leave the committed prefix available for resumption. A malformed
 journal is a data-integrity error to investigate, not an instruction to edit
 markers or silently discard it. Follow the recovery runbook for operator redo

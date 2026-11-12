@@ -3105,15 +3105,17 @@ introduces it rebuilds Project from full history before serving the option; see
   supplied, and `address` then restricts the permission subject. An explicit or
   name-implied `namespace` filters registrations before pagination; an
   address-only request without `namespace` continues to span all namespaces.
-  For the limited solo beta, address-only operator discovery retains a known
-  scalability limitation: a small page can still scan or sort an owner's
-  resource keys, and sparse namespace eligibility or cursor filtering can
-  require many eligibility lookups. The accepted optimization reduces payload
-  work in measured finite cases; it does not establish a production latency
-  SLO, a cold-cache guarantee, or a bound for arbitrary owner sizes. Issue #861
-  remains open for scalability. Name or explicit registration filters select
-  one resource and avoid this broad discovery branch. This limitation does not
-  change which rows are eligible or the cursor ordering.
+  An address-only page reads the address's grant keys in key order, at most
+  64 keys per round. For rows whose resource has no current name, the lookup of
+  the registration a registry-only grant stands for seeks each candidate
+  name's node, lease and block by key. A page's cost therefore grows with its
+  rows and does not depend on which names share the page. One cost remains
+  open under issue #861: an explicit `namespace` filter checks each candidate
+  resource's namespace with one lookup, so a sparse namespace can need many
+  lookups for one page. None of this is a production latency SLO or a
+  cold-cache guarantee. Name or explicit registration filters select one
+  resource and avoid this broad discovery branch. None of this changes which
+  rows are eligible or the cursor ordering.
   An explicit namespace must be public; an unknown value returns `404 not_found`
   before cursor decoding.
   Direct rows and effective registry-operator rows share the namespace
@@ -4901,6 +4903,77 @@ For a registrar lease first identified by a later readable observation, registra
   not the row it came from still exists; a cursor from before history walks
   restarts once if its row is gone.
 - Replaces (v1): `GET /v1/events` compact event search.
+
+### `GET /v1/resolvers`
+
+<!-- openapi:parameters GET /v1/resolvers -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `role_holder` | query | string | yes | none | EVM address in hexadecimal form, in any letter case. Lists the resolvers on which this address holds ENSv2 roles. |
+| `chain_id` | query | integer | no | none | Supported numeric EVM chain ID. Keeps the resolvers on that chain. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/resolvers -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object ResolversByRoleHolderResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
+- Tier: product read. The collection lists the resolvers on which one address
+  holds ENSv2 Enhanced Access Control (EAC) roles. It reads the other way from
+  [`/roles`](#get-v1resolverschain_idaddresslinks-and-roles), which lists the
+  holders of one resolver, but it does not depend on that route's enumeration
+  support. It lists the stored EAC grants, including those on a resolver whose
+  implementation `/roles` cannot enumerate or whose manifest is retired. For a
+  resolver listed here, `/roles` can therefore answer an unsupported page or
+  `404 not_found`.
+- Parameters: `role_holder` is required. A request without it, or with a blank
+  value, returns `400 invalid_input` with `role_holder is required`: the
+  collection never lists every resolver. `chain_id` keeps one chain's resolvers;
+  a supported chain this deployment does not serve returns `400 invalid_input`
+  with `chain_id names a chain this deployment does not serve`, decided before
+  any publication is read, so it is never the retryable `409 stale`. A served
+  chain whose publication is unavailable returns `409 stale`. `cursor` and
+  `page_size` (default 50, maximum 200) page the list. Other query parameters,
+  `at` and `finality` included, are rejected.
+- Each row is `{chain_id, address, grant_count, powers}` for one resolver on
+  which the holder holds at least one current EAC grant. `grant_count` is the
+  number of those grants: one per EAC resource the holder holds roles on, the
+  root resource included. `powers` is the union of their powers, in
+  lexicographic order, using the
+  [permission powers vocabulary](api-v1.md#permission-powers-vocabulary). A
+  revoked grant counts toward neither, and a resolver whose grants to the
+  holder are all revoked is absent.
+- Root grants are included. A role held on the root resource (resource `0`)
+  applies to every resource of the resolver, because each role check ORs the
+  account's root roles with its roles on the checked resource
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L191 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L452-L455 @ ens_v2@a971bd64).
+  This route counts the stored root grant in `grant_count` and `powers` like
+  any other grant. The per-grant routes show which grant is the root one: on
+  `GET /v1/permissions?address=` and on `/roles` each grant is its own row, and
+  the root grant's row carries `"eac_resource": "0"`.
+- Only ENSv2 EAC role grants are listed. Owning or registering an ENSv1 or
+  Basenames name whose registry resolver is this resolver does not list it
+  here; `GET /v1/permissions?address=` returns that derived resolver authority.
+  ENSv2 registry roles, the registry root roles included, are not resolver
+  roles and are not listed either.
+- Rows sort by chain and then by lowercase resolver address. Chains sort by
+  bigname's chain key, so Base rows come before Ethereum rows; the order is
+  stable across pages. The route does not count the holder's whole list, so
+  `page.total_count` is always `null`.
+- The answer reflects the current publication of every chain the request
+  spans, read on one database snapshot; a chain whose publication is not
+  servable returns `409 stale`. Pagination binds the holder, the `chain_id`
+  filter and the last row's chain and address; see
+  [current-state list cursors](api-v1.md#current-state-list-cursors). Each page
+  selects the current publication, and a cursor from another list or with
+  another filter returns `400 invalid_input`.
 
 ### `GET /v1/resolvers/{chain_id}/{address}`
 

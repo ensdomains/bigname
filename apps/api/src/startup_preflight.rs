@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, bail};
 use bigname_lookup::{ChainRpcUrls, RpcChainCheckError, verify_chain_rpc_url};
-use bigname_storage::walk_index_set::{IndexState, load_advisory_state, load_drop_list_state};
+use bigname_storage::walk_index_set::{
+    IndexState, IndexStatus, load_advisory_state, load_drop_list_state,
+    load_project_grant_advisory_state,
+};
 use sqlx::PgPool;
 
 use crate::cli::WalkIndexSetCheck;
@@ -164,15 +167,40 @@ pub(crate) async fn ensure_walk_index_set(
     }
 }
 
-/// Warns, naming each one, when an advisory index (`docs/storage.md`, Walk index set) is not a
-/// valid, ready index on `normalized_events` with the reviewed definition. It never refuses: the
-/// reads that use an advisory index return the same rows without it, more slowly. A catalog
-/// read that fails only warns too. Returns how many are not in place.
+/// Warns, naming each one, when an advisory index (`docs/storage.md`, Walk index set, and the
+/// `project_grant` advisory index under Table ownership) is not a valid, ready index on its
+/// table with the reviewed definition. It never refuses: the reads that use an advisory index
+/// return the same rows without it, more slowly. A catalog read that fails only warns too.
+/// Returns how many are not in place.
 pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
-    let statuses = match pool.acquire().await {
-        Ok(mut connection) => load_advisory_state(&mut connection).await,
-        Err(error) => Err(error),
-    };
+    let mut missing = 0;
+    for (table, install) in [
+        (
+            "normalized_events",
+            "ops/record-history-indexes/install.sql",
+        ),
+        (
+            "project_grant",
+            "ops/resolver-role-holder-index/install.sql",
+        ),
+    ] {
+        let statuses = match pool.acquire().await {
+            Ok(mut connection) if table == "project_grant" => {
+                load_project_grant_advisory_state(&mut connection).await
+            }
+            Ok(mut connection) => load_advisory_state(&mut connection).await,
+            Err(error) => Err(error),
+        };
+        missing += warn_on(table, install, statuses);
+    }
+    missing
+}
+
+fn warn_on(
+    table: &str,
+    install: &str,
+    statuses: Result<Option<Vec<IndexStatus>>, sqlx::Error>,
+) -> usize {
     let statuses = match statuses {
         Ok(Some(statuses)) => statuses,
         Ok(None) => return 0,
@@ -180,8 +208,8 @@ pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
             tracing::warn!(
                 service = "api",
                 error = %error,
-                "the API could not read the state of the advisory normalized_events indexes \
-                 and serves without checking them"
+                "the API could not read the state of the advisory {table} indexes and serves \
+                 without checking them"
             );
             return 0;
         }
@@ -197,8 +225,8 @@ pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
                         index,
                         found,
                         expected = status.index.definition,
-                        "an advisory normalized_events index has another definition than this \
-                         build expects, and the API reads it as found"
+                        "an advisory {table} index has another definition than this build \
+                         expects, and the API reads it as found"
                     );
                 }
                 continue;
@@ -212,9 +240,9 @@ pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
             service = "api",
             index,
             state = %state,
-            "an advisory normalized_events index is not in place, so the API serves the reads \
-             it speeds up without it and they may exceed BIGNAME_API_DB_STATEMENT_TIMEOUT_MS; \
-             build it with ops/record-history-indexes/install.sql"
+            "an advisory {table} index is not in place, so the API serves the reads it speeds \
+             up without it and they may exceed BIGNAME_API_DB_STATEMENT_TIMEOUT_MS; build it \
+             with {install}"
         );
     }
     missing

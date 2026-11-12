@@ -176,7 +176,10 @@ async fn assert_pass_equals_rebuild(fixture: &Fixture, head: i64) -> Result<()> 
         ("in ranges", RebuildRanges::Through(head)),
         ("block by block", RebuildRanges::Off),
     ] {
-        let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(ranges);
+        // One run, whatever the composition pass's partition count.
+        let options = FamilyOptions::new(CONTENT_HASH)
+            .with_rebuild_ranges(ranges)
+            .with_max_blocks_per_run(u64::MAX);
         fixture
             .apply_with(head, FamilyMode::Rebuild, &options)
             .await
@@ -804,7 +807,10 @@ async fn the_history_catalogue_after_the_pass_equals_the_rebuild() -> Result<()>
         ("in ranges", RebuildRanges::Through(13)),
         ("block by block", RebuildRanges::Off),
     ] {
-        let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(ranges);
+        // One run, whatever the composition pass's partition count.
+        let options = FamilyOptions::new(CONTENT_HASH)
+            .with_rebuild_ranges(ranges)
+            .with_max_blocks_per_run(u64::MAX);
         fixture
             .apply_with(13, FamilyMode::Rebuild, &options)
             .await?;
