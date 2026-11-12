@@ -2,13 +2,15 @@
 //! a full-history Interpret redo (`docs/storage.md` § Walk index set), and one catalog read of
 //! their state. The phase runner rebuilds them before Project runs. The advisory indexes are
 //! outside that set: an operator builds them by hand, the runner never builds them, and the API
-//! serves without them.
+//! serves without them. The `project_grant` advisory indexes follow the same rule on that table,
+//! which no walk drops.
 use sqlx::{Connection, PgConnection};
 
 mod constants;
-pub use constants::{ADVISORY, DROP_LIST, KEPT};
+pub use constants::{ADVISORY, DROP_LIST, KEPT, PROJECT_GRANT_ADVISORY};
 
 pub const TABLE: &str = "bigname_phase.normalized_events";
+pub const PROJECT_GRANT_TABLE: &str = "bigname_phase.project_grant";
 
 /// One index `drop.sql` drops, or one advisory index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,7 +62,7 @@ impl IndexStatus {
 
 const STATE: &str = "
 SELECT relation.relkind::text,
-       ix.indrelid = to_regclass('bigname_phase.normalized_events'),
+       ix.indrelid = to_regclass($2),
        ix.indisvalid AND ix.indisready AND ix.indislive,
        CASE WHEN relation.relkind = 'i' THEN pg_get_indexdef(relation.oid) END,
        ix.indrelid::regclass::text
@@ -84,7 +86,7 @@ type StateRow = (
 pub async fn load_drop_list_state(
     connection: &mut PgConnection,
 ) -> Result<Option<Vec<IndexStatus>>, sqlx::Error> {
-    load_state(connection, DROP_LIST).await
+    load_state(connection, DROP_LIST, TABLE).await
 }
 
 /// The state of every index in [`ADVISORY`], read as [`load_drop_list_state`] reads the drop
@@ -92,12 +94,21 @@ pub async fn load_drop_list_state(
 pub async fn load_advisory_state(
     connection: &mut PgConnection,
 ) -> Result<Option<Vec<IndexStatus>>, sqlx::Error> {
-    load_state(connection, ADVISORY).await
+    load_state(connection, ADVISORY, TABLE).await
+}
+
+/// The state of every index in [`PROJECT_GRANT_ADVISORY`], read as [`load_drop_list_state`]
+/// reads the drop list, or `None` when [`PROJECT_GRANT_TABLE`] does not exist.
+pub async fn load_project_grant_advisory_state(
+    connection: &mut PgConnection,
+) -> Result<Option<Vec<IndexStatus>>, sqlx::Error> {
+    load_state(connection, PROJECT_GRANT_ADVISORY, PROJECT_GRANT_TABLE).await
 }
 
 async fn load_state(
     connection: &mut PgConnection,
     listed: &'static [DroppedIndex],
+    table: &str,
 ) -> Result<Option<Vec<IndexStatus>>, sqlx::Error> {
     let mut transaction = connection.begin().await?;
     sqlx::query(
@@ -106,17 +117,18 @@ async fn load_state(
     )
     .execute(&mut *transaction)
     .await?;
-    let table: bool =
-        sqlx::query_scalar("SELECT to_regclass('bigname_phase.normalized_events') IS NOT NULL")
-            .fetch_one(&mut *transaction)
-            .await?;
-    if !table {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(table)
+        .fetch_one(&mut *transaction)
+        .await?;
+    if !exists {
         transaction.commit().await?;
         return Ok(None);
     }
     let names: Vec<&str> = listed.iter().map(|index| index.name).collect();
     let rows: Vec<StateRow> = sqlx::query_as(STATE)
         .bind(names)
+        .bind(table)
         .fetch_all(&mut *transaction)
         .await?;
     transaction.commit().await?;
