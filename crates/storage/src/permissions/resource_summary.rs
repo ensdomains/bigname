@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::history::lineage_probe_at_block;
+
 /// Whether retained activated events prove this resource wrapped a registrar lease: a recorded
 /// lease link, or a registrar grant for the same name in the wrap's transaction. The latter
 /// covers controller-derived registration after NameWrapped. This classification survives the
@@ -173,14 +175,13 @@ pub async fn load_registry_permission_registration_map(
 /// Every `normalized_events` read in this statement seeks a key the statement supplies, and
 /// every `chain_lineage` read is one primary-key probe per event row, whatever the planner
 /// estimates. `eligible` reads its row's lineage through a correlated lookup that ends in
-/// `LIMIT 1`, so it cannot be pulled up into a join the planner could hash. It is the text of
-/// `lineage_probe_at_block("JOIN", "lineage", "ne")` in `history/lineage.rs` on
-/// `hotfix/reconcile-2026-10`, copied here because this branch has no such helper. Call the
-/// helper once it does. `eligible` is not materialized, so every use below inherits the probe.
+/// `LIMIT 1` (`lineage_probe_at_block`), so it cannot be pulled up into a join the planner could
+/// hash. `eligible` is not materialized, so every use below inherits the probe.
 fn registry_permission_registration_map_sql() -> String {
     // Select a batch of page resources, or controls of the explicitly requested lease. The
     // reverse lookup is only a candidate restriction; the latest-grant check below still
     // excludes obsolete leases. Direct nodes take precedence over possibly stale name links.
+    let eligible_lineage = lineage_probe_at_block("JOIN", "lineage", "ne");
     let same_authority = registry_permission_same_node("candidate", "authority");
     let same_grant = registry_permission_same_node("candidate", "grant_event");
     let node_candidates = registry_permission_node_candidates();
@@ -196,14 +197,7 @@ fn registry_permission_registration_map_sql() -> String {
                     ne.after_state ->> 'node', ne.after_state #>> '{{grant_source,node}}',
                     ne.after_state #>> '{{revocation_source,node}}')), ne.logical_name_id) AS node_key
             FROM bigname_phase.normalized_events ne
-            JOIN LATERAL (
-                SELECT lineage.canonicality_state
-                FROM bigname_phase.chain_lineage lineage
-                WHERE lineage.chain_id = ne.chain_id
-                  AND lineage.block_hash = ne.block_hash
-                  AND lineage.block_number = ne.block_number
-                LIMIT 1
-            ) lineage ON TRUE
+            {eligible_lineage}
             WHERE ne.block_number <= ($3::jsonb ->> ne.chain_id)::bigint
               AND ne.consumer_visibility = 'activated'
               AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
