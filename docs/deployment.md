@@ -3448,8 +3448,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 35 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 52, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 38 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 55, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -6932,6 +6932,87 @@ The two indexes are advisory ([walk index set](storage.md#walk-index-set)). The 
 never builds them, and `ops/walk-index-set/drop.sql` leaves them in place. The API starts and
 serves without them, with a WARN at startup naming each one that is not in place, and a page
 with `record_key` then walks the chain's events as before.
+
+## Address membership probes keyed inside a planning fence
+
+`GET /v1/events?address=…`, `GET /v1/diagnostics/events?address=…` and the address history walker
+first list the names and resources an address held in the past
+([table ownership](storage.md#table-ownership)). Before this build that statement estimated every
+address at PostgreSQL's default selectivity, because the planner keeps no statistics on a partial
+index's expression. Against that estimate it combined the address probes with
+`normalized_events_projection_idx` over every grant and transfer of the chain on each call. The
+statement now reads each address key, `registrant`, `to` and `owner`, through its own subquery that
+holds only the key's match and the address length of its value, and applies every other filter
+afterwards. Three new
+partial indexes, one per key, serve those subqueries.
+
+- The rows are the same for every route and flag combination. No response changes.
+- It rotates the [projection content hash](glossary.md#projection-content-hash), because the
+  statement is built in a hashed composition file
+  (`crates/storage/src/history/address_evidence.rs`). The
+  [interpreter content hash](glossary.md#interpreter-content-hash) does not move.
+- The rotation is formal. Project's publication statement in the same file is unchanged, so the
+  full-range Project redo rewrites `project_address_history_anchor` and every other projected row
+  to the same values. The release that carries the change redoes Project anyway, so it adds no
+  redo of its own.
+- It adds schema-migration `20261112150000_normalized_events_address_key_indexes.sql` and no
+  table, manifest or setting. The manifest-authority fingerprint and the compiled watch plan are
+  unchanged, so stamp no Ingest redo.
+
+The indexes join the drop list of the [walk index set](storage.md#walk-index-set), so a redo
+that drops the set builds them in its finish step, three more builds than before, and a database
+promoted from that redo's seed needs no hand build. The API refuses to start without them unless
+`BIGNAME_API_WALK_INDEX_SET_CHECK=warn`, because without them each probe reads
+`normalized_events` sequentially, so all three must be valid on every database an API reads
+before that API takes the build.
+
+On a database that takes the build without such a redo:
+
+1. Build the three indexes with `ops/address-key-indexes/install.sql`, as its
+   [README](../ops/address-key-indexes/README.md) describes. The runner and the API keep running
+   while it builds, and the previous image does not read them.
+2. Apply the schema-migrations. The schema-migration adopts the prebuilt indexes by name and
+   reviewed definition, and refuses a populated table without them.
+3. Swap the image under the release's re-derivation boundary.
+
+The earlier kind-partial `normalized_events_address_*_match_idx` indexes stay installed until a
+later build drops them.
+
+## Partial index for the resolvers of a role holder
+
+The build that adds `project_grant_resolver_role_holder_idx` serves
+`GET /v1/resolvers?role_holder=` ([table ownership](storage.md#table-ownership)).
+
+- The page reads the holder's live ENSv2 EAC resolver grants through the new partial index, in
+  resolver order from the cursor. It reads no derived ENSv1 or Basenames resolver authority row.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the reader is a serving file, not a hashed one. No redo is needed. The change ships as an
+  image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order on every database the build is deployed to:
+
+1. Build the index with
+   [`ops/resolver-role-holder-index/install.sql`](../ops/resolver-role-holder-index/README.md),
+   concurrently and outside a transaction.
+2. Check it with the query in that README: one valid and ready index with the reviewed
+   definition.
+3. Apply schema-migration `20261112140000_project_grant_resolver_role_holder_index.sql`.
+4. Swap the image.
+
+The schema-migration adopts an index of the reviewed name that is valid and ready with the
+reviewed definition, without a build and without a lock, so it is a no-op on a database where
+the script already built it. An empty `project_grant` builds it directly. A populated table
+without it is refused, because an ordinary build would block writes to `project_grant` for the
+whole build. The schema-migration refuses a name that is not an index, an index on another
+table or one that is not valid and ready, and another definition. Its error names the index
+and, for another definition, prints the definition it found and the one it expects. The README
+gives the recovery steps. Then run the schema-migrations again.
+
+The index is advisory. The phase runner never builds it, and no walk drops it. The API starts
+and serves without it, with a WARN at startup when it is not in place, and the page then reads
+every grant of the holder.
 
 ## Resolver boundary walks in the rebuild work list
 

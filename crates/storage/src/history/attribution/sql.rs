@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::ManifestSets;
 use crate::history::filters::push_publication_bound;
 
-const READABLE: &str = "('canonical', 'safe', 'finalized')";
+pub(super) const READABLE: &str = "('canonical', 'safe', 'finalized')";
 pub(in crate::history) const ENS_V1_POINTER_FAMILIES: &str =
     "('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')";
 pub(super) const ENS_V2_POINTER_FAMILIES: &str = "('ens_v2_registry_l1', 'ens_v2_root_l1')";

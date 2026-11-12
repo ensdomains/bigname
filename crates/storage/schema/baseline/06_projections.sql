@@ -2788,6 +2788,14 @@ CREATE INDEX IF NOT EXISTS project_name_summary_authority_grace_idx
 CREATE INDEX IF NOT EXISTS project_grant_subject_resource_idx
     ON project_grant (subject COLLATE "C", resource_id, scope COLLATE "C");
 
+-- The live ENSv2 EAC resolver grants by holder in resolver scope order, for
+-- GET /v1/resolvers?role_holder=. Advisory: ops/resolver-role-holder-index/README.md.
+CREATE INDEX IF NOT EXISTS project_grant_resolver_role_holder_idx
+    ON project_grant (subject COLLATE "C", scope COLLATE "C")
+    WHERE scope_kind = 'resolver'
+      AND NOT revoked
+      AND grant_source ->> 'source_event' = 'EACRolesChanged';
+
 CREATE INDEX IF NOT EXISTS project_registry_binding_observation_owner_target_idx
     ON project_registry_binding_observation (chain_id, registry_contract, registry_owner, target_resource_id);
 
