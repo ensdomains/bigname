@@ -7275,8 +7275,7 @@ row, as block-by-block publication gives them.
 - A pass stopped inside the event count or leads stream refuses to continue if
   `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`,
   `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` or the PostgreSQL server
-  version changed since, as the catalogue build does. Put the values back, or stamp a Project
-  redo.
+  version changed since, as the catalogue build does. Put the old values back.
 - The child listing parents stream is `compose_stream` 5. The values 3 and 4 keep their
   meaning. The pass runs 0, 7, 5, 1, 2, 4, 6, then 3.
 - The schema-migration `20261112120000_project_compose_stream_order_comments.sql` changes the
@@ -7301,11 +7300,14 @@ request's publication as the leading key, so it seeks that index.
 
 - The rows are the same. A binding candidate is on its resource's chain, and both routes
   pass every chain of their publication. No response changes.
-- It rotates the [projection content hash](glossary.md#projection-content-hash), because the
-  lookup is in a hashed composition file (`crates/storage/src/families/name/batch.rs`). The
-  [interpreter content hash](glossary.md#interpreter-content-hash) does not move.
-- The rotation is formal. Project never sends the lookup, so the full-range Project redo
-  rewrites every projected row to the same values. The release that carries the change redoes
-  Project anyway, so it adds no redo of its own.
+- It rotates the [projection content hash](glossary.md#projection-content-hash) from
+  `90642c42` to `01bbd68f`. Three of its inputs change: the lookup in
+  `crates/storage/src/families/name/batch.rs`, and comment-only edits in
+  `crates/project/src/families/mod.rs` and `crates/project/src/families/event_counts.rs`. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) stays `4056df69`.
+- The rotation is formal. Project never sends the lookup, and the other two edits change
+  comments only, so the full-range Project redo rewrites every projected row to the same
+  values. The release that carries the change redoes Project anyway, so it adds no redo of
+  its own.
 - It adds no schema-migration, index, table, manifest or setting. The manifest-authority
   fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.
