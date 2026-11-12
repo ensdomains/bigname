@@ -33,8 +33,10 @@ pub(super) async fn assert_rebuild(database: &TestDatabase, offset: i64) -> Resu
             },
             FamilyMode::Rebuild,
             &token,
+            // One run, whatever the composition pass's partition count.
             &FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH)
-                .with_rebuild_ranges(ranges),
+                .with_rebuild_ranges(ranges)
+                .with_max_blocks_per_run(u64::MAX),
         )
         .await?;
         assert_eq!(

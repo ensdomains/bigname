@@ -2964,8 +2964,19 @@ each have composed. It runs before the rebuild's first generation above the
 switch point, at the block the last range left the [family
 marker](#family-marker) on, in chunks of up to 1,000 keys, each a transaction
 of its own that counts as one block of the run's budget. Its beginning lists
-the names to compose once, in `project_compose_name_work`, and the names
-stream pages through that list. The [repair record](#repair-record) is
+the names to compose once, in `project_compose_name_work`. Its eight streams run
+in order. In the names stream one or more workers, each on a database
+connection of its own, claim the listed names no chunk has composed yet and
+compose them side by side, so no name is composed twice and none is skipped
+whatever the worker count. The leads stream then decides each address listing
+group's registration lead, which no names chunk can see whole. The child
+listing parents stream composes the child listings. The record node and record
+id streams compose the address record indexes. The lookup inventories stream
+composes the record inventory of each resource a composed name serves. The event
+count stream builds the stored event counts once, and the last stream builds the
+address history catalogue once, each in partitions that are each a transaction
+and a block of the budget. The worker count does not change any row the pass writes.
+The [repair record](#repair-record) is
 `composing` while it runs and records its stream, cursor and chunk count, so a
 run that stops resumes it. It ends with one marker journal row
 that ends the [undo journal](#family-undo-journal) at its block

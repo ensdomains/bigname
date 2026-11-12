@@ -16,7 +16,7 @@
 use sqlx::{Postgres, Transaction};
 
 mod compose;
-pub(crate) use compose::{begin_compose, compose_step, end_compose};
+pub(crate) use compose::{begin_compose, compose_step, end_compose, require_composing};
 
 use super::input::{InputToken, Revision};
 use crate::{Marker, ProjectError, Result};
@@ -200,13 +200,17 @@ const RECORD_COLUMNS: &str = "attempt, reason, trusted_base_number, trusted_base
         completed_sequence, completed_marker_number, completed_marker_hash, completed_input_hash,
         reset_sequence, composed_block, compose_stream, compose_cursor";
 
-pub(crate) async fn read(pool: &sqlx::PgPool, chain_id: &str) -> Result<Option<Record>> {
+/// Read the record without locking it, on the pool or inside a transaction.
+pub(crate) async fn read<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    chain_id: &str,
+) -> Result<Option<Record>> {
     let row: Option<RecordRow> = sqlx::query_as(&format!(
         "/* project:families.repair.read */ SELECT {RECORD_COLUMNS}
          FROM project_repair_record WHERE chain_id = $1"
     ))
     .bind(chain_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(|error| ProjectError::database("failed to read the repair record", error))?;
     Ok(row.map(Record::from))

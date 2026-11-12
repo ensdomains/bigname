@@ -539,7 +539,10 @@ predecessor_shape_proof_count=0
 # The address key indexes' schema-migration adds one.
 # The resolver role holder index's schema-migration adds one.
 # The raw-name prefix index drop adds one.
-expected_predecessor_shape_proof_count=$((96 + 1 + 1 + 1))
+# Main's catalogue build schema-migration adds one.
+# Main's lost-witness index schema-migration adds one.
+# The event count stream's work table schema-migration adds one.
+expected_predecessor_shape_proof_count=$((96 + 1 + 1 + 1 + 1 + 1 + 1))
 refusal_probe_seconds=0
 timing_started=$SECONDS
 unread_index_migration="$ROOT/migrations/20261012130000_drop_unread_indexes.sql"
@@ -840,6 +843,19 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" baseline-first
+            # The catalogue build's work columns and table: added to the pre-7c shape, already in
+            # the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261027130000_project_compose_stream_comments.sql" baseline-first
+            # The lost-witness indexes: absent from the pre-7c shape, present in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261027140000_name_surfaces_lost_witness_indexes.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261027140000_name_surfaces_lost_witness_indexes.sql" baseline-first
             # The registry departure index: absent from the pre-7c shape, present in the baseline.
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" preceding-shape
@@ -905,6 +921,14 @@ check_served_projection_removal() {
                 emit_phase_migration "$record_history_index_migration" preceding-shape
             fi
             emit_phase_migration "$record_history_index_migration" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261112120000_project_compose_stream_order_comments.sql" baseline-first
+            # The event count stream's work table: absent from the pre-7c shape, present in the
+            # baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261112130000_project_compose_event_count_work.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261112130000_project_compose_event_count_work.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261112130000_project_compose_event_count_work.sql" baseline-first
             # The address key indexes: absent from the pre-7c shape, present in the baseline.
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$address_key_index_migration" preceding-shape
@@ -1073,6 +1097,9 @@ for migration_file in \
     "$unnamed_lease_index_migration" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
     "$ROOT/migrations/20261019120000_registry_permission_mainnet_departure_indexes.sql" \
+    "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" \
+    "$ROOT/migrations/20261027130000_project_compose_stream_comments.sql" \
+    "$ROOT/migrations/20261027140000_name_surfaces_lost_witness_indexes.sql" \
     "$ROOT/migrations/20261027150000_registry_permission_departure_index.sql" \
     "$serving_read_index_migration" \
     "$search_prefix_index_migration" \
@@ -1085,6 +1112,8 @@ for migration_file in \
     "$ROOT/migrations/20261104130000_project_event_count.sql" \
     "$ROOT/migrations/20261104140000_project_address_listing.sql" \
     "$record_history_index_migration" \
+    "$ROOT/migrations/20261112120000_project_compose_stream_order_comments.sql" \
+    "$ROOT/migrations/20261112130000_project_compose_event_count_work.sql" \
     "$address_key_index_migration" \
     "$role_holder_index_migration" \
     "$raw_prefix_index_drop_migration"
@@ -1428,8 +1457,18 @@ for migration_file in \
     "$ROOT/migrations/20261015120000_project_address_controller_candidate_transfer_comments.sql" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
     "$ROOT/migrations/20261016130000_project_repair_record_composing.sql" \
+    "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" \
+    "$ROOT/migrations/20261027120000_project_compose_history_builder.sql" \
+    "$ROOT/migrations/20261027130000_project_compose_stream_comments.sql" \
+    "$ROOT/migrations/20261027130000_project_compose_stream_comments.sql" \
+    "$ROOT/migrations/20261027140000_name_surfaces_lost_witness_indexes.sql" \
+    "$ROOT/migrations/20261027140000_name_surfaces_lost_witness_indexes.sql" \
     "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql" \
-    "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql"
+    "$ROOT/migrations/20261102120000_project_resolver_classification_reason_comment.sql" \
+    "$ROOT/migrations/20261112120000_project_compose_stream_order_comments.sql" \
+    "$ROOT/migrations/20261112120000_project_compose_stream_order_comments.sql" \
+    "$ROOT/migrations/20261112130000_project_compose_event_count_work.sql" \
+    "$ROOT/migrations/20261112130000_project_compose_event_count_work.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -6692,6 +6731,8 @@ BEGIN
             ('project_family_undo'),
             ('project_repair_record'),
             ('project_compose_name_work'),
+            ('project_compose_history_work'),
+            ('project_compose_event_count_work'),
             ('project_name_state'),
             ('project_binding_candidate'),
             ('project_lifecycle_key_state'),
@@ -6819,6 +6860,8 @@ BEGIN
             ('project_family_undo'),
             ('project_repair_record'),
             ('project_compose_name_work'),
+            ('project_compose_history_work'),
+            ('project_compose_event_count_work'),
             ('project_name_state'),
             ('project_binding_candidate'),
             ('project_lifecycle_key_state'),
@@ -7435,6 +7478,18 @@ BEGIN
                     'name_surfaces',
                     ARRAY['chain_id', 'block_number'],
                     NULL
+                ),
+                (
+                    'name_surfaces_released_witness_idx',
+                    'name_surfaces',
+                    ARRAY['chain_id', 'logical_name_id'],
+                    ARRAY['%raw_name IS NOT NULL%', '%preimage_event_identity IS NULL%']
+                ),
+                (
+                    'name_surfaces_byte_shadow_idx',
+                    'name_surfaces',
+                    ARRAY['chain_id', 'logical_name_id'],
+                    ARRAY['%raw_name = ''''::text%', '%visibility_state = ''shadow''::text%']
                 ),
                 (
                     'surface_bindings_chain_block_number_idx',
