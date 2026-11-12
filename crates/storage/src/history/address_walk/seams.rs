@@ -17,6 +17,9 @@ mod scoped {
         pub counters: BTreeMap<&'static str, usize>,
         pub combined_peak: usize,
         pub catalogue_receipt: Option<serde_json::Value>,
+        /// Whether a `contract_address` read leapfrogs between the address's and the
+        /// contract's buckets. Off, the walk visits every bucket of the address.
+        pub contract_leapfrog: bool,
     }
 
     impl Default for AddressHistoryWorkingSet {
@@ -29,6 +32,7 @@ mod scoped {
                 counters: BTreeMap::new(),
                 combined_peak: 0,
                 catalogue_receipt: None,
+                contract_leapfrog: true,
             }
         }
     }

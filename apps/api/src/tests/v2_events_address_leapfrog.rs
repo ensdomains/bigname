@@ -1,0 +1,526 @@
+//! `GET /v1/events?address=&contract_address=` visits only the catalogue buckets where both the
+//! address and the contract can have a row. Its rows, order, cursors and totals are those of the
+//! walk that visits every bucket of the address, and of the SQL page that served the read before.
+use super::*;
+
+/// The newest fixture block. Every block from `BLOCK` to it has lineage.
+const HEAD: i64 = 16 * 256;
+/// Contracts whose events the fixtures place by catalogue bucket.
+const NEWEST: &str = "0x000000000000000000000000000000000000c909";
+const MIDDLE: &str = "0x000000000000000000000000000000000000c905";
+const OLDEST: &str = "0x000000000000000000000000000000000000c900";
+const WINDOWED: &str = "0x000000000000000000000000000000000000c950";
+const PAGED: &str = "0x000000000000000000000000000000000000c990";
+const TIED: &str = "0x000000000000000000000000000000000000c9e0";
+/// A contract that emitted events in buckets 2 and 7, none of them the address's.
+const ELSEWHERE: &str = "0x000000000000000000000000000000000000c927";
+/// A contract that emitted no event at all.
+const SILENT: &str = "0x000000000000000000000000000000000000c9ff";
+/// A contract with events in every bucket, like a registry.
+const DENSE: &str = "0x000000000000000000000000000000000000c9dd";
+/// A registry with two events in a long history of the address, neither of them the address's.
+const REGISTRY: &str = "0x000000000000000000000000000000000000c9aa";
+/// An address holding one name, all of whose events are in bucket 3.
+const SPARSE: &str = "0x000000000000000000000000000000000000a236";
+const SPARSE_CONTROLLER: &str = "0x000000000000000000000000000000000000b236";
+
+/// A block in `bucket`. Bucket 0's is above `BLOCK`, so it has lineage too.
+fn block(bucket: i64) -> i64 {
+    bucket * 256 + 250
+}
+
+fn hash(block: i64) -> String {
+    format!("0xhistory{block}")
+}
+
+/// Lineage for every block above `BLOCK` up to `HEAD`, with later blocks later in time.
+async fn extend_lineage(database: &TestDatabase) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         SELECT 'ethereum-mainnet', '0xhistory' || n, n, to_timestamp(1776384000 + (n - 240) * 12),
+                'canonical'::bigname_phase.canonicality_state
+         FROM generate_series($1::bigint, $2::bigint) n
+         ON CONFLICT (chain_id, block_hash) DO NOTHING",
+    )
+    .bind(BLOCK + 1)
+    .bind(HEAD)
+    .execute(&database.pool)
+    .await?;
+    publish_bounded_membership_at(database, HEAD).await
+}
+
+/// A renewal of `seed_names`' name `name`, which the fixture address registered.
+fn renewal(identity: &str, name: usize, block: i64, log: i64) -> NormalizedEvent {
+    let logical = bigname_storage::logical_name_id_for_name("ens", &format!("walk-{name:04}.eth"));
+    address_fixture_event(
+        identity,
+        Some(&logical),
+        Some(Uuid::from_u128(0x235000 + name as u128 * 4)),
+        "RegistrationRenewed",
+        "ens_v1_registrar_l1",
+        block,
+        &hash(block),
+        log,
+        json!({"expiry":1_900_000_000_i64}),
+    )
+}
+
+/// An event that names no name or resource, so no address's catalogue holds it.
+fn unnamed(identity: &str, block: i64, log: i64) -> NormalizedEvent {
+    address_fixture_event(
+        identity,
+        None,
+        None,
+        "RegistrationRenewed",
+        "ens_v1_registrar_l1",
+        block,
+        &hash(block),
+        log,
+        json!({"expiry":1_900_000_000_i64}),
+    )
+}
+
+fn emitted_by(mut event: NormalizedEvent, contract: &str) -> NormalizedEvent {
+    event.raw_fact_ref = json!({"kind":"raw_log", "event_identity":event.event_identity,
+        "emitting_address":contract});
+    event
+}
+
+/// Four names of the fixture address with events in buckets 0, 1, 5 and 9: each name's events
+/// start in bucket 0, and names 1, 2 and 3 are renewed in buckets 1, 5 and 9. Each contract above
+/// emitted the events its name says, the others nothing on the address.
+async fn seed_buckets(database: &TestDatabase) -> Result<()> {
+    seed_names(database, 4).await?;
+    extend_lineage(database).await?;
+    let mut events = vec![
+        renewal("leapfrog-address-1", 1, block(1), 1_000),
+        renewal("leapfrog-address-5", 2, block(5), 1_000),
+        renewal("leapfrog-address-9", 3, block(9), 1_000),
+        emitted_by(renewal("leapfrog-newest", 3, block(9) + 1, 1_001), NEWEST),
+        emitted_by(renewal("leapfrog-middle", 2, block(5) + 1, 1_001), MIDDLE),
+        emitted_by(renewal("leapfrog-oldest", 0, block(0) + 1, 1_001), OLDEST),
+        emitted_by(
+            renewal("leapfrog-window-5", 2, block(5) + 2, 1_002),
+            WINDOWED,
+        ),
+        emitted_by(
+            renewal("leapfrog-window-0", 0, block(0) + 2, 1_002),
+            WINDOWED,
+        ),
+        emitted_by(renewal("leapfrog-page-9", 3, block(9) + 2, 1_002), PAGED),
+        emitted_by(renewal("leapfrog-page-0", 1, block(0) + 3, 1_003), PAGED),
+        emitted_by(unnamed("leapfrog-elsewhere-2", block(2), 1_000), ELSEWHERE),
+        emitted_by(unnamed("leapfrog-elsewhere-7", block(7), 1_000), ELSEWHERE),
+    ];
+    // Two rows of one block and transaction apart only by log index, and two block-level rows
+    // apart only by identity.
+    let tied = block(5) + 3;
+    for (identity, log) in [("leapfrog-tie-log-a", 1_010), ("leapfrog-tie-log-b", 1_011)] {
+        events.push(emitted_by(renewal(identity, 2, tied, log), TIED));
+    }
+    for identity in ["leapfrog-tie-block-a", "leapfrog-tie-block-b"] {
+        let mut event = emitted_by(renewal(identity, 2, tied, 0), TIED);
+        event.transaction_hash = None;
+        event.log_index = None;
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", HEAD, &hash(HEAD)).await
+}
+
+/// One page through the catalogue walk, with the leapfrog on or off, and its measurements.
+async fn walked(
+    database: &TestDatabase,
+    uri: &str,
+    leapfrog: bool,
+) -> Result<(Value, bigname_storage::AddressHistoryWorkingSet)> {
+    let stats = Arc::new(Mutex::new(bigname_storage::AddressHistoryWorkingSet {
+        contract_leapfrog: leapfrog,
+        ..Default::default()
+    }));
+    let body = bigname_storage::with_address_history_working_set(
+        stats.clone(),
+        v2_history_payload_for_database(database, uri),
+    )
+    .await?;
+    let stats = stats.lock().unwrap().clone();
+    assert_eq!(
+        stats.counters.get("catalogue"),
+        Some(&1),
+        "{uri}: the read did not take the catalogue walk: {stats:?}"
+    );
+    Ok((body, stats))
+}
+
+fn counted(stats: &bigname_storage::AddressHistoryWorkingSet, key: &str) -> usize {
+    stats.counters.get(key).copied().unwrap_or_default()
+}
+
+/// The same page on the SQL page.
+async fn sql_page(database: &TestDatabase, uri: &str) -> Result<Value> {
+    crate::v2::with_address_sql_page(v2_history_payload_for_database(database, uri)).await
+}
+
+/// Walks `/v1/events?{query}` to its end at `page_size`, and checks every page against the walk
+/// without the leapfrog and the SQL page: rows, cursors and totals. Returns the row identities
+/// and, per page, the bucket batches and seeks with and without the leapfrog.
+async fn walk_three_ways(
+    database: &TestDatabase,
+    query: &str,
+    page_size: usize,
+) -> Result<(Vec<String>, Vec<[usize; 4]>)> {
+    let mut cursor: Option<String> = None;
+    let mut rows = Vec::new();
+    let mut pages = Vec::new();
+    loop {
+        let mut uri = format!("/v1/events?{query}&page_size={page_size}");
+        if let Some(cursor) = &cursor {
+            uri.push_str(&format!("&cursor={cursor}"));
+        }
+        let (body, stats) = walked(database, &uri, true).await?;
+        let (without, before) = walked(database, &uri, false).await?;
+        let sql = sql_page(database, &uri).await?;
+        assert_eq!(body["data"], without["data"], "{uri}");
+        assert_eq!(body["page"], without["page"], "{uri}");
+        assert_eq!(body["data"], sql["data"], "{uri}");
+        assert_eq!(body["page"], sql["page"], "{uri}");
+        rows.extend(hk_ids(&body));
+        let page = [
+            counted(&stats, "catalogue_bucket_batches"),
+            counted(&stats, "catalogue_bucket_seeks"),
+            counted(&before, "catalogue_bucket_batches"),
+            counted(&before, "catalogue_bucket_seeks"),
+        ];
+        eprintln!(
+            "{uri}: catalogue_bucket_batches={} catalogue_bucket_seeks={} without the leapfrog: \
+             catalogue_bucket_batches={} catalogue_bucket_seeks={}",
+            page[0], page[1], page[2], page[3]
+        );
+        pages.push(page);
+        cursor = body["page"]["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok((rows, pages))
+}
+
+/// One full page of `contract` on the fixture address in `order`: the rows are `expected`, the
+/// walk probes `batches` buckets and seeks at most `seeks` times, and the exact total is the
+/// number of rows.
+async fn assert_one_page(
+    database: &TestDatabase,
+    contract: &str,
+    order: &str,
+    window: &str,
+    expected: &[&str],
+    batches: usize,
+    seeks: usize,
+) -> Result<()> {
+    let query = format!("address={ADDRESS}&contract_address={contract}&order={order}{window}");
+    let (rows, pages) = walk_three_ways(database, &query, 200).await?;
+    let expected = expected.iter().map(|id| hkw_id(id)).collect::<Vec<_>>();
+    assert_eq!(rows, expected, "{query}");
+    let [walked_batches, walked_seeks, ..] = pages[0];
+    assert_eq!(
+        walked_batches, batches,
+        "{query}: buckets probed: {pages:?}"
+    );
+    assert!(
+        walked_seeks <= seeks,
+        "{query}: {walked_seeks} seeks: {pages:?}"
+    );
+    let total = format!("/v1/events?{query}&page_size=200&include=total_count");
+    let (body, _) = walked(database, &total, true).await?;
+    assert_eq!(
+        body["page"]["total_count"],
+        json!(expected.len()),
+        "{total}"
+    );
+    Ok(())
+}
+
+/// A contract with events in buckets 2 and 7, none of them the address's, which holds names in
+/// buckets 0, 1, 5 and 9. No bucket can hold a row, so none is probed. Each seek moves one side
+/// past the other: address 9, contract 7, address 5, contract 2, address 1, contract none.
+#[tokio::test]
+async fn events_address_unrelated_contract_probes_no_bucket() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_buckets(&database).await?;
+    assert_one_page(&database, ELSEWHERE, "desc", "", &[], 0, 6).await?;
+    database.cleanup().await
+}
+
+/// The contract's only row is in the address's newest bucket.
+#[tokio::test]
+async fn events_address_contract_rows_in_newest_bucket() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_buckets(&database).await?;
+    assert_one_page(&database, NEWEST, "desc", "", &["leapfrog-newest"], 1, 4).await?;
+    database.cleanup().await
+}
+
+/// The contract's only row is in a middle bucket of the address, so the newer one is skipped.
+#[tokio::test]
+async fn events_address_contract_rows_in_middle_bucket() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_buckets(&database).await?;
+    assert_one_page(&database, MIDDLE, "desc", "", &["leapfrog-middle"], 1, 4).await?;
+    database.cleanup().await
+}
+
+/// The contract's only row is in the address's oldest bucket, below three it skips.
+#[tokio::test]
+async fn events_address_contract_rows_in_oldest_bucket() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_buckets(&database).await?;
+    assert_one_page(&database, OLDEST, "desc", "", &["leapfrog-oldest"], 1, 4).await?;
+    database.cleanup().await
+}
+
+/// Blocks 256 to 1535 cover buckets 1 to 5. The contract's bucket-0 row is outside them, so the
+/// contract's side stops at bucket 5's row and the walk ends without probing bucket 1.
+#[tokio::test]
+async fn events_address_block_window_bounds_the_emitter_seek() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_buckets(&database).await?;
+    let window = "&from_block=256&to_block=1535";
+    assert_one_page(
+        &database,
+        WINDOWED,
+        "desc",
+        window,
+        &["leapfrog-window-5"],
+        1,
+        4,
+    )
+    .await?;
+    database.cleanup().await
+}
+
+/// The contract's rows are in buckets 9 and 0, one per page. The second page resumes in the
+/// cursor's bucket and reaches bucket 0 over the buckets between without losing or repeating a
+/// row, and every page equals the walk without the leapfrog, cursors included.
+#[tokio::test]
+async fn events_address_cursor_resumes_across_skipped_buckets() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_buckets(&database).await?;
+    for (order, expected) in [
+        ("desc", ["leapfrog-page-9", "leapfrog-page-0"]),
+        ("asc", ["leapfrog-page-0", "leapfrog-page-9"]),
+    ] {
+        let query = format!("address={ADDRESS}&contract_address={PAGED}&order={order}");
+        let (rows, pages) = walk_three_ways(&database, &query, 1).await?;
+        assert_eq!(rows, expected.map(hkw_id).to_vec(), "{query}");
+        assert_eq!(pages.len(), 2, "{query}: {pages:?}");
+        for [batches, ..] in &pages {
+            assert!(*batches <= 2, "{query}: buckets probed per page: {pages:?}");
+        }
+    }
+    database.cleanup().await
+}
+
+/// Rows of one block and transaction apart only by log index, and block-level rows apart only
+/// by identity, page one at a time in the order and with the cursors of the walk without the
+/// leapfrog and of the SQL page.
+#[tokio::test]
+async fn events_address_contract_ties_unchanged() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_buckets(&database).await?;
+    for order in ["desc", "asc"] {
+        let query = format!("address={ADDRESS}&contract_address={TIED}&order={order}");
+        let (rows, _) = walk_three_ways(&database, &query, 1).await?;
+        assert_eq!(rows.len(), 4, "{query}");
+    }
+    database.cleanup().await
+}
+
+/// A contract with events in every bucket and an address whose one name has events only in
+/// bucket 3: the walk probes that bucket alone, as it does without the leapfrog.
+#[tokio::test]
+async fn events_address_dense_contract_sparse_address() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_names(&database, 1).await?;
+    extend_lineage(&database).await?;
+    seed_relation_name_inputs_at(
+        &database,
+        "sparse-0000.eth",
+        0x236000,
+        block(3),
+        &hash(block(3)),
+        RelationNameAccounts {
+            registrant: SPARSE,
+            controller: SPARSE_CONTROLLER,
+            resolver: RESOLVER,
+        },
+    )
+    .await?;
+    let dense = (0..=9)
+        .map(|bucket| {
+            emitted_by(
+                unnamed(
+                    &format!("leapfrog-dense-{bucket}"),
+                    block(bucket) + 5,
+                    1_000,
+                ),
+                DENSE,
+            )
+        })
+        .collect::<Vec<_>>();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &dense).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events
+         SET raw_fact_ref = raw_fact_ref || jsonb_build_object('emitting_address', $1::text)
+         WHERE event_identity LIKE 'relation-236000-%'",
+    )
+    .bind(DENSE)
+    .execute(&database.pool)
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", HEAD, &hash(HEAD)).await?;
+    for order in ["desc", "asc"] {
+        let query = format!("address={SPARSE}&contract_address={DENSE}&order={order}");
+        let (rows, pages) = walk_three_ways(&database, &query, 200).await?;
+        assert_eq!(rows.len(), 4, "{query}");
+        let [batches, seeks, ..] = pages[0];
+        assert_eq!(batches, 1, "{query}: {pages:?}");
+        assert!(seeks <= 4, "{query}: {pages:?}");
+    }
+    database.cleanup().await
+}
+
+/// In ascending order the walk mirrors the descending one: the unrelated contract probes no
+/// bucket, and the middle, oldest and windowed rows each take one probe.
+#[tokio::test]
+async fn events_address_contract_leapfrog_ascending_mirrors_descending() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_buckets(&database).await?;
+    assert_one_page(&database, ELSEWHERE, "asc", "", &[], 0, 6).await?;
+    assert_one_page(&database, NEWEST, "asc", "", &["leapfrog-newest"], 1, 4).await?;
+    assert_one_page(&database, MIDDLE, "asc", "", &["leapfrog-middle"], 1, 4).await?;
+    assert_one_page(&database, OLDEST, "asc", "", &["leapfrog-oldest"], 1, 4).await?;
+    let window = "&from_block=256&to_block=1535";
+    assert_one_page(
+        &database,
+        WINDOWED,
+        "asc",
+        window,
+        &["leapfrog-window-5"],
+        1,
+        4,
+    )
+    .await?;
+    database.cleanup().await
+}
+
+/// The measured shape: an address whose sixteen names each start in bucket 0 and end in a
+/// different bucket from 0 to 15, and a registry with two events in buckets 4 and 11 that
+/// involve none of them, with no block window. Without the leapfrog the walk probes a bucket
+/// per distinct end of the address's names. With it, it probes only the registry's two buckets
+/// and seeks at most twice per side of the registry's buckets, plus the final pair. The page is
+/// empty either way and the exact total is 0.
+#[tokio::test]
+async fn events_address_unrelated_contract_leapfrogs_the_address_buckets() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_names(&database, 16).await?;
+    extend_lineage(&database).await?;
+    let mut events = (1..16)
+        .map(|name| {
+            renewal(
+                &format!("leapfrog-wide-{name}"),
+                name,
+                block(name as i64),
+                1_000,
+            )
+        })
+        .collect::<Vec<_>>();
+    for bucket in [4, 11] {
+        events.push(emitted_by(
+            unnamed(
+                &format!("leapfrog-registry-{bucket}"),
+                block(bucket) + 7,
+                1_001,
+            ),
+            REGISTRY,
+        ));
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", HEAD, &hash(HEAD)).await?;
+    let query = format!("address={ADDRESS}&contract_address={REGISTRY}");
+    let (rows, pages) = walk_three_ways(&database, &query, 200).await?;
+    assert!(rows.is_empty(), "{query}: {rows:?}");
+    let [batches, seeks, before_batches, _] = pages[0];
+    let registry_buckets = 2;
+    assert!(
+        before_batches > 2 * registry_buckets,
+        "{query}: the fixture is not the measured shape: {pages:?}"
+    );
+    assert!(batches <= registry_buckets, "{query}: {pages:?}");
+    assert!(seeks <= 2 * (registry_buckets + 1), "{query}: {pages:?}");
+    let total = format!("/v1/events?{query}&page_size=200&include=total_count");
+    let (body, _) = walked(&database, &total, true).await?;
+    assert_eq!(body["page"]["total_count"], json!(0), "{total}");
+    assert_eq!(body["page"]["next_cursor"], Value::Null, "{total}");
+    database.cleanup().await
+}
+
+/// A cursor without a position names its row only by identity. On a contract that emitted no
+/// event no row can be it, so the read refuses the cursor before reading the address's history.
+#[tokio::test]
+async fn events_address_identity_cursor_on_a_silent_contract_reads_no_history() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_names(&database, 2).await?;
+    let options = bigname_storage::HistoryPageOptions {
+        contract_address: Some(SILENT.to_owned()),
+        publication_block_bounds: Some(std::collections::BTreeMap::from([(
+            "ethereum-mainnet".to_owned(),
+            BLOCK,
+        )])),
+        ..Default::default()
+    };
+    let cursor = bigname_storage::HistoryCursor {
+        normalized_event_id: None,
+        event_identity: "relation-235000-RegistrationGranted".to_owned(),
+        position: None,
+    };
+    let stats = Arc::new(Mutex::new(
+        bigname_storage::AddressHistoryWorkingSet::default(),
+    ));
+    let error = bigname_storage::with_address_history_working_set(
+        stats.clone(),
+        bigname_storage::load_address_history_page_for_relations(
+            &database.pool,
+            ADDRESS,
+            Some("ens"),
+            None,
+            bigname_storage::HistoryScope::Both,
+            true,
+            Some(&cursor),
+            20,
+            bigname_storage::HistorySummaryMode::None,
+            &options,
+            false,
+        ),
+    )
+    .await
+    .expect_err("no row of a silent contract can be the cursor's");
+    assert!(
+        error
+            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
+            .is_some(),
+        "{error:?}"
+    );
+    let stats = stats.lock().unwrap().clone();
+    assert_eq!(counted(&stats, "contract_without_events"), 1, "{stats:?}");
+    for key in [
+        "witness_batches",
+        "catalogue_bucket_batches",
+        "catalogue_bucket_seeks",
+    ] {
+        assert!(
+            !stats.counters.contains_key(key),
+            "read the address's history ({key}): {stats:?}"
+        );
+    }
+    database.cleanup().await
+}
