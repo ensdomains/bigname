@@ -36,7 +36,7 @@ const CLEANUP_EXPIRY: u64 = u64::MAX - 90 * 86_400;
 
 /// One BaseRegistrar `register` of `label` to `to`: the burn of a lapsed holder's token, the
 /// mint, the current-registry write and `NameRegistered`, from log `index` on.
-fn registration(
+pub(super) fn registration(
     (base_registrar, current): (Address, Address),
     label: &[u8],
     (from, to): (Option<Address>, Address),
