@@ -291,10 +291,13 @@ async fn registries_by_role_holder_page_by_cursor_and_refuse_malformed_requests(
 ///
 /// | Chain | State | Answer |
 /// | --- | --- | --- |
-/// | Base (8453), a known chain no public namespace serves | nothing indexed, published, rebuilding | `400`, naming it as not served |
-/// | 99999, not a supported chain | the same | `400` |
+/// | Base (8453), a known chain no public namespace serves | every state below | `400`, naming it as not served |
+/// | 99999, not a supported chain | every state below | `400` |
+/// | Ethereum (1), served | a chain head, never published | `409 stale` |
 /// | Ethereum (1), served | published | `200` |
 /// | Ethereum (1), served | rebuilding, so no publication is servable | `409 stale` |
+///
+/// The states run in order: nothing indexed, a chain head, published, rebuilding.
 #[tokio::test]
 async fn registries_by_role_holder_refuse_an_unserved_chain_before_any_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -304,8 +307,20 @@ async fn registries_by_role_holder_refuse_an_unserved_chain_before_any_publicati
             ROOT_HOLDERS[0]
         )
     };
-    for state in ["nothing indexed", "published", "rebuilding"] {
+    for state in ["nothing indexed", "head", "published", "rebuilding"] {
         match state {
+            // The deployment follows a chain once it has a head; publishing comes later.
+            "head" => {
+                let head = raw_block(REGISTRY_CHAIN_ID, "0xregistry83", None, 83, 1_700_000_083);
+                upsert_phase_raw_blocks(&database.pool, &[head]).await?;
+                sqlx::query(
+                    "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+                     VALUES ('ethereum-mainnet', '0xregistry83', 83)
+                     ON CONFLICT (chain_id) DO NOTHING",
+                )
+                .execute(&database.pool)
+                .await?;
+            }
             "published" => seed_registry_root_holders(&database).await?,
             "rebuilding" => {
                 sqlx::query(
@@ -331,7 +346,7 @@ async fn registries_by_role_holder_refuse_an_unserved_chain_before_any_publicati
         }
         let (status, body) = registries_response(&database, &route("1")).await?;
         if state == "published" {
-            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(status, StatusCode::OK, "{state}: {body}");
             assert_eq!(
                 body["data"],
                 json!([{"chain_id":1, "address":ALPHA_REGISTRY, "grant_count":1,
@@ -339,8 +354,8 @@ async fn registries_by_role_holder_refuse_an_unserved_chain_before_any_publicati
                 "{body}"
             );
         } else {
-            assert_eq!(status, StatusCode::CONFLICT, "{body}");
-            assert_eq!(body["error"]["code"], "stale", "{body}");
+            assert_eq!(status, StatusCode::CONFLICT, "{state}: {body}");
+            assert_eq!(body["error"]["code"], "stale", "{state}: {body}");
         }
     }
     database.cleanup().await
