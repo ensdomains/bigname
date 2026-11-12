@@ -13,7 +13,7 @@ use axum::{
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgConnectOptions};
+use sqlx::{ConnectOptions, Executor, PgPool, Row, postgres::PgConnectOptions};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
@@ -57,14 +57,14 @@ fn slow_read_router(pool: PgPool, pids: mpsc::UnboundedSender<i32>) -> Router {
                 let mut snapshot = bigname_storage::begin_read_snapshot(&pool)
                     .await
                     .expect("the read snapshot begins");
-                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                    .fetch_one(&mut *snapshot)
+                // `Executor`'s boxed futures are `Send` for any connection lifetime, as the
+                // handler bound needs.
+                let pid: i32 = Executor::fetch_one(&mut *snapshot, "SELECT pg_backend_pid()")
                     .await
+                    .and_then(|row| row.try_get(0))
                     .expect("the backend pid reads");
                 let _ = pids.send(pid);
-                let _ = sqlx::raw_sql("SELECT pg_sleep(20)")
-                    .execute(&mut *snapshot)
-                    .await;
+                let _ = Executor::execute(&mut *snapshot, "SELECT pg_sleep(20)").await;
                 "late"
             }
         }),
