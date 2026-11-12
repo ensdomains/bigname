@@ -2072,8 +2072,8 @@ released name is under
 A [current-state list cursor](glossary.md#current-state-list-cursor), the
 cursor of every current-state product collection (search, names, subnames,
 address names, permissions, registry labels, resolver links/roles, the
-resolvers of a role holder, and nested resolver `bound_names` and registry
-`referenced_by`), holds the list's
+resolvers and the registries of a role holder, and nested resolver
+`bound_names` and registry `referenced_by`), holds the list's
 sort and filters, the sort position of the last row it returned, and, when the
 request pinned `at`, that `at` token. Only resolver and registry overviews and
 resolver links/roles accept `at`. It holds no publication,
@@ -3976,6 +3976,16 @@ Closed history payload fields. Every expanded row has an `action`; the event typ
 | `grant_count` | integer | always | Number of the holder's current ENSv2 EAC grants on the resolver, one per EAC resource, the root resource included; at least 1. |
 | `powers` | array of enum PermissionPower | always | Union of those grants' powers, in lexicographic order; see [permission powers vocabulary](#permission-powers-vocabulary). |
 
+### RoleHolderRegistry
+
+<!-- openapi:object RoleHolderRegistry -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `chain_id` | integer | always | Numeric EVM chain ID. |
+| `address` | string | always | Lowercase EVM address of the registry. |
+| `grant_count` | integer | always | Number of the holder's current ENSv2 EAC root grants at the address, one per registry contract; at least 1. |
+| `powers` | array of enum PermissionPower | always | Union of those grants' powers, in lexicographic order; see [permission powers vocabulary](#permission-powers-vocabulary). |
+
 ### ErrorEnvelope
 
 <!-- openapi:object ErrorEnvelope -->
@@ -4177,6 +4187,18 @@ Extends Envelope.
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `data` | array of object RoleHolderResolver | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### RegistriesByRoleHolderResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object RegistriesByRoleHolderResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object RoleHolderRegistry | always | Requested result data. |
 | `page` | object Page | always | Standard collection pagination metadata. |
 
 ### RegistryResponse

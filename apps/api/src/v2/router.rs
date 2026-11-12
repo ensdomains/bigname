@@ -15,9 +15,9 @@ use super::{
     get_diagnostic_namespace_manifests, get_events, get_history, get_lookup,
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
     get_name_record, get_name_records, get_name_records_diagnostic, get_names, get_namespace,
-    get_permissions, get_primary_name, get_registry, get_registry_labels, get_resolver,
-    get_resolver_links, get_resolver_records, get_resolver_roles, get_resolvers, get_search,
-    get_status, get_subnames,
+    get_permissions, get_primary_name, get_registries, get_registry, get_registry_labels,
+    get_resolver, get_resolver_links, get_resolver_records, get_resolver_roles, get_resolvers,
+    get_search, get_status, get_subnames,
 };
 
 /// The routes that serve `ens_v1` on rows composed by more than one read leave each row's
@@ -75,6 +75,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/v1/permissions", get(get_permissions))
         .route("/v1/addresses/{address}/history", get(get_address_history))
         .route("/v1/events", get(get_events))
+        .route("/v1/registries", get(get_registries))
         .route("/v1/registries/{chain_id}/{address}", get(get_registry))
         .route("/v1/namespaces/{namespace}", get(get_namespace))
         .route(

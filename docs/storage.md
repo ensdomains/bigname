@@ -765,6 +765,18 @@ Family indexes serve these concrete readers:
   through `project_grant_subject_resource_idx`.
   `crates/storage/src/families/topology/role_holder_tests.rs` checks the plan under both plan
   modes.
+- The registry role-holder page (`storage:families.topology.registries_by_role_holder`, for
+  `GET /v1/registries?role_holder=`) reads `project_grant_registry_parent_idx`,
+  `(chain_id, subject, (scope_detail ->> 'registry_address'))` over the root grants, whose
+  schema-migration is listed above. Its index condition is the page's chains and the holder,
+  so the page reads only the holder's root grants on those chains, revoked ones included. It
+  never reads the holder's per-name registry grants or resolver grants. The statement groups and
+  orders by the lower-cased registry address with `COLLATE "C"`, which the index does not
+  order, so it sorts the holder's root grants; there is one per registry the holder ever held
+  root roles on. The statement carries the index predicate `scope = 'root'` as a literal, so
+  the index qualifies under generic plans too. No new index serves it.
+  `crates/storage/src/families/topology/role_holder_registry_tests.rs` checks the plan under
+  both plan modes.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
   the registry operator read will use and no reader uses yet:
   `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows

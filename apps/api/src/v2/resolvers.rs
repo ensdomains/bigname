@@ -447,7 +447,7 @@ pub(crate) fn parse_numeric_chain_id(value: &str) -> V2Result<(u64, &'static str
     Ok((chain_id, slug))
 }
 
-fn resolver_namespace(chain_id_slug: &str) -> V2Result<&'static str> {
+pub(super) fn resolver_namespace(chain_id_slug: &str) -> V2Result<&'static str> {
     match chain_id_slug {
         "ethereum-mainnet" | "ethereum-sepolia" => Ok("ens"),
         "base-mainnet" | "base-sepolia" => Ok("basenames"),

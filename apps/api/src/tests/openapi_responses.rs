@@ -1,7 +1,7 @@
 use super::*;
 
 // The existing family conformance fixture captures fourteen product operations
-// and six diagnostics. These seven complete the selected OpenAPI surface.
+// and six diagnostics. These eight complete the selected OpenAPI surface.
 const ADDITIONAL_OPENAPI_OPERATIONS: &[&str] = &[
     "GET /v1/names",
     "GET /v1/registries/{chain_id}/{address}",
@@ -10,6 +10,7 @@ const ADDITIONAL_OPENAPI_OPERATIONS: &[&str] = &[
     "GET /v1/resolvers/{chain_id}/{address}/roles",
     "GET /v1/resolvers/{chain_id}/{address}/records",
     "GET /v1/resolvers",
+    "GET /v1/registries",
 ];
 
 #[tokio::test]
@@ -159,6 +160,28 @@ async fn openapi_additional_operations_have_nonempty_response_captures() -> Resu
         );
         captured.push(ADDITIONAL_OPENAPI_OPERATIONS[index]);
     }
+    sqlx::query(
+        "INSERT INTO project_grant (chain_id, resource_id, subject, scope, block_number,
+             event_identity, event_kind, scope_kind, scope_detail, effective_powers,
+             grant_source, revoked)
+         VALUES ('ethereum-mainnet', $1, $2, 'root', 70, 'openapi-registry-root-grant',
+             'RootPermissionChanged', 'root',
+             jsonb_build_object('kind', 'root', 'chain_id', 'ethereum-mainnet',
+                 'registry_address', $3::text),
+             '[\"registrar\"]', '{\"kind\": \"raw_log\", \"source_event\": \"EACRolesChanged\"}',
+             false)",
+    )
+    .bind(Uuid::from_u128(0xA91_000))
+    .bind(V2_ADDRESS)
+    .bind(ALPHA_REGISTRY)
+    .execute(&database.pool)
+    .await?;
+    let held = registry_payload(
+        &database,
+        &format!("/v1/registries?role_holder={V2_ADDRESS}&chain_id=1"),
+    )
+    .await?;
+    assert_non_empty_json(&held["data"], ADDITIONAL_OPENAPI_OPERATIONS[7], "data");
     database.cleanup().await?;
 
     let database = TestDatabase::new_migrated().await?;
@@ -233,6 +256,7 @@ async fn openapi_additional_operations_have_nonempty_response_captures() -> Resu
     captured.push(ADDITIONAL_OPENAPI_OPERATIONS[5]);
     database.cleanup().await?;
     captured.push(ADDITIONAL_OPENAPI_OPERATIONS[6]);
+    captured.push(ADDITIONAL_OPENAPI_OPERATIONS[7]);
     assert_eq!(captured, ADDITIONAL_OPENAPI_OPERATIONS);
     Ok(())
 }

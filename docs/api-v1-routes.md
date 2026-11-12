@@ -5403,6 +5403,83 @@ For a registrar lease first identified by a later readable observation, registra
 - Caching: indexed responses carry `ETag` and `Cache-Control` (see
   [caching headers](#caching-headers-on-indexed-single-resource-reads)).
 
+### `GET /v1/registries`
+
+<!-- openapi:parameters GET /v1/registries -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `role_holder` | query | string | yes | none | EVM address in hexadecimal form, in any letter case. Lists the registries on which this address holds ENSv2 registry root roles. |
+| `chain_id` | query | integer | no | none | Supported numeric EVM chain ID. Keeps the registries on that chain. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/registries -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object RegistriesByRoleHolderResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
+- Tier: product read. The collection lists the ENSv2 registries on which one
+  address holds registry root roles: Enhanced Access Control (EAC) roles on
+  the registry's root resource (EAC resource 0), which apply to the whole
+  registry. It reads the other way from
+  [`GET /v1/permissions?registry=`](#get-v1permissions), which lists the root
+  holders of one registry, but it does not depend on that route's registry
+  resolution. It lists the stored root grants, as described below, so for a
+  registry listed here that route can answer an empty page or rows with other
+  powers.
+- Parameters: `role_holder` is required. A request without it, or with a blank
+  value, returns `400 invalid_input` with `role_holder is required`: the
+  collection never lists every registry. `chain_id` keeps one chain's
+  registries; a supported chain this deployment does not serve returns
+  `400 invalid_input` with `chain_id names a chain this deployment does not
+  serve`. `cursor` and `page_size` (default 50, maximum 200) page the list.
+  Other query parameters, `at` and `finality` included, are rejected.
+- Each row is `{chain_id, address, grant_count, powers}` for one registry
+  address at which the holder holds at least one current root grant.
+  `grant_count` is the number of those grants: one per registry contract at the
+  address, so more than 1 only when two indexed contracts have used the same
+  address. `powers` is the union of their powers, in lexicographic order, using
+  the [permission powers vocabulary](api-v1.md#permission-powers-vocabulary).
+  A revoked grant counts toward neither, and a registry whose root grants to
+  the holder are all revoked is absent.
+- Only root grants are listed. A role granted on one name's token resource in a
+  registry (`grant_scope.kind` `registry` on
+  [`GET /v1/permissions`](#get-v1permissions)) does not list the registry.
+  `GET /v1/permissions?address=` returns those per-name grants. Resolver roles
+  are not registry roles and are not listed either.
+- Only ENSv2 EAC role grants are listed, as stored. Two answers differ from
+  `GET /v1/permissions?registry=`:
+  - A `WrapperRegistry` (a
+    [migration registry](glossary.md#migration-registry-wrapperregistry))
+    gives its parent registry's root roles to the parent name's current owner
+    and to that owner's operators on the parent registry, as described for
+    `GET /v1/permissions` above. Those accounts' rows on
+    `GET /v1/permissions?registry=` are derived, not EAC grants, so this route
+    does not list the `WrapperRegistry` for them. A root grant such an account
+    holds on the `WrapperRegistry` itself, which that read replaces with the
+    derived row, is listed here with its own powers. The parent registry
+    contract, which holds the `WrapperRegistry`'s root grant, lists it.
+  - A grant on a registry contract that no longer holds its address at the
+    current publication is still listed, while
+    `GET /v1/permissions?registry=` answers an empty page for that address.
+    Read [`GET /v1/registries/{chain_id}/{address}`](#get-v1registrieschain_idaddress)
+    for the registry itself.
+- Rows sort by chain and then by lowercase registry address, as bytes. Chains
+  sort by bigname's chain key; the order is stable across pages. The route does
+  not count the holder's whole list, so `page.total_count` is always `null`.
+- The answer reflects the current publication of every chain the request
+  spans, read on one database snapshot; a chain whose publication is not
+  servable returns `409 stale`. Pagination binds the holder, the `chain_id`
+  filter and the last row's chain and address; see
+  [current-state list cursors](api-v1.md#current-state-list-cursors). Each page
+  selects the current publication, and a cursor from another list or with
+  another filter returns `400 invalid_input`.
+
 ### `GET /v1/registries/{chain_id}/{address}`
 
 <!-- openapi:parameters GET /v1/registries/{chain_id}/{address} -->

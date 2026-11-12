@@ -40,5 +40,8 @@ pub use pointers::{
 pub(crate) use registry_children::{
     RegistryChildRow, load_owned_registry_children, published_surface_exists,
 };
-pub use role_holder::{RoleHolderResolver, load_resolvers_by_role_holder};
+pub use role_holder::{
+    RoleHolderRegistry, RoleHolderResolver, load_registries_by_role_holder,
+    load_resolvers_by_role_holder,
+};
 pub(crate) use shims::{rendered_lateral_sql, textless_surface_sql, textless_surfaces_exist_sql};

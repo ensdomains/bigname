@@ -20,6 +20,9 @@
 //! every chain.
 //! `project_grant_resolver_role_holder_idx` carries the predicate below as its own, so its index
 //! condition holds the holder and the range under both plan modes.
+//!
+//! `GET /v1/registries?role_holder=` is read here too, by [`load_registries_by_role_holder`]:
+//! the registries on which an address holds ENSv2 registry root roles.
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
@@ -119,23 +122,127 @@ fn row(scope: &str, count: i64, powers: &Value) -> Result<RoleHolderResolver> {
     else {
         bail!("grant scope {scope} is not a resolver scope");
     };
-    let mut union = BTreeSet::new();
-    for grant in powers.as_array().into_iter().flatten() {
-        for power in grant.as_array().into_iter().flatten() {
-            let Some(power) = power.as_str() else {
-                bail!("grant scope {scope} holds a power that is not a string");
-            };
-            union.insert(power.to_owned());
-        }
-    }
     Ok(RoleHolderResolver {
         chain_id: chain_id.to_owned(),
         resolver_address: resolver_address.to_owned(),
         grant_count: u64::try_from(count)?,
-        powers: union.into_iter().collect(),
+        powers: powers_union(powers, scope)?,
     })
+}
+
+/// The sorted union of a group's `jsonb_agg` of power arrays.
+fn powers_union(powers: &Value, group: &str) -> Result<Vec<String>> {
+    let mut union = BTreeSet::new();
+    for grant in powers.as_array().into_iter().flatten() {
+        for power in grant.as_array().into_iter().flatten() {
+            let Some(power) = power.as_str() else {
+                bail!("grant scope {group} holds a power that is not a string");
+            };
+            union.insert(power.to_owned());
+        }
+    }
+    Ok(union.into_iter().collect())
+}
+
+/// One registry on which the holder holds a live ENSv2 root grant.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoleHolderRegistry {
+    /// The registry's chain slug.
+    pub chain_id: String,
+    /// The lower-cased registry address.
+    pub registry_address: String,
+    /// The holder's live root grants at the address: one per registry contract instance.
+    pub grant_count: u64,
+    /// The union of those grants' powers, sorted.
+    pub powers: Vec<String>,
+}
+
+/// The statement of [`load_registries_by_role_holder`]. Only an ENSv2 registry's
+/// `EACRolesChanged` on its root resource writes scope `root`
+/// (crates/adapters/src/schema_v2/protocol/permissions.rs, `v2_states`, and
+/// crates/project/src/families/keys.rs, `grant_scope`), so `scope = 'root' AND NOT revoked` is
+/// the live root EAC grants, and the literal predicate is `project_grant_registry_parent_idx`'s.
+/// The index's equality prefix is the holder's root rows on the page's chains, revoked ones
+/// included; the page key is the lower-cased address, which that index does not order, so the
+/// statement sorts those rows. The page key and its cursor bound compare as bytes, whatever the
+/// database collation.
+pub(crate) const REGISTRY_STATEMENT: &str = r#"/* storage:families.topology.registries_by_role_holder */
+SELECT grant_row.chain_id AS chain_id,
+       grant_row.scope_detail ->> 'registry_address' AS registry_address,
+       count(*) AS grant_count,
+       jsonb_agg(grant_row.effective_powers) AS powers
+FROM bigname_phase.project_grant grant_row
+WHERE grant_row.subject = $1
+  AND grant_row.chain_id = ANY($2::text[])
+  AND grant_row.scope_kind = 'root'
+  AND NOT grant_row.revoked
+  AND ($3::text IS NULL
+       OR grant_row.chain_id > $3::text
+       OR (grant_row.chain_id = $3::text
+           AND grant_row.scope_detail ->> 'registry_address' > $4::text))
+GROUP BY 1, 2
+ORDER BY 1, 2
+LIMIT $5"#;
+
+/// The registries on `chains` after `after` (a chain slug and registry address) on which
+/// `holder` holds live ENSv2 root grants, at most `limit`, in page order: by chain slug, then by
+/// lower-cased registry address, both as bytes. A row groups the root grants at one address,
+/// whatever letter case stored it. Every chain's publication is checked on the same snapshot, and
+/// a chain whose marker is not servable fails the read with `FamilyPublicationUnavailable`.
+///
+/// The stored row is the served one, as `GET /v1/permissions?registry=` composes a root
+/// resource: no wrapper row or lifecycle key state keys it, and an empty bitmap is `revoked`.
+/// Two compositions are not applied: the root rows a WrapperRegistry derives for its parent
+/// name's owner and that owner's operators are not stored, and the stored root grants it
+/// replaces for those accounts are listed with their own powers. A grant on a registry instance
+/// that no longer holds its address is listed too.
+pub async fn load_registries_by_role_holder(
+    db: impl Into<crate::ReadDb<'_>>,
+    holder: &str,
+    chains: &[String],
+    after: Option<(&str, &str)>,
+    limit: i64,
+) -> Result<Vec<RoleHolderRegistry>> {
+    if limit < 1 {
+        bail!("the role-holder page limit must be positive");
+    }
+    if chains.is_empty() {
+        return Ok(Vec::new());
+    }
+    let holder = holder.to_ascii_lowercase();
+    let after_chain = after.map(|(chain, _)| chain);
+    let after_address = after.map(|(_, address)| address.to_ascii_lowercase());
+    let mut snapshot = db.into().snapshot().await?;
+    let rows: Vec<(String, String, i64, Value)> = sqlx::query_as(REGISTRY_STATEMENT)
+        .bind(&holder)
+        .bind(chains)
+        .bind(after_chain)
+        .bind(after_address.as_deref())
+        .bind(limit)
+        .fetch_all(&mut *snapshot)
+        .await
+        .with_context(|| format!("failed to load the registries of role holder {holder}"))?;
+    let page = rows
+        .into_iter()
+        .map(|(chain_id, registry_address, count, powers)| -> Result<_> {
+            let powers = powers_union(&powers, &format!("root:{chain_id}:{registry_address}"))?;
+            Ok(RoleHolderRegistry {
+                chain_id,
+                registry_address,
+                grant_count: u64::try_from(count)?,
+                powers,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure_published(&mut snapshot, chains).await?;
+    snapshot.close().await?;
+    Ok(page)
 }
 
 #[cfg(test)]
 #[path = "role_holder_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "role_holder_registry_tests.rs"]
+mod registry_tests;
