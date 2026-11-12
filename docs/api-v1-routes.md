@@ -4899,9 +4899,15 @@ For a registrar lease first identified by a later readable observation, registra
   bounded prefix of the address's events rather than all of them. Its rows,
   order and cursors are those of the same read before the catalogue served it,
   and its `include=total_count` stays exact and uncapped. `contract_address`
-  applies inside that walk; a contract that emitted no event returns the empty
-  page without walking the address's history. Every other anchor combination
-  reads as before.
+  applies inside that walk. A contract that emitted no event at all returns the
+  empty page without walking the address's history. Otherwise the walk visits
+  the address's catalogue buckets in order and stops only at a full page or at
+  the end of the address's history. It returns no continuation before either.
+  So when a contract emitted events but few or none of the address's, the walk
+  reads every bucket of the address's history and only the whole-request
+  deadline bounds it. A large holder can then only answer `408
+  request_timeout`, with no partial page. Every other anchor combination reads
+  as before.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can
@@ -4925,7 +4931,11 @@ For a registrar lease first identified by a later readable observation, registra
   restarts once if its row is gone. A read that `address` alone anchors also
   returns retryable `409 stale` while the address-history catalogue is not
   published for the captured publication, as address history does. It never
-  falls back to reading the address's whole history.
+  falls back to reading the address's whole history. Like address history, it
+  reads its page on one read snapshot of the captured publication, so a
+  publication between admission and that snapshot, or a namespace manifest
+  change during the read, returns retryable `409 stale` to retry the same
+  request and cursor.
 - Replaces (v1): `GET /v1/events` compact event search.
 
 ### `GET /v1/resolvers`

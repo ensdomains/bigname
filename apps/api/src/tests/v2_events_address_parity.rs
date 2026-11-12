@@ -5,6 +5,8 @@ use super::*;
 
 /// An address no fixture name, account or role belongs to.
 const UNRELATED: &str = "0x000000000000000000000000000000000000e0e0";
+/// A registry that emitted events, none of which involve a fixture address.
+const ELSEWHERE_CONTRACT: &str = "0x000000000000000000000000000000000000f235";
 /// `seed_names`' first registration, `walk-0000.eth`.
 const FIRST_REGISTRATION: &str = "00000000-0000-0000-0000-000000235000";
 
@@ -99,6 +101,11 @@ async fn events_address_walk_equals_the_sql_page_for_held_names() -> Result<()> 
         (
             format!("address={ADDRESS}&contract_address={RESOLVER}&include=total_count"),
             &[7][..],
+            all,
+        ),
+        (
+            format!("address={ADDRESS}&from_block=240&include=total_count"),
+            &[3][..],
             all,
         ),
         (
@@ -500,5 +507,52 @@ async fn events_address_other_anchors_keep_the_sql_page() -> Result<()> {
         let (body, _) = measured(&database, &counted, 200).await?;
         assert_eq!(body["page"]["total_count"], json!(rows), "{counted}");
     }
+    database.cleanup().await
+}
+
+/// A contract that emitted events, but none that involve the address, with no block window. The
+/// emitter probe finds its events, so the walk visits every catalogue bucket of the address and
+/// returns the empty page only at the end of its history. The buckets it visited are recorded.
+#[tokio::test]
+async fn events_address_contract_without_the_addresss_events_walks_every_bucket() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_names(&database, 3).await?;
+    let mut elsewhere = address_fixture_event(
+        "events-walk-elsewhere",
+        None,
+        None,
+        "RegistrationRenewed",
+        "ens_v1_registrar_l1",
+        BLOCK,
+        HASH,
+        9_000,
+        json!({"expiry":1_900_000_000}),
+    );
+    elsewhere.raw_fact_ref = json!({"kind":"raw_log", "emitting_address":ELSEWHERE_CONTRACT});
+    // It names no name or resource, so the publication's catalogue is unchanged by it.
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[elsewhere]).await?;
+    let uri = format!(
+        "/v1/events?address={ADDRESS}&contract_address={ELSEWHERE_CONTRACT}&page_size=200&include=total_count"
+    );
+    let (body, stats) = measured(&database, &uri, 200).await?;
+    assert_eq!(body["data"], json!([]), "{uri}: {body}");
+    assert_eq!(body["page"]["next_cursor"], Value::Null, "{uri}");
+    assert_eq!(body["page"]["total_count"], json!(0), "{uri}");
+    assert_eq!(sql_page(&database, &uri).await?["data"], json!([]), "{uri}");
+    assert!(
+        !stats.counters.contains_key("contract_without_events"),
+        "{uri}: the contract emitted an event: {stats:?}"
+    );
+    let buckets = stats
+        .counters
+        .get("catalogue_bucket_batches")
+        .copied()
+        .unwrap_or_default();
+    eprintln!(
+        "contract without the address's events: catalogue_bucket_batches={buckets} catalogue_bucket_seeks={:?}",
+        stats.counters.get("catalogue_bucket_seeks")
+    );
+    // Every fixture event is in block 240's bucket, the only bucket the address has.
+    assert_eq!(buckets, 1, "{uri}: {stats:?}");
     database.cleanup().await
 }
