@@ -494,9 +494,11 @@ async fn rebuild_fixture_families(
         },
         bigname_project::families::FamilyMode::Rebuild,
         &token,
+        // One run, whatever the composition pass's partition count.
         &bigname_project::families::FamilyOptions::new(
             bigname_content_hash::PROJECTION_CONTENT_HASH,
-        ),
+        )
+        .with_max_blocks_per_run(u64::MAX),
     )
     .await?;
     anyhow::ensure!(
@@ -4023,7 +4025,9 @@ async fn publish_test_families_on(pool: &PgPool, chain: &str, target: i64) -> Re
     let outcome = bigname_project::families::apply(
         pool, chain, &bigname_project::Marker { number: target, hash },
         bigname_project::families::FamilyMode::Normal, &token,
-        &bigname_project::families::FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH),
+        // One run, whatever the composition pass's partition count.
+        &bigname_project::families::FamilyOptions::new(bigname_content_hash::PROJECTION_CONTENT_HASH)
+            .with_max_blocks_per_run(u64::MAX),
     ).await?;
     anyhow::ensure!(outcome.marker.as_ref().map(|marker| marker.number) == Some(target),
         "the families published {chain} at {target}: {outcome:?}");

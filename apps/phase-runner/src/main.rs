@@ -5,7 +5,8 @@ use clap::Parser;
 use phase_runner::{
     capacity::CapacityGuard,
     cli::{
-        Cli, RedoChains, ResolvedCommand, resolve_all_redo_chains, validate_redo_attestation_chains,
+        Cli, RedoChains, ResolvedCommand, redo_connections, resolve_all_redo_chains,
+        run_connections, validate_redo_attestation_chains,
     },
     database::{RunnerDatabase, VerificationDatabase},
     error::RunnerError,
@@ -90,10 +91,8 @@ async fn main() -> Result<()> {
                     Arc::make_mut(&mut runtime.chains),
                     &verified_rpc,
                 )?;
-                let connections = u32::try_from(runtime.chains.len())
-                    .unwrap_or(u32::MAX)
-                    .saturating_mul(2)
-                    .max(4);
+                let connections =
+                    run_connections(runtime.chains.len(), project_families.compose_workers);
                 let database = RunnerDatabase::connect(&database_url, connections)
                     .await?
                     .with_index_build_settings(index_build);
@@ -196,9 +195,12 @@ async fn main() -> Result<()> {
             phase_runner::shutdown::cancel_on_signal(&cancellation)
                 .context("register the stop signals before starting")?;
             let startup = async {
-                let database = RunnerDatabase::connect(&database_url, 4)
-                    .await?
-                    .with_index_build_settings(index_build);
+                let database = RunnerDatabase::connect(
+                    &database_url,
+                    redo_connections(project_families.compose_workers),
+                )
+                .await?
+                .with_index_build_settings(index_build);
                 let mut chains = match chains {
                     RedoChains::Explicit(chains) => chains,
                     RedoChains::All { sources } => {

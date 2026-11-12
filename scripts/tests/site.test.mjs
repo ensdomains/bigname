@@ -9,21 +9,23 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const net = require('../../site/network.js');
 const sepolia = net.selectable('sepolia');
+const mainnet = net.selectable('mainnet');
 
-test('mainnet is listed but cannot be selected until its API exists', () => {
-  assert.equal(sepolia.id, 'sepolia');
-  assert.equal(net.selectable('mainnet'), null);
+test('Sepolia and mainnet can both be selected, and Sepolia is the default', () => {
+  assert.equal(sepolia.api, 'https://sepolia.api.bigname.sh');
+  assert.equal(mainnet.api, 'https://api.bigname.sh');
+  assert.equal(net.DEFAULT_NETWORK, 'sepolia');
   assert.equal(net.selectable('nope'), null);
-  assert.ok(net.NETWORKS.find(n => n.id === 'mainnet' && n.coming));
-  const html = net.controlHtml(sepolia, null);
-  assert.match(html, /<button type="button" disabled[^>]*>mainnet<small>coming<\/small><\/button>/);
-  assert.doesNotMatch(html, /data-net="mainnet"/);
+  const html = net.controlHtml(mainnet, null);
+  assert.match(html, /data-net="sepolia" aria-pressed="false"/);
+  assert.match(html, /data-net="mainnet" aria-pressed="true"/);
+  assert.doesNotMatch(html, /disabled|coming/);
 });
 
-test('an unknown, coming or missing network falls back to Sepolia and says so', () => {
+test('the query selects a known network, and an unknown one falls back to Sepolia and says so', () => {
   assert.deepEqual(net.initialSelection(''), { network: sepolia, custom: null, rewrite: false });
   assert.deepEqual(net.initialSelection('?network=sepolia'), { network: sepolia, custom: null, rewrite: false });
-  assert.deepEqual(net.initialSelection('?network=mainnet'), { network: sepolia, custom: null, rewrite: true });
+  assert.deepEqual(net.initialSelection('?network=mainnet'), { network: mainnet, custom: null, rewrite: false });
   assert.deepEqual(net.initialSelection('?network=nope&x=1'), { network: sepolia, custom: null, rewrite: true });
 });
 

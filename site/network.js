@@ -29,7 +29,15 @@
         registry: { chain_id: '11155111', address: '0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4' },
       },
     },
-    { id: 'mainnet', label: 'mainnet', api: 'https://api.bigname.sh', coming: true },
+    {
+      id: 'mainnet', label: 'mainnet', api: 'https://api.bigname.sh',
+      samples: {
+        name: 'vitalik.eth',
+        address: '0xd8da6bf26964af9d7eed9e03e53415d37aa96045',
+        resolver: { chain_id: '1', address: '0x231b0ee14048e9dccd1d247744d114a4eb5e8e63' },
+        registry: { chain_id: '1', address: '0xf60aba43e1f7f3dab1186ff03b561401c9df85e2' },
+      },
+    },
   ];
   const SAMPLE_KEYS = ['name', 'address', 'resolver', 'registry'];
   const DEFAULT_NETWORK = 'sepolia';

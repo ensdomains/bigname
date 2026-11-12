@@ -10,6 +10,8 @@ const FAMILY_TABLES: &[&str] = &[
     "project_family_undo",
     "project_repair_record",
     "project_compose_name_work",
+    "project_compose_history_work",
+    "project_compose_event_count_work",
     "project_name_state",
     "project_binding_candidate",
     "project_lifecycle_key_state",
@@ -358,6 +360,12 @@ async fn optional_raw_evidence_upgrade_matches_the_baseline_on_a_populated_schem
         ))
         .execute(upgraded.pool())
         .await?;
+        // Dropping the witness column dropped the released-witness index with it.
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/20261027140000_name_surfaces_lost_witness_indexes.sql"
+        ))
+        .execute(upgraded.pool())
+        .await?;
         assert_eq!(
             name_surfaces_structure(upgraded.pool()).await?,
             name_surfaces_structure(installed.pool()).await?,
@@ -625,6 +633,9 @@ async fn search_schema_upgrade_resets_old_fields_preserves_identity_and_matches_
 
 const LOOKUP_PRECOMPUTATION: &str =
     include_str!("../../../migrations/20261007120000_project_lookup_precomputation.sql");
+// The one later migration that changes a lookup table: a column comment.
+const COMPOSE_STREAM_COMMENTS: &str =
+    include_str!("../../../migrations/20261027130000_project_compose_stream_comments.sql");
 const LOOKUP_TABLES: &[&str] = &[
     "project_lookup_name",
     "project_lookup_relation",
@@ -657,6 +668,10 @@ async fn lookup_schema_upgrade_repeat_and_baseline_preserve_publication() -> Res
             .await?;
     }
     tx.commit().await?;
+    // An upgraded database then runs every later migration, as the baseline's shape includes them.
+    sqlx::raw_sql(COMPOSE_STREAM_COMMENTS)
+        .execute(upgraded.pool())
+        .await?;
     for table in LOOKUP_TABLES {
         assert_eq!(
             load_table_structure(upgraded.pool(), table).await?,

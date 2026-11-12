@@ -11,6 +11,16 @@ pub(super) async fn stable_identities(
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
+    reanchor_identities(transaction, chain_id, from_block, to_block).await?;
+    repair_preimage_witnesses(transaction, chain_id, from_block, to_block).await
+}
+
+pub(super) async fn reanchor_identities(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<()> {
     let token_lineage_join =
         format!("event.after_state ->> '{TOKEN_LINEAGE_ID_KEY}' = identity.token_lineage_id::text");
     for (table, identity_join) in [
@@ -123,7 +133,7 @@ pub(super) async fn stable_identities(
                 )
             })?;
     }
-    repair_preimage_witnesses(transaction, chain_id, from_block, to_block).await
+    Ok(())
 }
 
 /// Before a redo deletes its range's events, release every preimage witness among them. Raw
@@ -164,48 +174,61 @@ pub(super) async fn release_preimage_witnesses(
     Ok(())
 }
 
-/// At redo completion, point each surface whose witness was released, or whose preimage the
-/// range observed, at its earliest surviving preimage observation. A canonical surface left
-/// without one loses the raw evidence when a surviving label-hash-path observation still
-/// establishes its identity; any other surface is left as it is.
-async fn repair_preimage_witnesses(
+/// At redo completion, point each surface whose witness was released or is no longer readable,
+/// or whose preimage the range observed, at its earliest surviving preimage observation. A
+/// canonical surface left without one loses the raw evidence when a surviving label-hash-path
+/// observation still establishes its identity; any other surface is left as it is.
+pub(super) async fn repair_preimage_witnesses(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
-    let statement = format!(
-        "
+    sqlx::query(&repair_statement())
+        .bind(chain_id)
+        .bind(from_block)
+        .bind(to_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            crate::InterpretError::database(
+                "failed to repair name-surface preimage witnesses after redo",
+                error,
+            )
+        })?;
+    Ok(())
+}
+
+/// The surfaces without a readable witness, and those whose preimage the range observed.
+pub(super) fn repair_targets() -> String {
+    format!(
+        "{lost}
+         UNION
+         SELECT event.logical_name_id
+         FROM normalized_events event
+         WHERE event.chain_id = $1
+           AND event.block_number BETWEEN $2 AND $3
+           AND event.logical_name_id IS NOT NULL
+           AND event.event_kind = '{PREIMAGE_OBSERVATION_EVENT_KIND}'
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')",
+        lost = super::witness::lost_witnesses(),
+    )
+}
+
+/// Every read past the targets is a probe for one target: the surface rows through an index
+/// condition on the target names, and the label-hash-path evidence through a lateral probe.
+/// Joined or tested as an `EXISTS` instead, a generic plan hashes every surface or every event
+/// of the chain. The evidence probe runs only for a target without a surviving observation,
+/// the only rows that read it, so it never walks the history of a name that keeps a witness.
+pub(super) fn repair_statement() -> String {
+    format!(
+        "/* interpret:reanchor.repair_preimage_witnesses */
         WITH targets AS (
-            SELECT surface.logical_name_id
-            FROM name_surfaces surface
-            WHERE surface.chain_id = $1
-              AND surface.raw_name IS NOT NULL
-              AND (
-                  surface.preimage_event_identity IS NULL
-                  OR NOT EXISTS (
-                      SELECT 1 FROM normalized_events witness
-                      JOIN chain_lineage lineage
-                        ON lineage.chain_id = witness.chain_id
-                       AND lineage.block_hash = witness.block_hash
-                       AND lineage.block_number = witness.block_number
-                      WHERE witness.chain_id = surface.chain_id
-                        AND witness.event_identity = surface.preimage_event_identity
-                        AND witness.canonicality_state IN ('canonical', 'safe', 'finalized')
-                        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  )
-              )
-            UNION
-            SELECT event.logical_name_id
-            FROM normalized_events event
-            WHERE event.chain_id = $1
-              AND event.block_number BETWEEN $2 AND $3
-              AND event.logical_name_id IS NOT NULL
-              AND event.event_kind = '{PREIMAGE_OBSERVATION_EVENT_KIND}'
-              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+            {targets}
         ),
         repaired AS (
-            SELECT target.logical_name_id, earliest.event_identity, earliest.block_timestamp
+            SELECT target.logical_name_id, earliest.event_identity, earliest.block_timestamp,
+                   established.found IS NOT NULL AS established
             FROM targets target
             LEFT JOIN LATERAL (
                 SELECT witness.event_identity, lineage.block_timestamp
@@ -225,6 +248,22 @@ async fn repair_preimage_witnesses(
                          witness.event_identity
                 LIMIT 1
             ) earliest ON true
+            LEFT JOIN LATERAL (
+                SELECT true AS found
+                FROM normalized_events observation
+                JOIN chain_lineage lineage
+                  ON lineage.chain_id = observation.chain_id
+                 AND lineage.block_hash = observation.block_hash
+                 AND lineage.block_number = observation.block_number
+                WHERE earliest.event_identity IS NULL
+                  AND observation.chain_id = $1
+                  AND observation.logical_name_id = target.logical_name_id
+                  AND observation.after_state
+                      @> jsonb_build_object('{NAME_IDENTITY_OBSERVED_KEY}', true)
+                  AND observation.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                LIMIT 1
+            ) established ON true
         )
         UPDATE name_surfaces surface
         SET preimage_event_identity = repaired.event_identity,
@@ -257,6 +296,9 @@ async fn repair_preimage_witnesses(
             observed_at = now()
         FROM repaired
         WHERE surface.chain_id = $1
+          AND surface.logical_name_id = ANY (
+              ARRAY(SELECT target.logical_name_id FROM targets target)
+          )
           AND surface.logical_name_id = repaired.logical_name_id
           AND surface.raw_name IS NOT NULL
           AND (
@@ -271,37 +313,12 @@ async fn repair_preimage_witnesses(
               OR (
                   repaired.event_identity IS NULL
                   AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  AND EXISTS (
-                      SELECT 1
-                      FROM normalized_events observation
-                      JOIN chain_lineage lineage
-                        ON lineage.chain_id = observation.chain_id
-                       AND lineage.block_hash = observation.block_hash
-                       AND lineage.block_number = observation.block_number
-                      WHERE observation.chain_id = surface.chain_id
-                        AND observation.logical_name_id = surface.logical_name_id
-                        AND observation.after_state
-                            @> jsonb_build_object('{NAME_IDENTITY_OBSERVED_KEY}', true)
-                        AND observation.canonicality_state IN ('canonical', 'safe', 'finalized')
-                        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  )
+                  AND repaired.established
               )
           )
-        "
-    );
-    sqlx::query(&statement)
-        .bind(chain_id)
-        .bind(from_block)
-        .bind(to_block)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| {
-            crate::InterpretError::database(
-                "failed to repair name-surface preimage witnesses after redo",
-                error,
-            )
-        })?;
-    Ok(())
+        ",
+        targets = repair_targets(),
+    )
 }
 
 #[cfg(test)]

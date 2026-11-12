@@ -748,9 +748,11 @@ jobs:
           add-rust-environment-hash-key: false
           workspaces: ". -> target"
           cache-workspace-crates: false
-          # A ci/** push restores this entry and saves nothing (see the cache
-          # note at the top).
-          save-if: ${{ !startsWith(github.ref, 'refs/heads/ci/') }}
+          # Pull requests and pushes to main and release/** save: a base branch's entry is
+          # restorable by the pull requests against it. A merge queue run saves nothing, since its
+          # ref restores for no other run, and a ci/** push restores and saves nothing (see the
+          # cache note at the top).
+          save-if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/heads/ci/')) }}
 
       - name: Report phase-runner dependency cache
         env:
@@ -947,7 +949,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: ${{ env.FOUNDRY_VERSION }}
-          cache: ${{ !startsWith(github.ref, 'refs/heads/ci/') }}
+          cache: ${{ github.event_name != 'push' }}
 
       - name: Sync pinned upstream checkouts
         uses: ./.github/actions/sync-refs
@@ -1038,7 +1040,7 @@ jobs:
         if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/')
         with:
           version: ${{ env.FOUNDRY_VERSION }}
-          cache: ${{ !startsWith(github.ref, 'refs/heads/ci/') }}
+          cache: ${{ github.event_name != 'push' }}
       - name: Sync pinned references
         if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/ci/')
         uses: ./.github/actions/sync-refs

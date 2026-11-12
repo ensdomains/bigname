@@ -4,185 +4,30 @@
 //! commit on their own. Every case rebuilds a history in ranges and requires every family table
 //! and the marker, apart from its generation, as a rebuild block by block leaves them.
 //!
-//! The history of most cases is `rebuild_performance/seed.sql` for 60 names with the ENSv2 path
-//! history of `families_support/ens_v2_path.rs`, as `families_recorded_rows.rs` uses it, and on
-//! top: ENSv1 registry children a NewOwner creates with no name surface, record values by node and
-//! by record id, unnamed registrar transfers of a name with no surface in two blocks, and an
-//! unnamed resource pointer whose node moves.
+//! The history of most cases is `families_support/compose.rs`: `rebuild_performance/seed.sql` for
+//! 60 names with the ENSv2 path history of `families_support/ens_v2_path.rs`, as
+//! `families_recorded_rows.rs` uses it, and on top: ENSv1 registry children a NewOwner creates
+//! with no name surface, record values by node and by record id, unnamed registrar transfers of a
+//! name with no surface in two blocks, and an unnamed resource pointer whose node moves.
 mod families_support;
 
 use anyhow::{Result, ensure};
 use bigname_project::families::{self, FamilyMode, FamilyOptions, FamilyOutcome, RebuildRanges};
-use families_support::{CHAIN, CONTENT_HASH, Fixture, ens_v2_path, hash, uuid};
+use families_support::{
+    CHAIN, CONTENT_HASH, Fixture,
+    compose::{
+        MOVED_FROM, MOVED_TO, R1, TRANSFERRED, build_order, build_step, install_probe,
+        probe_chunks, probe_list, reset_probe, seeded, seeded_with,
+    },
+    ens_v2_path, hash, uuid,
+};
 use serde_json::{Value, json};
 use sqlx::raw_sql;
 
-const SEED: &str = include_str!("rebuild_performance/seed.sql");
 const TARGET: i64 = 300;
 /// The switch point of the cases with single blocks above it: the work blocks at or below it go
 /// in ranges, those above it one to a transaction.
 const SWITCH: i64 = 200;
-const R1: &str = "0x00000000000000000000000000000000000000a1";
-const ALICE: &str = "0x00000000000000000000000000000000000000aa";
-const CAROL: &str = "0x00000000000000000000000000000000000000cc";
-/// The namehash of a registrar name no surface names, transferred unnamed at blocks 160 and 180.
-const TRANSFERRED: &str = "0x00000000000000000000000000000000000000000000000000000000000f01d0";
-/// The nodes an unnamed ENSv2 resource pointer names at block 165, then at block 185. Neither
-/// has a surface, and only the interpreted events still hold the first.
-const MOVED_FROM: &str = "0x000000000000000000000000000000000000000000000000000000000000a0a0";
-const MOVED_TO: &str = "0x000000000000000000000000000000000000000000000000000000000000b0b0";
-
-/// ENSv1 registry children with no name surface, as `families_benchmark.rs` writes them: one per
-/// twentieth name, created by a NewOwner under a seed name, every second one transferred 30
-/// blocks later.
-const REGISTRY_CHILDREN: &str = "
-INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
-SELECT md5('c' || i)::uuid, '__CHAIN__', '0x' || lpad(to_hex(1 + (i % 270)), 64, '0'),
-       1 + (i % 270), 'canonical'::canonicality_state
-FROM generate_series(1, __NAMES__ / 20) i;
-INSERT INTO normalized_events (event_identity, namespace, resource_id, event_kind, source_family,
-    manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index,
-    log_index, derivation_kind, canonicality_state, after_state, raw_fact_ref)
-SELECT 'seed:child:' || kind || ':' || i, 'ens', md5('c' || i)::uuid, kind,
-       'ens_v1_registry_l1', 1, '__CHAIN__', block, '0x' || lpad(to_hex(block), 64, '0'),
-       '0x' || md5('ct' || i || kind), 0, 20, 'ens_v1_unwrapped_authority',
-       'canonical'::canonicality_state,
-       CASE kind
-           WHEN 'SubregistryChanged' THEN jsonb_build_object('source_event', 'NewOwner',
-               'node', '0x' || md5('n' || i) || md5('m' || i),
-               'child_node', '0x' || md5('cn' || i) || md5('cm' || i),
-               'labelhash', '0x' || md5('cl' || i) || md5('ck' || i),
-               'owner', '0x' || substr(md5('co' || i), 1, 40),
-               'owner_getter', '0x' || substr(md5('co' || i), 1, 40), 'emitter_role', 'registry')
-           ELSE jsonb_build_object('source_event', 'Transfer',
-               'node', '0x' || md5('cn' || i) || md5('cm' || i),
-               'owner', '0x' || substr(md5('cp' || i), 1, 40),
-               'owner_getter', '0x' || substr(md5('cp' || i), 1, 40), 'emitter_role', 'registry')
-       END,
-       '{\"emitting_address\":\"0x00000000000000000000000000000000000000a3\"}'
-FROM generate_series(1, __NAMES__ / 20) i
-CROSS JOIN LATERAL (VALUES ('SubregistryChanged', 1 + (i % 270)),
-    ('AuthorityTransferred', 31 + (i % 270))) kinds(kind, block)
-WHERE kind = 'SubregistryChanged' OR i % 2 = 0;
-";
-
-fn node(n: u64) -> String {
-    format!("0x{n:064x}")
-}
-
-/// The history described at the top, on canonical blocks 0 to `TARGET`.
-async fn seeded(prefix: &str) -> Result<Fixture> {
-    let fixture = Fixture::new(prefix, 0).await?;
-    for script in [SEED, REGISTRY_CHILDREN] {
-        raw_sql(
-            &script
-                .replace("__NAMES__", "60")
-                .replace("__CHAIN__", CHAIN)
-                .replace("1700000000", "1800000000"),
-        )
-        .execute(&fixture.pool)
-        .await?;
-    }
-    ens_v2_path::history(&fixture).await?;
-    let addr = |node: String, value: &str| {
-        json!({"node": node, "resolver": R1, "record_key": "addr:60", "record_family": "addr",
-               "selector_key": "60", "value": value, "source_event": "AddressChanged"})
-    };
-    fixture
-        .write(
-            150,
-            1,
-            "RecordChanged",
-            "ens_v1_resolver_l1",
-            None,
-            None,
-            addr(node(1), ALICE),
-            R1,
-        )
-        .await?;
-    fixture
-        .write(
-            151,
-            1,
-            "RecordChanged",
-            "ens_v2_resolver_l1",
-            None,
-            None,
-            json!({"resolver": R1, "resolver_record_id": "7",
-                   "storage_model": "resolver_record_id", "record_key": "addr:60",
-                   "record_family": "addr", "selector_key": "60", "value": CAROL,
-                   "source_event": "AddressUpdated"}),
-            R1,
-        )
-        .await?;
-    let lease = uuid(901);
-    for (block, to) in [(160, ALICE), (180, CAROL)] {
-        fixture
-            .write(
-                block,
-                7,
-                "TokenControlTransferred",
-                "ens_v1_registrar_l1",
-                None,
-                Some(&lease),
-                json!({"namehash": TRANSFERRED, "to": to, "source_event": "Transfer",
-                       "authority_kind": "registrar"}),
-                R1,
-            )
-            .await?;
-    }
-    // Two names bound to one resource serve their records from one inventory.
-    let shared = uuid(903);
-    let (first, second) = (format!("ens:{}", node(901)), format!("ens:{}", node(902)));
-    fixture
-        .binding(&uuid(904), &first, &shared, "ens_v1", 140, 0, None)
-        .await?;
-    fixture
-        .binding(&uuid(905), &second, &shared, "ens_v1", 140, 0, None)
-        .await?;
-    fixture
-        .write(
-            140,
-            1,
-            "RegistrationGranted",
-            "ens_v1_registrar_l1",
-            Some(&first),
-            Some(&shared),
-            json!({"authority_kind": "registrar", "status": "registered", "registrant": ALICE,
-                   "expiry": 2_000_000_000u64}),
-            R1,
-        )
-        .await?;
-    fixture
-        .write(
-            140,
-            2,
-            "ResolverChanged",
-            "ens_v1_registry_l1",
-            Some(&first),
-            Some(&shared),
-            json!({"node": node(901), "resolver": R1}),
-            R1,
-        )
-        .await?;
-    // An ENSv2 registry's pointer, so no ENSv1 registry node pointer keeps the node it left.
-    let pointer = uuid(902);
-    for (block, at) in [(165, MOVED_FROM), (185, MOVED_TO)] {
-        fixture
-            .write(
-                block,
-                7,
-                "ResolverChanged",
-                "ens_v2_registry_l1",
-                None,
-                Some(&pointer),
-                json!({"node": at, "resolver": R1}),
-                R1,
-            )
-            .await?;
-    }
-    Ok(fixture)
-}
 
 fn options(ranges: RebuildRanges) -> FamilyOptions {
     FamilyOptions::new(CONTENT_HASH)
@@ -296,11 +141,16 @@ async fn composed_for(fixture: &Fixture, id: &str) -> Result<i64> {
     .await
 }
 
-// Rebuilt in ranges through the target with one name to a chunk and catalogue windows of at most
-// 25 events, the history equals its block-by-block rebuild in every family table, the 12 composed
-// tables among them. The comparison covers what it is meant to: lookup rows with no composed core
-// and empty name sources of ids with no surface, one inventory served by names in different
-// chunks, resource anchors, catalogue sources by node and by record id, and both record indexes.
+// Rebuilt in ranges through the target with one name to a chunk, under event caps of 4,096 (the
+// default), 1, 2 and 25, the history equals its block-by-block rebuild in every family table, the
+// 12 composed tables among them. The cap bounds the ranges only. The catalogue build does not read
+// it, so its chunks are the same under every cap, and the catalogue sources, edges and anchors of
+// each cap are byte for byte the default cap's. The comparison covers what it is meant to: lookup
+// rows with no composed core and empty name sources of ids with no surface, one inventory served
+// by names in different chunks, resource anchors, catalogue sources by node and by record id, and
+// both record indexes. The caps of 1 and 25 compose the names stream on three workers, so the
+// cap and the worker count cross: the families, the catalogue and the chunk count are the same
+// under each pairing.
 // Each id with no surface keeps the rows block by block leaves it: a registry child a NewOwner
 // created has a lookup row and a name source; the name of a registrar transfer in one block has a
 // lookup row only, and the one transferred in two blocks has both, since only a later block's
@@ -308,35 +158,96 @@ async fn composed_for(fixture: &Fixture, id: &str) -> Result<i64> {
 // from keeps both, though no row carries that node any more.
 #[tokio::test]
 async fn a_rebuild_in_ranges_composes_once_what_block_by_block_composes() -> Result<()> {
-    let fixture = seeded("families_compose_equal").await?;
+    let fixture = seeded_with("families_compose_equal", 4).await?;
     let expected = block_by_block(&fixture).await?;
-    let mut ranged = options(RebuildRanges::Through(TARGET))
-        .with_compose_chunk_keys(1)
-        .with_range_caps(64, u64::MAX);
-    ranged.max_range_events = 25;
-    let outcome = fixture
-        .apply_with(TARGET, FamilyMode::Rebuild, &ranged)
-        .await?;
-    require_equal(&fixture, &expected, "in ranges").await?;
-    let (state, stream, cursor, composed) = pass_state(&fixture).await?;
-    ensure!(
-        (state.as_str(), &stream, &cursor) == ("complete", &Value::Null, &Value::Null),
-        "the record completes with no pass in progress: {state} {stream} {cursor}"
-    );
-    ensure!(
-        composed.as_i64().is_some_and(|block| block < TARGET),
-        "the pass composed below the target: {composed}"
-    );
-    ensure!(
-        outcome.compose_chunks > 100,
-        "one name a chunk: {} chunks",
-        outcome.compose_chunks
-    );
-    let journalled = fixture.journalled_blocks().await?;
-    ensure!(
-        journalled == vec![composed.as_i64().unwrap_or_default(), TARGET],
-        "the pass's marker row and the target: {journalled:?}"
-    );
+    install_probe(&fixture).await?;
+    let mut by_default = None;
+    for (events, workers) in [(families::MAX_RANGE_EVENTS, 1), (1, 3), (2, 1), (25, 3)] {
+        reset_probe(&fixture).await?;
+        let ranged = options(RebuildRanges::Through(TARGET))
+            .with_compose_chunk_keys(1)
+            .with_range_caps(64, events)
+            .with_compose_workers(workers);
+        let outcome = fixture
+            .apply_with(TARGET, FamilyMode::Rebuild, &ranged)
+            .await?;
+        require_equal(&fixture, &expected, &format!("in ranges, cap {events}")).await?;
+        let mut catalogue = Vec::new();
+        for table in [
+            "project_history_source",
+            "project_history_source_edge",
+            "project_address_history_anchor",
+        ] {
+            let rows = fixture.rows(table).await?;
+            ensure!(!rows.is_empty(), "cap {events}: {table} is empty");
+            catalogue.push((table, rows));
+        }
+        match &by_default {
+            None => by_default = Some(catalogue),
+            Some(by_default) => ensure!(
+                by_default == &catalogue,
+                "cap {events}: the catalogue differs from the default cap's"
+            ),
+        }
+        let (state, stream, cursor, composed) = pass_state(&fixture).await?;
+        ensure!(
+            (state.as_str(), &stream, &cursor) == ("complete", &Value::Null, &Value::Null),
+            "cap {events}: the record completes with no pass in progress: {state} {stream} \
+             {cursor}"
+        );
+        ensure!(
+            composed.as_i64().is_some_and(|block| block < TARGET),
+            "cap {events}: the pass composed below the target: {composed}"
+        );
+        // The pass's chunks: one a name, the leads stream's 16 partitions, one a page of child
+        // listing parents, one a record pair, one a name that serves an inventory, the event
+        // count stream's 64 spans and 16 partitions, the catalogue build's 1 + 64 + 5 * 16 + 1
+        // partitions at the default split, and its end.
+        let chunks = probe_chunks(&fixture).await?;
+        let of = |stream: i16| {
+            chunks
+                .iter()
+                .filter(|(composed, _)| *composed == Some(stream))
+                .count() as u64
+        };
+        let names = u64::try_from(probe_list(&fixture).await?)?;
+        let served = u64::try_from(
+            count(
+                &fixture,
+                "SELECT count(*) FROM project_lookup_name
+                 WHERE record_serving_resource_id IS NOT NULL",
+            )
+            .await?,
+        )?;
+        ensure!(
+            names > 100
+                && of(0) == names
+                && served > 0
+                && of(4) == served
+                && of(7) == 16
+                && of(6) == 64 + 16
+                && of(3) == 1 + 64 + 5 * 16 + 1
+                && outcome.compose_chunks
+                    == names + of(7) + of(5) + of(1) + of(2) + of(4) + of(6) + of(3) + 1
+                && outcome.compose_chunks == chunks.len() as u64 + 1,
+            "cap {events}: {} chunks: {names} names, {} lead partitions, {} parent pages, {} \
+             node pairs, {} record id pairs, {} serving names, {} event count partitions, {} \
+             build partitions",
+            outcome.compose_chunks,
+            of(7),
+            of(5),
+            of(1),
+            of(2),
+            of(4),
+            of(6),
+            of(3)
+        );
+        let journalled = fixture.journalled_blocks().await?;
+        ensure!(
+            journalled == vec![composed.as_i64().unwrap_or_default(), TARGET],
+            "cap {events}: the pass's marker row and the target: {journalled:?}"
+        );
+    }
 
     // The comparison covers each shape.
     for (what, query) in [
@@ -458,15 +369,20 @@ struct Seen {
     stream: Value,
     cursor: Value,
     composed: Value,
+    /// The work list's ids marked composed.
+    marked: i64,
 }
 
 // A pass longer than one run. The first run's budget is the work blocks at or below the switch
 // point exactly: it applies them in ranges and stops before the pass, the record still rebuilding
 // with no pass recorded. Every later run has a budget of one block: it commits at most one chunk
-// of five keys, or the pass's end, or one single block. The pass continues from the cursor the
-// previous run left, a stream starts from its beginning once the one before it is done, and a run
-// that finds the last window done only ends the pass, which counts as a step that spent the
-// budget. The composed tables' statistics are refreshed after the pass's 1st, 2nd, 4th, ... chunk,
+// of five keys, or the pass's end, or one single block. The names stream continues with the ids
+// no chunk composed, five a run, and the other streams from the cursor the previous run left, a
+// stream starts from its beginning once the one before it is done, the streams run in the order
+// names, nodes, record ids, inventories, catalogue build, and a run
+// that finds the catalogue build done only ends the pass, which counts as a step that spent the
+// budget. The build, three block spans and two key partitions here, commits its fifteen
+// partitions in order, one a run. The composed tables' statistics are refreshed after the pass's 1st, 2nd, 4th, ... chunk,
 // counted across runs, so once per power of two however the chunks fall into runs. The single
 // blocks above the switch point then compose and journal as block by block does, and the finished
 // families equal it.
@@ -477,6 +393,7 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
     let pre_pass = work_blocks(&fixture, SWITCH).await?;
     let mut budgeted = options(RebuildRanges::Through(SWITCH))
         .with_compose_chunk_keys(5)
+        .with_compose_builder_partitions(3, 2)
         .with_max_blocks_per_run(pre_pass);
     budgeted.max_range_events = 25;
     let first = run(&fixture, true, &budgeted).await?;
@@ -521,6 +438,11 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             stream,
             cursor,
             composed,
+            marked: count(
+                &fixture,
+                "SELECT count(*) FROM project_compose_name_work WHERE composed",
+            )
+            .await?,
         });
         if seen.last().is_some_and(|last| last.marker == Some(TARGET)) {
             break;
@@ -530,10 +452,11 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
     require_equal(&fixture, &expected, "a pass over runs of one block").await?;
     // The child listing differs from the relation at every publication before the children
     // stream finished: the first run's, which applied the ranges only, and each run that ended in
-    // the names stream or the children stream (`families_support/child_listing.rs`).
+    // the names stream, the leads stream or the children stream
+    // (`families_support/child_listing.rs`).
     let unfinished = seen
         .iter()
-        .filter(|run| run.state == "composing" && matches!(run.stream.as_i64(), Some(0 | 4)))
+        .filter(|run| run.state == "composing" && matches!(run.stream.as_i64(), Some(0 | 7 | 5)))
         .count();
     fixture.expect_listing_skips(1 + unfinished);
     let ended = seen
@@ -561,19 +484,17 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
     }
     // The pass runs its streams in order, each from its beginning, until it ends.
     let passing: Vec<&Seen> = seen.iter().filter(|run| run.state == "composing").collect();
-    let streams: Vec<i64> = passing
+    let order = [0, 7, 5, 1, 2, 4, 6, 3];
+    let streams: Vec<usize> = passing
         .iter()
         .filter_map(|run| run.stream.as_i64())
+        .filter_map(|stream| order.iter().position(|at| *at == stream))
         .collect();
-    // Names, then the child listing's parents (4), then the record streams and the windows.
-    let rank = |stream: i64| [0, 4, 1, 2, 3].iter().position(|each| *each == stream);
     ensure!(
-        streams
-            .windows(2)
-            .all(|pair| rank(pair[0]) <= rank(pair[1])),
+        streams.len() == passing.len() && streams.windows(2).all(|pair| pair[0] <= pair[1]),
         "the streams run in order: {streams:?}"
     );
-    for stream in 0..=4 {
+    for stream in order {
         let cursors: Vec<&Value> = passing
             .iter()
             .filter(|run| run.stream.as_i64() == Some(stream))
@@ -581,14 +502,15 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             .collect();
         // The children stream holds one chunk of parents here: the run that composes the last
         // names chunk can leave the pass on the names stream when that chunk is full, and the
-        // next run then steps into the children stream and finishes it, ending in the next one.
-        // The listing oracle checks what it wrote at every publication.
-        if stream == 4 && cursors.is_empty() {
+        // runs then step through the leads stream into the children stream and finish it, ending
+        // in the next one. The listing oracle checks what it wrote at every publication.
+        if stream == 5 && cursors.is_empty() {
             continue;
         }
-        // The names stream and the windows took several runs each. The two record streams
-        // hold one key each here, so each was entered and done in one run.
-        let runs = if stream == 0 || stream == 3 { 2 } else { 0 };
+        // The catalogue build and the event count stream took several runs each. The names
+        // stream has no cursor. The leads stream's first partition, and the two record streams,
+        // which hold one key each here, were each entered and done in one run.
+        let runs = if stream == 3 || stream == 6 { 2 } else { 0 };
         ensure!(
             !cursors.is_empty()
                 && cursors.iter().filter(|cursor| !cursor.is_null()).count() >= runs,
@@ -599,14 +521,53 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             .filter_map(|cursor| cursor.as_str().map(str::to_owned))
             .collect();
         if stream == 0 {
-            // The names cursor is the work list serial the chunk ended at.
-            let serials: Vec<i64> = texts.iter().filter_map(|text| text.parse().ok()).collect();
+            // The names stream leaves no cursor, and each of its runs composes five more ids.
+            let marked: Vec<i64> = passing
+                .iter()
+                .filter(|run| run.stream.as_i64() == Some(0))
+                .map(|run| run.marked)
+                .collect();
             ensure!(
-                serials.len() == texts.len()
-                    && serials.windows(2).all(|pair| pair[1] == pair[0] + 5),
-                "the names cursor moves on five serials a chunk: {texts:?}"
+                texts.is_empty()
+                    && marked.len() > 2
+                    && marked.windows(2).all(|pair| pair[1] == pair[0] + 5),
+                "the names stream composes five ids a run: {texts:?} {marked:?}"
             );
-        } else if stream != 3 {
+        } else if stream == 3 {
+            // The build's cursor names each partition it committed, in the build's order.
+            let steps: Vec<(String, i64)> = texts
+                .iter()
+                .filter_map(|text| build_step(text))
+                .filter(|(_, layout)| *layout == (3, 2))
+                .map(|(step, _)| step)
+                .collect();
+            ensure!(
+                steps == build_order(3, 2),
+                "the build commits each partition once, in order: {texts:?}"
+            );
+        } else if stream == 6 || stream == 7 {
+            // Each partition but the last names itself as the cursor once, in the stream's order.
+            let steps: Vec<(String, i64)> = texts
+                .iter()
+                .filter_map(|text| build_step(text))
+                .filter(|(_, layout)| *layout == (3, 2))
+                .map(|(step, _)| step)
+                .collect();
+            let walk: Vec<(String, i64)> = if stream == 6 {
+                vec![
+                    ("spans".to_owned(), 0),
+                    ("spans".to_owned(), 1),
+                    ("spans".to_owned(), 2),
+                    ("sums".to_owned(), 0),
+                ]
+            } else {
+                vec![("leads".to_owned(), 0)]
+            };
+            ensure!(
+                steps == walk,
+                "stream {stream} commits each partition once, in order: {texts:?}"
+            );
+        } else {
             let mut sorted = texts.clone();
             sorted.sort();
             sorted.dedup();
@@ -616,7 +577,7 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
             );
         }
     }
-    // The run that found the last window done ended the pass and did nothing else.
+    // The run that found the build done ended the pass and did nothing else.
     let end = &seen[ended];
     ensure!(
         (end.chunks, end.blocks, end.undo_rows, end.marker) == (1, 0, 1, pass_block)
@@ -625,9 +586,14 @@ async fn a_pass_longer_than_a_run_continues_from_its_cursor() -> Result<()> {
         "the pass's end: {end:?}"
     );
     let before = &seen[ended - 1];
+    let done = before
+        .cursor
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .unwrap_or_default();
     ensure!(
-        before.stream == json!(3) && before.cursor == json!(pass_block.unwrap_or(-1).to_string()),
-        "the last window was done before the end: {before:?}"
+        before.stream == json!(3) && done["step"] == json!("done"),
+        "the build was done before the end: {before:?}"
     );
     // The single blocks above the switch point follow, one a run.
     let after = &seen[ended + 1];
@@ -671,9 +637,14 @@ async fn a_later_run_of_the_pass_composes_the_list_its_beginning_wrote() -> Resu
     budgeted.max_range_events = 25;
     run(&fixture, true, &budgeted).await?;
     let (state, stream, cursor, _) = pass_state(&fixture).await?;
+    let marked = count(
+        &fixture,
+        "SELECT count(*) FROM project_compose_name_work WHERE composed",
+    )
+    .await?;
     ensure!(
-        (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_string(),
-        "one chunk of names committed: {state} {stream} {cursor}"
+        (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_null() && marked == 5,
+        "one chunk of names committed: {state} {stream} {cursor} {marked}"
     );
     // That run's publication is the one before the children stream finished.
     fixture.expect_listing_skips(1);
@@ -711,8 +682,14 @@ async fn a_later_run_of_the_pass_composes_the_list_its_beginning_wrote() -> Resu
         "the list numbers every id once from 1: {rows} {first:?} {last:?} {distinct}"
     );
     ensure!(
-        count(&fixture, "SELECT count(*) FROM project_compose_name_work").await? == 0,
-        "the pass's end drops the list"
+        count(&fixture, "SELECT count(*) FROM project_compose_name_work").await? == 0
+            && count(
+                &fixture,
+                "SELECT count(*) FROM project_compose_history_work"
+            )
+            .await?
+                == 0,
+        "the pass's end drops the list and the build's work table"
     );
     sqlx::query("DELETE FROM project_registry_node_state WHERE event_identity = 'late-probe'")
         .execute(&fixture.pool)
@@ -768,8 +745,8 @@ async fn an_event_the_fold_never_applies_names_nothing_in_the_pass() -> Result<(
     fixture.cleanup().await
 }
 
-/// A trigger that fails the `nth` write of a composition chunk to the repair record, once: the
-/// sequence survives the rollback the failure causes.
+/// A trigger that fails the `nth` work list row a names chunk marks composed, once, inside the
+/// chunk's transaction: the sequence survives the rollback the failure causes.
 async fn fail_chunk(fixture: &Fixture, nth: i64) -> Result<()> {
     raw_sql(&format!(
         "CREATE SEQUENCE fail_chunk_once;
@@ -780,8 +757,8 @@ async fn fail_chunk(fixture: &Fixture, nth: i64) -> Result<()> {
              END IF;
              RETURN NEW;
          END $$;
-         CREATE TRIGGER fail_chunk BEFORE UPDATE ON project_repair_record
-         FOR EACH ROW WHEN (OLD.state = 'composing' AND NEW.state = 'composing')
+         CREATE TRIGGER fail_chunk BEFORE UPDATE ON project_compose_name_work
+         FOR EACH ROW WHEN (NEW.composed AND NOT OLD.composed)
          EXECUTE FUNCTION fail_chunk();"
     ))
     .execute(&fixture.pool)
@@ -791,7 +768,7 @@ async fn fail_chunk(fixture: &Fixture, nth: i64) -> Result<()> {
 
 async fn allow_chunks(fixture: &Fixture) -> Result<()> {
     raw_sql(
-        "DROP TRIGGER fail_chunk ON project_repair_record;
+        "DROP TRIGGER fail_chunk ON project_compose_name_work;
          DROP FUNCTION fail_chunk(); DROP SEQUENCE fail_chunk_once;",
     )
     .execute(&fixture.pool)
@@ -799,13 +776,22 @@ async fn allow_chunks(fixture: &Fixture) -> Result<()> {
     Ok(())
 }
 
+/// The work list's ids marked composed.
+async fn marked(fixture: &Fixture) -> Result<i64> {
+    count(
+        fixture,
+        "SELECT count(*) FROM project_compose_name_work WHERE composed",
+    )
+    .await
+}
+
 // A run that stops after the pass began and before its first chunk committed leaves the record
 // composing at the start of the names stream and no composed row, and the next run composes from
-// there. A chunk that fails to commit after two committed leaves the cursor and every row where
-// the second chunk left them, and the next run composes that chunk again. Both rebuilds equal the
-// block-by-block one.
+// there. A chunk that fails to commit after two committed leaves every row where the second
+// chunk left them, and the next run composes the ids that chunk had claimed. Both rebuilds equal
+// the block-by-block one.
 #[tokio::test]
-async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Result<()> {
+async fn a_chunk_that_fails_to_commit_is_composed_again() -> Result<()> {
     let fixture = seeded("families_compose_failure").await?;
     let expected = block_by_block(&fixture).await?;
     let ranged = options(RebuildRanges::Through(TARGET)).with_compose_chunk_keys(5);
@@ -825,7 +811,7 @@ async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Res
         pass_state(&fixture).await?
     );
     ensure!(
-        fixture.composed_rows().await? == 0,
+        fixture.composed_rows().await? == 0 && marked(&fixture).await? == 0,
         "the failed chunk composed nothing"
     );
     allow_chunks(&fixture).await?;
@@ -839,7 +825,9 @@ async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Res
     run(&fixture, true, &two).await?;
     let (state, stream, cursor, _) = pass_state(&fixture).await?;
     ensure!(
-        (state.as_str(), &stream) == ("composing", &json!(0)) && cursor.is_string(),
+        (state.as_str(), &stream) == ("composing", &json!(0))
+            && cursor.is_null()
+            && marked(&fixture).await? == 10,
         "two chunks of names committed: {state} {stream} {cursor}"
     );
     // That run's publication is the one before the children stream finished. The failed runs
@@ -855,8 +843,8 @@ async fn a_chunk_that_fails_to_commit_is_composed_again_from_the_cursor() -> Res
         "{error}"
     );
     ensure!(
-        pass_state(&fixture).await?.2 == cursor,
-        "the cursor is unchanged"
+        marked(&fixture).await? == 10,
+        "the failed chunk marked nothing"
     );
     ensure!(
         fixture.exact().await? == committed,
@@ -895,6 +883,15 @@ async fn with_no_range_the_pass_is_empty() -> Result<()> {
         "the empty pass composed at -1: {:?}",
         pass_state(&fixture).await?
     );
+    ensure!(
+        count(
+            &fixture,
+            "SELECT count(*) FROM project_compose_history_work"
+        )
+        .await?
+            == 0,
+        "the empty pass builds nothing"
+    );
     require_equal(&fixture, &expected.0, "with no range").await?;
     ensure!(
         fixture.journalled_blocks().await? == expected.1,
@@ -905,9 +902,16 @@ async fn with_no_range_the_pass_is_empty() -> Result<()> {
 
 // The switch point rises between two runs: the second run applies blocks above the first run's
 // switch point in a range, after the pass. That range composes and journals as one generation, so
-// it undoes as one step, and the rebuild equals the block-by-block one.
+// it undoes as one step, and the rebuild equals the block-by-block one. Under an event cap of 2
+// the second run applies 17 to 24 as four such ranges of two blocks, each its own generation.
 #[tokio::test]
 async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
+    range_after_the_pass(families::MAX_RANGE_EVENTS, &[24]).await?;
+    range_after_the_pass(2, &[18, 20, 22, 24]).await
+}
+
+/// The second run's ranges under an event cap of `events` end at `ends`.
+async fn range_after_the_pass(events: u64, ends: &[i64]) -> Result<()> {
     let fixture = Fixture::new("families_compose_risen", 30).await?;
     for block in 10..=24 {
         fixture
@@ -918,9 +922,13 @@ async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
         .apply_with(25, FamilyMode::Rebuild, &options(RebuildRanges::Off))
         .await?;
     let expected = fixture.exact().await?;
-    // Ranges [10], [11, 12] and [13, 14], the pass (a chunk of names, one window and its end),
-    // then single blocks 15 and 16 before the budget runs out.
-    let low = options(RebuildRanges::Through(14)).with_max_blocks_per_run(5 + 3 + 2);
+    // Ranges [10], [11, 12] and [13, 14], the pass (a chunk of names, the leads stream's one
+    // partition, the event count stream's one span and one partition, the catalogue build's
+    // eight partitions in one span and one key partition, and its end), then single blocks 15
+    // and 16 before the budget runs out.
+    let low = options(RebuildRanges::Through(14))
+        .with_compose_builder_partitions(1, 1)
+        .with_max_blocks_per_run(5 + (1 + 1 + 2 + 8 + 1) + 2);
     run_to(&fixture, 25, true, &low).await?;
     let (state, _, _, composed) = pass_state(&fixture).await?;
     ensure!(
@@ -932,17 +940,24 @@ async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
         stopped == Some(16),
         "two single blocks after the pass: {stopped:?}"
     );
-    let high = options(RebuildRanges::Through(24));
+    let high =
+        options(RebuildRanges::Through(24)).with_range_caps(families::MAX_RANGE_BLOCKS, events);
     let second = run_to(&fixture, 25, false, &high).await?;
     ensure!(
-        second.ranges > 0 && second.compose_chunks == 0,
-        "the risen switch point ranges 17 to 24 after the pass: {second:?}"
+        second.ranges == u64::try_from(ends.len())? && second.compose_chunks == 0,
+        "cap {events}: the risen switch point ranges 17 to 24 after the pass: {second:?}"
     );
-    require_equal(&fixture, &expected, "a range after the pass").await?;
+    require_equal(
+        &fixture,
+        &expected,
+        &format!("a range after the pass, cap {events}"),
+    )
+    .await?;
     let journalled = fixture.journalled_blocks().await?;
     ensure!(
-        journalled.first() == Some(&14) && journalled.contains(&24),
-        "the pass at 14, single blocks, the range ending at 24 and the target: {journalled:?}"
+        journalled.first() == Some(&14) && ends.iter().all(|end| journalled.contains(end)),
+        "cap {events}: the pass at 14, single blocks, the ranges ending at {ends:?} and the \
+         target: {journalled:?}"
     );
     let range_rows = count(
         &fixture,
@@ -958,13 +973,18 @@ async fn a_range_after_the_pass_composes_and_journals() -> Result<()> {
     );
     let undone = families::undo_to(&fixture.pool, CHAIN, 16).await?;
     ensure!(
-        undone == 2,
-        "25, then the range ending at 24 as one step: {undone}"
+        undone == 1 + u64::try_from(ends.len())?,
+        "cap {events}: 25, then each range ending at {ends:?} as one step: {undone}"
     );
     fixture
         .apply_with(25, FamilyMode::Normal, &options(RebuildRanges::Off))
         .await?;
-    require_equal(&fixture, &expected, "replayed after the undo").await?;
+    require_equal(
+        &fixture,
+        &expected,
+        &format!("replayed after the undo, cap {events}"),
+    )
+    .await?;
     fixture.cleanup().await
 }
 
@@ -1062,6 +1082,7 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
         let ranged = |budget: u64, resumes: bool| {
             options(RebuildRanges::Through(25))
                 .with_compose_chunk_keys(1)
+                .with_compose_builder_partitions(2, 2)
                 .with_max_blocks_per_run(budget)
                 .with_resumed_redo(resumes)
         };
@@ -1079,10 +1100,11 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
             }
         }
         let before = pass_state(&fixture).await?;
+        let marked_before = marked(&fixture).await?;
         let marker = fixture.marker().await?.0;
         let stopped = match stop {
             Stop::Ranges => before.0 == "rebuilding" && before.3.is_null() && marker < Some(25),
-            Stop::Pass => before.0 == "composing" && before.2.is_string(),
+            Stop::Pass => before.0 == "composing" && before.1 == json!(0) && marked_before == 1,
             Stop::AfterPass => {
                 before.0 == "rebuilding" && before.3 == json!(25) && marker == Some(25)
             }
@@ -1106,9 +1128,7 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
                 Stop::Ranges => {
                     second.ranges == 1 && fixture.marker().await?.0 > marker && after.3.is_null()
                 }
-                Stop::Pass => {
-                    second.compose_chunks == 1 && (&after.1, &after.2) != (&before.1, &before.2)
-                }
+                Stop::Pass => second.compose_chunks == 1 && marked(&fixture).await? == 2,
                 Stop::AfterPass => after.3 == json!(25) && second.blocks == 1,
             };
             ensure!(continued, "{case}: {before:?} then {after:?}, {second:?}");
@@ -1118,12 +1138,124 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
                 after.3.is_null() && after.0 == "rebuilding",
                 "{case}: the pass fields were cleared: {after:?}"
             );
+            // The reset clears the pass's work list, and a budget of one block cannot begin a
+            // new pass, so a list a stopped pass left is gone.
+            let listed = count(&fixture, "SELECT count(*) FROM project_compose_name_work").await?;
+            ensure!(
+                listed == 0,
+                "{case}: the reset left {listed} work list rows"
+            );
         }
         while fixture.marker().await?.0 != Some(30)
             || fixture.repair_record().await?.unwrap_or_default()["state"] != json!("complete")
         {
             fixture
                 .apply_with(30, FamilyMode::Normal, &ranged(50, resumes))
+                .await?;
+        }
+        let rebuilt = fixture.exact().await?;
+        fixture
+            .apply_with(30, FamilyMode::Rebuild, &options(RebuildRanges::Off))
+            .await?;
+        require_equal(&fixture, &rebuilt, &case).await?;
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+// M1 (stop A): a record an older build left composing, in its stream 3 with a window-end cursor
+// (the release line's history windows), is reset by this build and never resumed, whether the
+// run is normal or a resumed redo and whether the input revision moved or not. With the revision
+// held equal only the family marker's projection hash tells the record is another build's
+// (driver/planning.rs): a resume would read the cursor as a catalogue build cursor and fail, and
+// a reset never reads it. Run to its end, the rebuild equals a plain one.
+#[tokio::test]
+async fn a_pass_an_older_build_left_in_its_stream_3_is_reset_not_resumed() -> Result<()> {
+    for (resumed, moved) in [(false, false), (true, false), (false, true), (true, true)] {
+        let case = format!("resumed redo {resumed}, moved revision {moved}");
+        let fixture = Fixture::new("families_compose_older_pass", 30).await?;
+        for block in 11..=25 {
+            fixture
+                .resolver_changed(block, 1, block.unsigned_abs() % 4, R1)
+                .await?;
+        }
+        fixture
+            .project_row(7, Some((0, 30, "operator redo")))
+            .await?;
+        let redo = FamilyMode::Redo { from: 0, to: 30 };
+        let ranged = |budget: u64, resumes: bool| {
+            options(RebuildRanges::Through(25))
+                .with_compose_chunk_keys(1)
+                .with_compose_builder_partitions(2, 2)
+                .with_max_blocks_per_run(budget)
+                .with_resumed_redo(resumes)
+        };
+        // All 15 work blocks and one chunk of the pass.
+        let first = fixture
+            .apply_with(30, redo.clone(), &ranged(16, false))
+            .await?;
+        ensure!(first.reset && first.budget_exhausted, "{case}: {first:?}");
+        ensure!(
+            pass_state(&fixture).await?.0 == "composing",
+            "{case}: the pass began: {:?}",
+            pass_state(&fixture).await?
+        );
+        sqlx::raw_sql(
+            "UPDATE project_repair_record SET compose_stream = 3, compose_cursor = '20';
+             UPDATE project_family_marker SET input_content_hash = 'an-older-build';
+             CREATE TABLE older_pass_log (seen bigserial PRIMARY KEY, cursor text);
+             CREATE FUNCTION older_pass_log() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 INSERT INTO older_pass_log (cursor) VALUES (NEW.compose_cursor);
+                 RETURN NEW;
+             END $$;
+             CREATE TRIGGER older_pass_log AFTER UPDATE ON project_repair_record
+             FOR EACH ROW WHEN (OLD.compose_stream = 3 AND NEW.compose_stream IS NOT NULL)
+             EXECUTE FUNCTION older_pass_log();",
+        )
+        .execute(&fixture.pool)
+        .await?;
+        if moved {
+            fixture.interpret_row(CONTENT_HASH, 3, false).await?;
+        }
+        let second = if resumed {
+            fixture
+                .project_row(8, Some((0, 30, "operator redo")))
+                .await?;
+            fixture
+                .apply_with(30, redo.clone(), &ranged(1, true))
+                .await?
+        } else {
+            fixture
+                .apply_with(30, FamilyMode::Normal, &ranged(1, false))
+                .await?
+        };
+        ensure!(second.reset, "{case}: the older pass was reset: {second:?}");
+        ensure!(
+            pass_state(&fixture).await?
+                == (
+                    "rebuilding".to_owned(),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null
+                ),
+            "{case}: the pass fields were cleared: {:?}",
+            pass_state(&fixture).await?
+        );
+        let resumed_in_3 = count(&fixture, "SELECT count(*) FROM older_pass_log").await?;
+        ensure!(
+            resumed_in_3 == 0,
+            "{case}: {resumed_in_3} updates moved on from the older build's stream 3"
+        );
+        if resumed {
+            let record = fixture.repair_record().await?.unwrap_or_default();
+            ensure!(record["attempt"] == json!(8), "{case}: {record}");
+        }
+        while fixture.marker().await?.0 != Some(30)
+            || fixture.repair_record().await?.unwrap_or_default()["state"] != json!("complete")
+        {
+            fixture
+                .apply_with(30, FamilyMode::Normal, &ranged(50, resumed))
                 .await?;
         }
         let rebuilt = fixture.exact().await?;
@@ -1216,51 +1348,102 @@ async fn a_manifest_sync_before_the_pass_rebuilds_under_the_new_set() -> Result<
     Ok(())
 }
 
-// The input revision moves between two chunks of the pass: the next chunk's fence refuses it and
-// the run stops with an error, and the next run rebuilds from the start under the new revision.
+// The input revision moves between two chunks of the pass, two chunks of names on three workers
+// or the first two partitions of the catalogue build, the event count stream or the leads stream:
+// the next chunk's fence refuses it and the run stops with an error, the committed chunks stay,
+// and the next run rebuilds from the start under the new revision. In the names stream the move lands with the record's count of the first
+// chunk, and a worker that read the revision before it commits under it.
 #[tokio::test]
 async fn a_revision_that_moves_between_two_chunks_stops_the_run() -> Result<()> {
-    let fixture = Fixture::new("families_compose_revision", 30).await?;
-    for block in 11..=25 {
-        fixture
-            .resolver_changed(block, 1, block.unsigned_abs() % 4, R1)
-            .await?;
-    }
-    fixture.interpret_row("h1", 1, false).await?;
-    raw_sql(
-        "CREATE FUNCTION move_revision() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN
-             UPDATE chain_phase_state SET input_content_hash = 'h2'
-             WHERE phase_name = 'interpret';
-             RETURN NEW;
-         END $$;
-         CREATE TRIGGER move_revision AFTER UPDATE ON project_repair_record
-         FOR EACH ROW WHEN (NEW.state = 'composing' AND NEW.compose_cursor IS NOT NULL
-                            AND OLD.compose_cursor IS NULL)
-         EXECUTE FUNCTION move_revision();",
-    )
-    .execute(&fixture.pool)
-    .await?;
-    let ranged = options(RebuildRanges::Through(30)).with_compose_chunk_keys(1);
-    let error = run_to(&fixture, 30, true, &ranged)
-        .await
-        .expect_err("the second chunk is refused");
-    ensure!(error.to_string().contains("revision"), "{error}");
-    let (state, stream, cursor, _) = pass_state(&fixture).await?;
-    ensure!(
-        state == "composing" && stream == json!(0) && cursor.is_string(),
-        "one chunk committed before the move: {state} {stream} {cursor}"
-    );
-    raw_sql("DROP TRIGGER move_revision ON project_repair_record")
+    for (stream, moved_after) in [
+        (
+            0,
+            "NEW.compose_stream = 0 AND NEW.compose_chunks = 1 AND OLD.compose_chunks = 0",
+        ),
+        (
+            3,
+            "NEW.compose_stream = 3 AND OLD.compose_stream = 3 AND NEW.compose_cursor IS NOT NULL
+             AND OLD.compose_cursor IS NULL",
+        ),
+        (
+            6,
+            "NEW.compose_stream = 6 AND OLD.compose_stream = 6 AND NEW.compose_cursor IS NOT NULL
+             AND OLD.compose_cursor IS NULL",
+        ),
+        (
+            7,
+            "NEW.compose_stream = 7 AND OLD.compose_stream = 7 AND NEW.compose_cursor IS NOT NULL
+             AND OLD.compose_cursor IS NULL",
+        ),
+    ] {
+        let fixture = Fixture::with_connections("families_compose_revision", 30, 4).await?;
+        for block in 11..=25 {
+            fixture
+                .resolver_changed(block, 1, block.unsigned_abs() % 4, R1)
+                .await?;
+        }
+        fixture.interpret_row("h1", 1, false).await?;
+        raw_sql(&format!(
+            "CREATE FUNCTION move_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 UPDATE chain_phase_state SET input_content_hash = 'h2'
+                 WHERE phase_name = 'interpret';
+                 RETURN NEW;
+             END $$;
+             CREATE TRIGGER move_revision AFTER UPDATE ON project_repair_record
+             FOR EACH ROW WHEN (NEW.state = 'composing' AND {moved_after})
+             EXECUTE FUNCTION move_revision();"
+        ))
         .execute(&fixture.pool)
         .await?;
-    let next = run_to(&fixture, 30, false, &ranged).await?;
-    ensure!(next.reset, "the next run rebuilds: {next:?}");
-    ensure!(
-        fixture.marker_revision().await? == (Some("h2".to_owned()), Some(1)),
-        "under the new revision"
-    );
-    fixture.cleanup().await
+        let ranged = options(RebuildRanges::Through(30))
+            .with_compose_chunk_keys(1)
+            .with_compose_builder_partitions(2, 2)
+            .with_compose_workers(3);
+        let error = run_to(&fixture, 30, true, &ranged)
+            .await
+            .expect_err("the second chunk is refused");
+        ensure!(error.to_string().contains("revision"), "{error}");
+        let (state, at, cursor, _) = pass_state(&fixture).await?;
+        let committed = if stream == 0 {
+            cursor.is_null() && marked(&fixture).await? >= 1
+        } else {
+            cursor.is_string()
+        };
+        ensure!(
+            state == "composing" && at == json!(stream) && committed,
+            "stream {stream}: a chunk committed before the move: {state} {at} {cursor}"
+        );
+        if stream == 3 {
+            let step = cursor
+                .as_str()
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .unwrap_or_default();
+            let keys = count(
+                &fixture,
+                "SELECT count(*) FROM project_compose_history_work",
+            )
+            .await?;
+            ensure!(
+                step["step"] == json!("keys") && keys > 0,
+                "the build's first partition committed and stays: {cursor} with {keys} keys"
+            );
+        }
+        raw_sql("DROP TRIGGER move_revision ON project_repair_record")
+            .execute(&fixture.pool)
+            .await?;
+        let next = run_to(&fixture, 30, false, &ranged).await?;
+        ensure!(
+            next.reset,
+            "stream {stream}: the next run rebuilds: {next:?}"
+        );
+        ensure!(
+            fixture.marker_revision().await? == (Some("h2".to_owned()), Some(1)),
+            "stream {stream}: under the new revision"
+        );
+        fixture.cleanup().await?;
+    }
+    Ok(())
 }
 
 // After a rebuild in ranges completes, the generations above the pass block undo as they always

@@ -27,12 +27,15 @@ never the page's own origin. The docs page still loads its web fonts from
 Google Fonts, as it did before.
 
 - Sepolia is the default: `https://sepolia.api.bigname.sh`.
-- Mainnet is listed as coming and cannot be selected until its API exists.
-  When it does, drop `coming: true` from its entry in `network.js` and give
-  the entry its own `samples` (a name, an address, a resolver and a registry
-  that exist on mainnet). The try-it forms prefill from the selected
-  network's samples; a network without them prefills nothing, and the
-  behaviour tests fail for a selectable network that has none.
+- Mainnet is served from `https://api.bigname.sh`.
+
+Each network in the table has its own `samples`: a name, an address, a
+resolver and a registry that exist on that network. The try-it forms and the
+docs page's curl examples prefill from the selected network's samples. A
+network without samples prefills nothing. The behaviour tests fail for a
+selectable network without samples, and for a page that hard-codes a sample
+value. An entry marked `coming: true` is listed but cannot be selected. Give
+it samples and drop the flag once its API exists.
 
 The selection lives in the URL, so a link says which network it means:
 
@@ -80,8 +83,9 @@ These run in CI's `site` job and in the API crate's suite:
   catches the usual regressions rather than proving every request is right.
 - `node --test scripts/tests/site.test.mjs` exercises the logic in
   `network.js` (exported when it is loaded outside a browser): query and link
-  merging, the `?api=` rules, mainnet not selectable, one outstanding status
-  request, late answers dropped, the cache reset on a switch, and escaping.
+  merging, the `?api=` rules, which networks can be selected, one outstanding
+  status request, late answers dropped, the cache reset on a switch, and
+  escaping.
 - The API crate's `site_pages` tests, which already held the pages to the
   router, now read these files: every `/v1` route the API serves must have a
   manual page here, and every upstream citation here must be in a contract
