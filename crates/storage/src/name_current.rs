@@ -10,7 +10,7 @@ pub mod wrapper_expiry;
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::types::Uuid;
 
 pub use expiring::{NameCurrentDeadline, NameCurrentExpiringFilter, NameCurrentExpiryWindow};
@@ -107,7 +107,9 @@ pub async fn load_current_normalized_names(
         .collect())
 }
 
-/// Load the canonical representative current name for each resource (registration).
+/// Load the canonical representative current name for each resource (registration), reading
+/// only the names bound on `chain_ids`, the chains of the caller's publication. An empty
+/// `chain_ids` serves no names.
 ///
 /// `name_current.resource_id` is 1:many; this picks one representative per resource using the
 /// `canonical_display_name ASC` tie-break the rest of v2 uses and returns the picked exact-name
@@ -116,10 +118,54 @@ pub async fn load_current_normalized_names(
 pub async fn load_current_names_by_resource_ids(
     db: impl Into<crate::ReadDb<'_>>,
     resource_ids: &[Uuid],
+    chain_ids: &[String],
 ) -> Result<BTreeMap<Uuid, NameCurrentRow>> {
-    if resource_ids.is_empty() {
+    if resource_ids.is_empty() || chain_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-
-    crate::families::name::load_family_names_by_resource_ids(db, resource_ids).await
+    // TYR-518: the two statements and the pick below are copied from
+    // `load_family_names_by_resource_ids` (families/name/batch.rs), with the chain key added so
+    // the lookup seeks project_binding_candidate_resource_idx. batch.rs is hashed on this
+    // release line, so it is not changed here. The reconcile branch fixes batch.rs in place
+    // (TYR-518). There this wrapper goes back to delegating to batch.rs and these copied
+    // statements are deleted in the same PR. The forward-port of this change must not leave
+    // both.
+    let mut snapshot = db.into().snapshot().await?;
+    let names: Vec<String> = sqlx::query_scalar(
+        "/* storage:name_current.by_resource */
+         SELECT DISTINCT candidate.logical_name_id
+         FROM bigname_phase.project_binding_candidate candidate
+         WHERE candidate.chain_id = ANY($2::text[])
+           AND candidate.resource_id = ANY($1::uuid[])",
+    )
+    .bind(resource_ids)
+    .bind(chain_ids)
+    .fetch_all(&mut *snapshot)
+    .await
+    .context("failed to load the names bound to resources")?;
+    let ordered: Vec<String> = sqlx::query_scalar(&format!(
+        "/* storage:name_current.by_resource_order */
+         SELECT surface.logical_name_id FROM bigname_phase.name_surfaces surface
+         WHERE surface.logical_name_id = ANY($1)
+         ORDER BY {name} ASC, surface.logical_name_id ASC",
+        name = crate::rendered_name::rendered_name_sql("surface")
+    ))
+    .bind(&names)
+    .fetch_all(&mut *snapshot)
+    .await
+    .context("failed to order the names bound to resources")?;
+    let mut rows =
+        crate::families::name::load_family_names_by_logical_name_ids(&mut *snapshot, &names)
+            .await?;
+    snapshot.close().await?;
+    let mut out = BTreeMap::new();
+    for name in ordered {
+        let Some(row) = rows.remove(&name) else {
+            continue;
+        };
+        if let Some(resource) = row.resource_id.filter(|id| resource_ids.contains(id)) {
+            out.entry(resource).or_insert(row);
+        }
+    }
+    Ok(out)
 }
