@@ -13,6 +13,7 @@
 //! to its rows and to the previous statement's rows.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 
 use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -656,7 +657,7 @@ async fn address_matches_rows_and_oracle_parity() -> Result<()> {
 /// The publication statement as `historical_history_relations` sends it at ccc39d88a, by the
 /// md5 of its text. The fence leaves Project's statement byte-identical: it shares only the
 /// arm and eligibility filters, which do not move.
-const PUBLICATION_STATEMENT_MD5: &str = "unpinned";
+const PUBLICATION_STATEMENT_MD5: &str = "df702d0be59ee6ea54960bac99170bc9";
 
 /// M1: Project's publication statement keeps its text, and on this fixture its rows. The run
 /// log carries the rows' digest, which the base and head runs must print alike.
@@ -716,16 +717,14 @@ async fn publication_statement_is_unchanged() -> Result<()> {
         .fetch_one(&mut *connection)
         .await
         .context("the publication statement is not prepared on this connection")?;
-        println!("PUBLICATION_STATEMENT_MD5 {digest}\n{statement}\nEND_PUBLICATION_STATEMENT");
+        // Written past the test harness's capture, so the run's log keeps the record.
+        let mut log = std::io::stderr();
+        writeln!(log, "PUBLICATION_STATEMENT_MD5 {digest}")?;
         let rows_digest: String = sqlx::query_scalar("SELECT md5($1)")
             .bind(rows.join("\n"))
             .fetch_one(&mut *connection)
             .await?;
-        println!(
-            "PUBLICATION_ROWS_MD5 {rows_digest} {}\n{}",
-            rows.len(),
-            rows.join("\n")
-        );
+        writeln!(log, "PUBLICATION_ROWS_MD5 {rows_digest} {}", rows.len())?;
         ensure!(
             digest == PUBLICATION_STATEMENT_MD5,
             "the publication statement changed: md5 {digest}\n{statement}"
@@ -772,7 +771,8 @@ async fn project_address_history_anchor_rows_digest() -> Result<()> {
         )
         .fetch_one(database.pool())
         .await?;
-        println!("PROJECT_ANCHOR_DIGEST {digest} {count}");
+        // Written past the test harness's capture, so the run's log keeps the record.
+        writeln!(std::io::stderr(), "PROJECT_ANCHOR_DIGEST {digest} {count}")?;
         ensure!(count > 0, "the publication wrote no address history anchor");
         Ok(())
     }
