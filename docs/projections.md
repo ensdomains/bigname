@@ -2758,7 +2758,8 @@ families. No read serves it yet.
 A block counts a row in the row's own block range only, as the row stands when
 that block is applied, so the stored counts rely on Interpret never changing a
 stored row's `consumer_visibility` in place: its upsert's conflict clause
-updates `canonicality_state` alone and refuses a row whose visibility differs
+updates only `canonicality_state` and `observed_at`, and refuses a row whose
+visibility differs
 (`crates/interpret/src/write/normalized.rs`), and a redo that re-derives a block
 forces Project's own undo and replay of it. A writer that updates visibility in
 place would have to touch the counter too

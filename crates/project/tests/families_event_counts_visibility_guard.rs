@@ -15,7 +15,8 @@
 //! only, misses the flipped row for as long as block B stays published (the drift such a writer
 //! would cause); and the undo and replay of B, which is what an Interpret redo forces, brings the
 //! stored count back to the read. A rebuild agrees with the replayed state. If a writer that flips
-//! visibility in place is ever added, the drift half of this test is the one to revisit, and `docs/projections.md` ("Event counts") names this reliance.
+//! visibility in place is ever added, the drift half of this test is the one to revisit, and
+//! `docs/projections.md` ("Event counts") names this reliance.
 #[path = "families_support/mod.rs"]
 mod support;
 
@@ -113,7 +114,7 @@ async fn visibility(fixture: &Fixture, identity: &str, visibility: &str) -> Resu
 /// journal; a rebuild agrees with the replay.
 #[tokio::test]
 async fn stored_counts_rely_on_the_upsert_never_changing_a_stored_rows_visibility() -> Result<()> {
-    let fixture = Fixture::new("families_late_flip", 4).await?;
+    let fixture = Fixture::new("families_event_counts_visibility_guard", 4).await?;
     emitted(&fixture, "a-1", 1, 0).await?;
     emitted(&fixture, "a-2", 2, 0).await?;
     emitted(&fixture, "late-2", 2, 1).await?;
