@@ -1,12 +1,14 @@
 use std::collections::BTreeSet;
 
-use super::{DROP_LIST, KEPT};
+use super::{ADVISORY, DROP_LIST, KEPT};
 
 const DROP_SQL: &str = include_str!("../../../../ops/walk-index-set/drop.sql");
 const INSTALL_SQL: &str = include_str!("../../../../ops/walk-index-set/install.sql");
 const README: &str = include_str!("../../../../ops/walk-index-set/README.md");
 const STORAGE_MD: &str = include_str!("../../../../docs/storage.md");
 const DEPLOYMENT_MD: &str = include_str!("../../../../docs/deployment.md");
+const RECORD_HISTORY_INSTALL_SQL: &str =
+    include_str!("../../../../ops/record-history-indexes/install.sql");
 
 /// The index names of every line of `script` that starts with `statement`, in script order.
 fn listed(script: &str, statement: &str) -> Vec<String> {
@@ -220,6 +222,43 @@ fn every_create_is_concurrent() {
                 index.name
             )),
             "{}",
+            index.name
+        );
+    }
+}
+
+/// The advisory indexes are outside the walk index set: neither script names them and neither
+/// list holds them. Each one's statement and definition are those of its own install script,
+/// and `docs/storage.md` names it in the walk index set section.
+#[test]
+fn advisory_indexes_are_outside_the_walk_index_set() {
+    let walk_scripts = format!("{DROP_SQL}{INSTALL_SQL}");
+    let walk_section = STORAGE_MD
+        .split_once("### Walk index set")
+        .and_then(|(_, rest)| rest.split_once("\n## "))
+        .map(|(section, _)| section)
+        .expect("the walk index set section");
+    for index in ADVISORY {
+        assert!(!walk_scripts.contains(index.name), "{}", index.name);
+        assert!(!KEPT.contains(&index.name), "{}", index.name);
+        assert!(
+            DROP_LIST.iter().all(|dropped| dropped.name != index.name),
+            "{}",
+            index.name
+        );
+        assert!(
+            RECORD_HISTORY_INSTALL_SQL.contains(&format!("{};", index.create)),
+            "{}: install.sql's statement",
+            index.name
+        );
+        assert!(
+            RECORD_HISTORY_INSTALL_SQL.contains(&format!("$def${}$def$", index.definition)),
+            "{}: install.sql's reviewed definition",
+            index.name
+        );
+        assert!(
+            walk_section.contains(&format!("`{}`", index.name)),
+            "docs/storage.md's walk index set section must name {}",
             index.name
         );
     }

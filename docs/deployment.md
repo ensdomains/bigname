@@ -6863,3 +6863,59 @@ depends on planner statistics, which a redo's freshly rebuilt tables may not hav
 - It needs no schema-migration and no new index. `name_surfaces_project_parent_key_idx` stays as
   it is.
 - The release that carries it redoes Project anyway, so it adds no redo of its own.
+
+## Partial indexes for history pages filtered by a record key
+
+The build that adds `normalized_events_record_key_history_idx` and
+`normalized_events_record_emitter_key_history_idx` changes how `/v1/events`, name history and
+address history read a page with `record_key`
+([table ownership](storage.md#table-ownership)).
+
+- Before, a page with `record_key` that no name, registration or address anchored walked the
+  chain's events in page order and tested the key on every row. A rare key, an unknown key, or
+  a text key sent without its `text:` prefix read the chain's whole history, and the request
+  could answer `500` at the API's statement timeout.
+- Such a page now reads one arm for the key's writes and one for the record-version resets per
+  chain. The write arm reads one of the new partial indexes and stops after one page. The
+  reset arm reads at most the chain's resets. A `resolver` or `contract_address` scope is the
+  emitter equality inside both arms. The rows, their order and the cursors do not change for a
+  key sent as stored.
+- `include=total_count` on such a read scoped by an emitter counts through the same arms. Each
+  arm returns at most the count's cap plus one row. Its scan also reads the rows the arm's own
+  namespace, lineage and duplicate conditions drop, so rows read per arm are bounded by the cap
+  plus one plus those, for any key. The count does not change.
+- A `record_key` with no colon is now read as the text record `text:<key>`, so
+  `record_key=avatar` returns the `text:avatar` writes. The keys producers store without a
+  prefix, `content`, `contenthash` and `name`, stay exact. A history cursor issued before this
+  release under a bare text key is refused with 400. Restart the walk.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the changed statements are in serving readers, not hashed files. No redo is needed. The
+  change ships as an image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order on every database the build is deployed to:
+
+1. Build the two indexes with
+   [`ops/record-history-indexes/install.sql`](../ops/record-history-indexes/README.md),
+   concurrently and outside a transaction.
+2. Check them with the query in that README: two valid and ready indexes with the reviewed
+   definitions.
+3. List the stored record keys without a colon with the query in that README. It must return
+   only `content`, `contenthash` and `name`.
+4. Apply schema-migration `20261111120000_normalized_events_record_history_indexes.sql`.
+5. Swap the image.
+
+The schema-migration adopts an index of the reviewed name that is valid and ready with the
+reviewed definition, without a build and without a lock, so it is a no-op on a database where
+the script already built both. An empty `normalized_events` builds them directly. A populated
+table without either one is refused, because an ordinary build would block writes to
+`normalized_events` for the whole build. The schema-migration refuses a name that is not an
+index, an index on another table or one that is not valid and ready, and another definition.
+Its error names the index and, for another definition, prints the definition it found and the
+one it expects. The README gives the recovery steps. Then run the schema-migrations again.
+
+The two indexes are advisory ([walk index set](storage.md#walk-index-set)). The phase runner
+never builds them, and `ops/walk-index-set/drop.sql` leaves them in place. The API starts and
+serves without them, with a WARN at startup naming each one that is not in place, and a page
+with `record_key` then walks the chain's events as before.

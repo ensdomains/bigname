@@ -15,12 +15,13 @@
 //! | 8 | The catalog read fails: a closed pool, or a role without `USAGE` on the schema | Refuses in both modes | `a_catalog_read_that_fails_refuses_in_both_modes` |
 //! | 9 | No phase schema | Skipped, the API starts | `api_serve_tolerates_an_absent_phase_schema` (in `api_storage_quick_wins.rs`) |
 //! | 10 | A value other than `refuse` or `warn` | Argument parsing fails | `the_walk_index_set_check_refuses_by_default_and_takes_only_its_two_values` (in `cli.rs`) |
+//! | 11 | Every advisory index missing, under `refuse` | Serves, a WARN naming each one, gauge 0; with them in place, no such WARN | `the_api_serves_without_an_advisory_index_and_names_it` |
 use std::{
     io::{Read, Write},
     sync::{Arc, Mutex},
 };
 
-use bigname_storage::walk_index_set::DROP_LIST;
+use bigname_storage::walk_index_set::{ADVISORY, DROP_LIST};
 use tracing::instrument::WithSubscriber;
 
 use super::*;
@@ -493,5 +494,34 @@ async fn a_catalog_read_that_fails_refuses_in_both_modes() -> Result<()> {
         }
     }
     cleanup_role(&database, without_usage, role).await?;
+    database.cleanup().await
+}
+
+/// An advisory index is outside the walk index set. Without one the API starts, even under
+/// `refuse`, with a WARN naming each one that is missing.
+#[tokio::test]
+async fn the_api_serves_without_an_advisory_index_and_names_it() -> Result<()> {
+    const ADVISORY_WARNING: &str = "an advisory normalized_events index is not in place";
+    let _gauge = GAUGE.lock().await;
+    let database = TestDatabase::new_migrated().await?;
+    let (error, logs) = serve_once(&database, WalkIndexSetCheck::Refuse).await?;
+    assert!(error.starts_with(STARTED), "{error}: {logs}");
+    assert!(!logs.contains(ADVISORY_WARNING), "{logs}");
+    assert!(!ADVISORY.is_empty());
+    for index in ADVISORY {
+        drop_index(&database.lookup_pool, index.name).await?;
+    }
+
+    let (error, logs) = serve_once(&database, WalkIndexSetCheck::Refuse).await?;
+
+    assert!(error.starts_with(STARTED), "{error}: {logs}");
+    for index in ADVISORY {
+        let warned = line_with(&logs, "WARN", index.name);
+        assert!(
+            warned.contains(ADVISORY_WARNING) && warned.contains("missing"),
+            "{warned}"
+        );
+    }
+    assert_eq!(scraped_gauge().await?, 0);
     database.cleanup().await
 }
