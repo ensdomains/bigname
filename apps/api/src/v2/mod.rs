@@ -138,7 +138,7 @@ pub(crate) use resolvers::{
     build_resolver_overview, with_bound_count_cap,
 };
 pub(crate) use resolvers::{
-    get_resolver, get_resolver_links, get_resolver_records, get_resolver_roles,
+    get_resolver, get_resolver_links, get_resolver_records, get_resolver_roles, get_resolvers,
     parse_numeric_chain_id, resolver_snapshot_scope,
 };
 pub(crate) use search::get_search;
