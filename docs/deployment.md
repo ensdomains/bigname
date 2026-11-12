@@ -6931,17 +6931,21 @@ partial indexes, one per key, serve those subqueries.
   table, manifest or setting. The manifest-authority fingerprint and the compiled watch plan are
   unchanged, so stamp no Ingest redo.
 
-Roll it out in this order:
+The indexes join the drop list of the [walk index set](storage.md#walk-index-set), so a redo
+that drops the set builds them in its finish step, three more builds than before, and a database
+promoted from that redo's seed needs no hand build. The API refuses to start without them unless
+`BIGNAME_API_WALK_INDEX_SET_CHECK=warn`, because without them each probe reads
+`normalized_events` sequentially, so all three must be valid on every database an API reads
+before that API takes the build.
+
+On a database that takes the build without such a redo:
 
 1. Build the three indexes with `ops/address-key-indexes/install.sql`, as its
-   [README](../ops/address-key-indexes/README.md) describes, on every database the build is
-   deployed to. The runner and the API keep running while it builds, and the previous image does
-   not read them.
+   [README](../ops/address-key-indexes/README.md) describes. The runner and the API keep running
+   while it builds, and the previous image does not read them.
 2. Apply the schema-migrations. The schema-migration adopts the prebuilt indexes by name and
    reviewed definition, and refuses a populated table without them.
 3. Swap the image under the release's re-derivation boundary.
 
-The indexes join the drop list of the [walk index set](storage.md#walk-index-set). The API refuses
-to start without them unless `BIGNAME_API_WALK_INDEX_SET_CHECK=warn`, because without them each
-probe reads `normalized_events` sequentially. The earlier kind-partial
-`normalized_events_address_*_match_idx` indexes stay installed until a later build drops them.
+The earlier kind-partial `normalized_events_address_*_match_idx` indexes stay installed until a
+later build drops them.
