@@ -7272,13 +7272,18 @@ row, as block-by-block publication gives them.
   address listing's `registration_lead` per key partition of the addresses. The names
   stream's workers write the listing rows and decide no lead, since one group's rows can lie
   in several workers' chunks.
+- A pass stopped inside the event count or leads stream refuses to continue if
+  `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`,
+  `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` or the PostgreSQL server
+  version changed since, as the catalogue build does. Put the values back, or stamp a Project
+  redo.
 - The child listing parents stream is `compose_stream` 5. The values 3 and 4 keep their
   meaning. The pass runs 0, 7, 5, 1, 2, 4, 6, then 3.
 - The schema-migration `20261112120000_project_compose_stream_order_comments.sql` changes the
   repair record's `compose_stream` and `compose_cursor` comments only. The schema-migration
   `20261112130000_project_compose_event_count_work.sql` adds the event count stream's work
-  table, empty. Every family run of this build writes it, so run it first. The API reads
-  neither and needs no grant.
+  table, empty. A family reset and every composition pass of this build write it, so run it
+  first. The API reads neither and needs no grant.
 - Before a database takes this build, `project_repair_record` must show no row in state
   `composing`. A pass an older build left is reset, never resumed, but the check keeps an
   interrupted pass from going unnoticed.
