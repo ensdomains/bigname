@@ -151,7 +151,3 @@ async fn ensure_publications(conn: &mut PgConnection, chains: Option<&[String]>)
     crate::families::lookup::ensure_publications(conn, chains).await?;
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "reverse_page_reference.rs"]
-mod reference;

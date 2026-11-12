@@ -213,8 +213,10 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
     store
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
+    // One batch, whatever the composition pass's partition count.
     let project = ProjectPhase::new(pool.clone()).with_family_settings(FamilySettings {
         rebuild_ranges: RebuildRanges::Through(i64::MAX),
+        max_blocks_per_run: u64::MAX,
         ..FamilySettings::default()
     });
     let outcome = project.run_batch(context(&marker, None)).await?;

@@ -1,8 +1,7 @@
 //! The serving readers over name surfaces that store no raw bytes: search, the children of a
 //! parent without bytes, the registry-child fallback, resolver links and the identity read model.
-//! The bound-name page, the reverse-page candidate walk and the mirror walks have their own tests
-//! (`bound_page_plan_tests`, `records::reverse_page`, `records::mirror`), on this fixture where
-//! they need one.
+//! The bound-name page and the mirror walks have their own tests (`bound_page_plan_tests`,
+//! `records::mirror`), on this fixture where they need one.
 //!
 //! The fixture is `eth` and `alpha.eth` with bytes, and below `alpha.eth`:
 //!

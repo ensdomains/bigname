@@ -2738,9 +2738,22 @@ Each family block adds the counts of the events in its range after the prior
 marker's block and journals each touched key's before-image, so an undo
 restores the counts with the other families. A step that touches more than
 10,000 keys logs a `WARN` with the chain, block and key count. A rebuild's
-ranges write no counts. Its [composition pass](glossary.md#composition-pass)
-adds them window by window in the catalogue's event windows, with the code a
-block runs.
+ranges write no counts, and its reset deletes the chain's. Its
+[composition pass](glossary.md#composition-pass) builds them once, at the pass
+block, in the event count stream, from the statement a block counts its own
+range with. That statement decides an event from the event itself, its own
+block's lineage row and events of the same block (the address pair and the
+handoff copies), so the counts over every block up to the pass block are the
+sums of its counts over block spans. The stream reads the events once: per
+block span it writes the span's per-key counts into the work table
+`project_compose_event_count_work`, then per key partition it deletes the
+chain's stored counts of the partition and inserts the span counts summed.
+It splits as the catalogue build does
+(`--project-families-compose-block-spans` and
+`--project-families-compose-key-partitions`), runs under the build's
+`work_mem` option, logs each partition it commits with its rows and time, and
+clears its work table at its last partition. So once the stream ends a key no
+event counts has no row.
 
 The address-pair rule reads the contract rows of the event's own manifest
 (`manifest_contract_instances`) and the proven resolver generations in
@@ -2869,7 +2882,9 @@ later run that resumes the rebuild starts by asking for its whole remaining
 budget. A request is capped at 1,024 work blocks and at what the run's budget
 has left, since each block counts against the budget: under the default budget
 of 256 blocks a run the budget is the binding cap, and 1,024 binds only when a
-run's budget is larger. A range also ends at 4,096 events, counted per block
+run's budget is larger. A range also ends at 4,096 events by default
+(`--project-families-max-range-events`, or
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_RANGE_EVENTS`), counted per block
 before duplicates are dropped: it ends before the block that would take it past
 the cap and always holds its first block, so a first block over the cap is a
 range of its own. A range opens with its first block as a single block does,
@@ -2910,17 +2925,35 @@ work block above the switch point, or the target), the rebuild runs the pass:
   Nothing writes the families until the pass ends, so the list stays the one
   its beginning found.
 - Chunks then compose, at the marker's block and with the manifest set the
-  marker recorded, the listed names by number, every address index key, and the
-  history catalogue over consecutive block windows. Each chunk is one
-  transaction fenced on the marker, the input revision and the record's stream
-  and cursor, and counts as one block against the run's budget, so a run stops
-  between chunks and the next continues from the record's cursor. After the
-  pass's 1st, 2nd, 4th, 8th and later powers of two of chunks, counted on the
-  record across runs, the pass refreshes the planner statistics of the tables it
-  composes.
+  marker recorded, the listed names by number, then every address index key.
+  Each names chunk marks its work list rows composed and keeps each composed
+  name's current address relations on its row.
+- The last stream builds the history catalogue once, from set-based
+  statements, in steps: the keys the work list and the events reach, one scan
+  of the events per block span, resolver edge discovery, the sources, the edge
+  bounds, then the name and resource address memberships, each step split
+  into key partitions (`hashtext(key)` under a power-of-two mask). Each
+  partition deletes its own rows and writes them again. A step reads an
+  earlier step's rows only once all of that step's partitions committed, and
+  it never reads a composed row. The build starts only when every work list
+  row is composed. The spans and partitions are run options, with the
+  `work_mem` of the build's transactions. The range event cap above does not
+  bound the build. The record's cursor names the last
+  partition committed with the split and the Postgres server version, and a
+  run with another split or another server version refuses to continue the
+  build. The work table `project_compose_history_work` holds the keys and
+  their per-span partial aggregates.
+- Each chunk and each partition is one transaction fenced on the marker, the
+  input revision and the record's stream and cursor, and counts as one block
+  against the run's budget, so a run stops between chunks and the next
+  continues from the record's cursor. After the pass's 1st, 2nd, 4th, 8th and
+  later powers of two of chunks, counted on the record across runs, the pass
+  refreshes the planner statistics of the tables it composes. The build also
+  refreshes each table it writes after a step's last partition.
 - A fenced transition ends the pass, which also counts as one block of the
   budget. The record returns to `rebuilding` with `composed_block` set to the
-  marker's block, the work list is dropped, and one marker journal row under
+  marker's block, the work list and the build's work table are dropped, and
+  one marker journal row under
   that block, marked `families_journalled: false`, ends the undo journal there.
 
 The runner continues a run that spent its budget on chunks or the pass's end
@@ -2990,7 +3023,30 @@ input content hash it completed with. A rebuild is `composing` while its
 composition pass runs, with the pass's stream, cursor and chunk count. Each transition
 commits with the work it describes: the reset commits with the rebuild's
 intent, the last undo with the move to replaying, each pass chunk with its
-cursor, and the final replayed or rebuilt block with the completion. A redo
+cursor, and the final replayed or rebuilt block with the completion. The names
+stream is the exception. Its chunks run on one or more workers
+(`--project-families-compose-workers`), and each marks the listed names it
+composed in its own transaction, so the stream keeps no cursor. Each worker
+takes the family marker in share mode, so the chunks overlap, and a reset or a
+block waits for every chunk in flight. The pass's coordinator counts each
+committed chunk in a short transaction of its own, and moves to the next stream
+only once every worker has returned and no listed name is left uncomposed. A
+names chunk leaves each lookup name's serving resource unset. The lookup
+inventories stream, after the record id stream, composes each served
+resource's inventory and sets the serving resource of the names whose chunk it
+is. A names chunk writes each of its names' address listing rows and decides no
+registration lead, since one (address, resource) group's rows can lie in
+several workers' chunks. The leads stream, right after the names stream, sets
+`registration_lead` per key partition of the addresses, with the rank the
+incremental path's lead step uses. So no names chunk writes a key another chunk
+writes, and the families are the same whatever the worker count. The pass runs
+its streams in this order: names (`compose_stream` 0), leads (7), child
+listing parents (5), record nodes (1), record ids (2), lookup inventories (4),
+event counts (6) and the history catalogue build (3). A value keeps the
+meaning a build that wrote it gave it. Nothing reads the lookup names in that
+window: a rebuild's reset leaves the family marker pending until its completing
+block, and every lookup, reverse and family name read answers the publication
+unavailable until then. A redo
 whose undo would reach at or below `composed_block` rebuilds. A run that stops between blocks is resumed by the next. Each
 start of a Project redo moves the Project row to a new redo attempt, so a
 rebuild records the attempt it began under. When the runner reruns an
@@ -3000,7 +3056,8 @@ authority invalidation marker in between), keeping its saved progress, a rebuild
 carried over to the new attempt and resumes from the family marker, provided
 its input revision is unchanged and the families were written under this
 binary's content hash. One carried over during its composition pass continues
-the pass from the record's cursor, and one carried over after it keeps
+the pass from the record's stream and cursor, in the names stream from the
+listed names not yet composed, and one carried over after it keeps
 `composed_block`. Otherwise, including a rerun over another range, a
 skipped attempt, an invalidation or a moved input revision, the redo rebuilds
 from the start. A

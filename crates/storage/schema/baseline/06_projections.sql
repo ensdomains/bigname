@@ -256,9 +256,9 @@ COMMENT ON COLUMN project_repair_record.reset_sequence IS
 COMMENT ON COLUMN project_repair_record.composed_block IS
     'This value is the block a rebuild''s composition pass composed at, -1 when it composed nothing; null before the pass and for an undo-then-replay. Every rebuild generation above it composes and journals.';
 COMMENT ON COLUMN project_repair_record.compose_stream IS
-    'This value is the composition pass stream under way: 0 names, 1 record nodes, 2 record ids, 3 history windows; null outside a pass.';
+    'This value is the composition pass stream under way: 0 names, 7 address listing leads, 5 child listing parents, 1 record nodes, 2 record ids, 4 lookup inventories, 6 event counts, 3 history catalogue build, run in that order; null outside a pass.';
 COMMENT ON COLUMN project_repair_record.compose_cursor IS
-    'This value is the last key the composition pass committed in its stream, a work list serial in the names stream; null at a stream''s start and outside a pass.';
+    'This value is the last key the composition pass committed in its stream: the last parent, as a JSON array of namespace and node, in the child listing parents stream, the last resolver and node pair, as a JSON array, in the record node stream, the last resolver and record id pair, as a JSON array, in the record id stream, a lookup name in the lookup inventories stream, and the last step and partition with the partition counts and server version in the address listing leads, event count and history catalogue streams; null throughout the names stream, whose workers claim the work list''s names not yet composed, at a stream''s start and outside a pass.';
 COMMENT ON COLUMN project_repair_record.compose_chunks IS
     'This value is how many chunks the latest composition pass committed; zero before a pass. The pass refreshes the planner statistics of the composed tables after 1, 2, 4, 8, ... chunks.';
 COMMENT ON COLUMN project_repair_record.prefix_recorded IS
@@ -269,10 +269,14 @@ CREATE TABLE IF NOT EXISTS project_compose_name_work (
     serial bigint NOT NULL,
     logical_name_id text NOT NULL,
     reach smallint NOT NULL,
+    composed boolean NOT NULL DEFAULT false,
+    relations jsonb,
     PRIMARY KEY (chain_id, serial),
     CHECK (serial > 0),
     CHECK (reach IN (0, 1, 2))
 );
+CREATE INDEX IF NOT EXISTS project_compose_name_work_uncomposed_idx
+    ON project_compose_name_work (chain_id, serial) WHERE NOT composed;
 COMMENT ON TABLE project_compose_name_work IS
     'Project-owned work list of a rebuild''s composition pass: every name id the pass composes or indexes, numbered in COLLATE "C" order once when the pass begins. The names stream reads it in serial order. The pass end and a family reset clear the chain''s rows.';
 COMMENT ON COLUMN project_compose_name_work.chain_id IS
@@ -283,6 +287,93 @@ COMMENT ON COLUMN project_compose_name_work.logical_name_id IS
     'This value is the name id the pass composes or indexes.';
 COMMENT ON COLUMN project_compose_name_work.reach IS
     'This value is what the pass composes for the id: 0 the address name index, 1 the lookup name row as well, 2 also the summary and the catalogue name source.';
+COMMENT ON COLUMN project_compose_name_work.composed IS
+    'This value is true once the names stream composed the id, in the transaction that composed it. The history catalogue build starts only when every row is.';
+COMMENT ON COLUMN project_compose_name_work.relations IS
+    'This value is the current address relations the names stream found for a composed name, as a JSON array of address, namespace, resource_id and relation, which the history catalogue build reads. It is null below reach 2 and for a name with none.';
+
+CREATE TABLE IF NOT EXISTS project_compose_history_work (
+    chain_id text NOT NULL,
+    source_kind smallint NOT NULL,
+    source_key text NOT NULL,
+    resolver_address text NOT NULL DEFAULT '',
+    part smallint NOT NULL,
+    key_partition smallint NOT NULL,
+    work boolean NOT NULL,
+    first_bucket bigint,
+    last_bucket bigint,
+    event_mask bigint,
+    key_bloom bit(256),
+    PRIMARY KEY (chain_id, source_kind, source_key, resolver_address, part),
+    CHECK (source_kind BETWEEN 0 AND 3),
+    CHECK (source_kind = 3 OR resolver_address = ''),
+    CHECK (part >= -1),
+    CHECK ((first_bucket IS NULL) = (last_bucket IS NULL))
+);
+CREATE INDEX IF NOT EXISTS project_compose_history_work_part_idx
+    ON project_compose_history_work (chain_id, part);
+CREATE INDEX IF NOT EXISTS project_compose_history_work_partition_idx
+    ON project_compose_history_work (chain_id, key_partition, source_kind);
+COMMENT ON TABLE project_compose_history_work IS
+    'Project-owned work table of a rebuild''s history catalogue build: every catalogue source key the composition pass reaches, with partial aggregates of its events per block span. The build merges them into the catalogue. The pass end and a family reset clear the chain''s rows.';
+COMMENT ON COLUMN project_compose_history_work.chain_id IS
+    'This value is the chain whose rebuild builds the catalogue.';
+COMMENT ON COLUMN project_compose_history_work.source_kind IS
+    'This value is the catalogue source kind: 0 logical name, 1 resource, 2 node records, 3 resolver record-ID writes.';
+COMMENT ON COLUMN project_compose_history_work.source_key IS
+    'This value is the source key as project_history_source holds it.';
+COMMENT ON COLUMN project_compose_history_work.resolver_address IS
+    'This value is the lower-case resolver of a record-ID source, empty for other kinds.';
+COMMENT ON COLUMN project_compose_history_work.part IS
+    'This value is the block span whose events this row aggregates, from 0, or -1 for a key the work list reaches with no event of its own.';
+COMMENT ON COLUMN project_compose_history_work.key_partition IS
+    'This value is the key partition of the source key, its hashtext under the build''s partition mask.';
+COMMENT ON COLUMN project_compose_history_work.work IS
+    'This value is true when a resource key also gets resolver edges and an address membership. It is read for resources only.';
+COMMENT ON COLUMN project_compose_history_work.first_bucket IS
+    'This value is the earliest bucket of the span''s events the catalogue reads, block divided by 256 or -1 for unpositioned events, and null when the span has none.';
+COMMENT ON COLUMN project_compose_history_work.last_bucket IS
+    'This value is the latest bucket of the span''s events the catalogue reads, null when the span has none.';
+COMMENT ON COLUMN project_compose_history_work.event_mask IS
+    'This value is the event-kind bit union of the span''s events the catalogue reads, null when the span has none.';
+COMMENT ON COLUMN project_compose_history_work.key_bloom IS
+    'This value is the record-key summary union of the span''s events the catalogue reads, null when the span has none.';
+
+CREATE TABLE IF NOT EXISTS project_compose_event_count_work (
+    chain_id text NOT NULL,
+    part smallint NOT NULL,
+    key_partition smallint NOT NULL,
+    anchor_kind smallint NOT NULL,
+    anchor text NOT NULL,
+    namespace text NOT NULL,
+    event_kind text NOT NULL,
+    delta bigint NOT NULL,
+    PRIMARY KEY (chain_id, part, anchor_kind, anchor, namespace, event_kind),
+    CHECK (part >= 0),
+    CHECK (key_partition >= 0),
+    CHECK (anchor_kind BETWEEN 0 AND 2),
+    CHECK (delta > 0)
+);
+CREATE INDEX IF NOT EXISTS project_compose_event_count_work_partition_idx
+    ON project_compose_event_count_work (chain_id, key_partition);
+COMMENT ON TABLE project_compose_event_count_work IS
+    'Project-owned work table of a rebuild''s event count stream: the per-key counts of the events of each block span at or below the pass block, as each block counts its own range. The stream sums them into project_event_count by key partition. The pass''s beginning, the stream''s last partition, the pass end and a family reset clear the chain''s rows.';
+COMMENT ON COLUMN project_compose_event_count_work.chain_id IS
+    'This value is the chain whose rebuild counts the events.';
+COMMENT ON COLUMN project_compose_event_count_work.part IS
+    'This value is the block span whose events this row counts, from 0.';
+COMMENT ON COLUMN project_compose_event_count_work.key_partition IS
+    'This value is the key partition of the anchor, its hashtext under the stream''s partition mask.';
+COMMENT ON COLUMN project_compose_event_count_work.anchor_kind IS
+    'This value is how the anchor reads the events, as project_event_count.anchor_kind holds it.';
+COMMENT ON COLUMN project_compose_event_count_work.anchor IS
+    'This value is the lower-case contract address the anchor kind names.';
+COMMENT ON COLUMN project_compose_event_count_work.namespace IS
+    'This value is the namespace of the counted events.';
+COMMENT ON COLUMN project_compose_event_count_work.event_kind IS
+    'This value is the event kind of the counted events.';
+COMMENT ON COLUMN project_compose_event_count_work.delta IS
+    'This value is the number of the span''s events the key covers.';
 
 CREATE TABLE IF NOT EXISTS project_name_state (
     namespace text NOT NULL,
@@ -3125,7 +3216,7 @@ COMMENT ON COLUMN bigname_phase.project_lookup_name.chain_id IS
 COMMENT ON COLUMN bigname_phase.project_lookup_name.logical_name_id IS
     'Stable identity of the logical name.';
 COMMENT ON COLUMN bigname_phase.project_lookup_name.record_serving_resource_id IS
-    'Resource whose factored record inventory serves this name, or null when absent.';
+    'Resource whose factored record inventory serves this name, or null when absent. In a rebuild''s composition pass the names stream writes it null and the lookup inventories stream sets it with the inventory it composes. Nothing serves the table in that window, since the family marker is not live until the rebuild''s completing block.';
 COMMENT ON COLUMN bigname_phase.project_lookup_name.core IS
     'Shared composed lookup core with omission and null semantics preserved; null records an evaluated absence.';
 COMMENT ON COLUMN bigname_phase.project_lookup_name.supported IS

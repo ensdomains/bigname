@@ -224,10 +224,24 @@ pub(super) const KEY_TARGET: &str = "/* project:families.derived.address_listing
     ) listing
     WHERE listing.unhealed_labelhashes <> '{}' AND NOT listing.registry_child";
 
+/// Whether a listing row aliased `members` leads its (address, resource) group: the smallest
+/// `(display_key, logical_name_id)` listed row of the group, both `COLLATE "C"`. The incremental
+/// lead step and the pass's leads stream (`compose_leads.rs`) both rank by it.
+macro_rules! lead_rank {
+    () => {
+        "members.listed AND row_number() OVER (
+                   PARTITION BY members.address, members.resource_id
+                   ORDER BY members.listed DESC, members.display_key, members.logical_name_id
+               ) = 1"
+    };
+}
+pub(crate) use lead_rank;
+
 /// The rows the lead step changes: in each touched (address, resource) group, the smallest
 /// (display_key, logical_name_id) listed row is the lead and no other row is. A group's rows are
 /// probed by the resource. A row with no resource is never listed, so it leads no group.
-pub(super) const LEADS: &str = "/* project:families.derived.address_listing_leads */
+pub(super) const LEADS: &str = concat!(
+    "/* project:families.derived.address_listing_leads */
     INSERT INTO pg_temp.bigname_address_listing_change
     WITH groups AS (
         SELECT DISTINCT address, resource_id FROM pg_temp.bigname_address_listing_group
@@ -242,14 +256,14 @@ pub(super) const LEADS: &str = "/* project:families.derived.address_listing_lead
         ) listing
     ), ranked AS (
         SELECT members.*,
-               members.listed AND row_number() OVER (
-                   PARTITION BY members.address, members.resource_id
-                   ORDER BY members.listed DESC, members.display_key, members.logical_name_id
-               ) = 1 AS lead
+               ",
+    lead_rank!(),
+    " AS lead
         FROM members
     )
     SELECT ranked.address, ranked.logical_name_id,
            to_jsonb(ranked) - 'lead',
            (to_jsonb(ranked) - 'lead') || jsonb_build_object('registration_lead', ranked.lead)
     FROM ranked
-    WHERE ranked.lead <> ranked.registration_lead";
+    WHERE ranked.lead <> ranked.registration_lead"
+);
