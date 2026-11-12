@@ -2418,6 +2418,14 @@ CREATE INDEX IF NOT EXISTS project_grant_resolver_role_holder_idx
       AND NOT revoked
       AND grant_source ->> 'source_event' = 'EACRolesChanged';
 
+-- The live ENSv2 registry root grants by holder, chain and lower-cased registry address, for
+-- GET /v1/registries?role_holder=. Advisory: ops/root-role-holder-index/README.md.
+CREATE INDEX IF NOT EXISTS project_grant_root_role_holder_idx
+    ON project_grant (subject COLLATE "C", chain_id COLLATE "C",
+        lower(scope_detail ->> 'registry_address') COLLATE "C")
+    WHERE scope = 'root'
+      AND NOT revoked;
+
 CREATE INDEX IF NOT EXISTS project_registry_binding_observation_owner_target_idx
     ON project_registry_binding_observation (chain_id, registry_contract, registry_owner, target_resource_id);
 

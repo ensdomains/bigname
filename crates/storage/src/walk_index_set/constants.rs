@@ -507,16 +507,39 @@ pub const ADVISORY: &[DroppedIndex] = &[
 ];
 
 /// The advisory indexes on Project-owned `project_grant`: API read paths that no walk drops.
-/// An operator builds them with `ops/resolver-role-holder-index/install.sql` before the
-/// schema-migration that adopts them, Project keeps them current like the table's other indexes,
-/// and the API starts and serves without them, with a WARN naming each one that is not in place.
-/// Each holds the statement and the definition of that install script.
-pub const PROJECT_GRANT_ADVISORY: &[DroppedIndex] = &[DroppedIndex {
-    name: "project_grant_resolver_role_holder_idx",
-    create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_resolver_role_holder_idx
+/// An operator builds each with its install script ([`PROJECT_GRANT_ADVISORY_INSTALL`]) before
+/// the schema-migration that adopts it, Project keeps them current like the table's other
+/// indexes, and the API starts and serves without them, with a WARN naming each one that is not
+/// in place. Each holds the statement and the definition of its install script.
+pub const PROJECT_GRANT_ADVISORY: &[DroppedIndex] = &[
+    DroppedIndex {
+        name: "project_grant_resolver_role_holder_idx",
+        create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_resolver_role_holder_idx
     ON bigname_phase.project_grant (subject COLLATE "C", scope COLLATE "C")
     WHERE scope_kind = 'resolver'
       AND NOT revoked
       AND grant_source ->> 'source_event' = 'EACRolesChanged'"#,
-    definition: r#"CREATE INDEX project_grant_resolver_role_holder_idx ON bigname_phase.project_grant USING btree (subject COLLATE "C", scope COLLATE "C") WHERE ((scope_kind = 'resolver'::text) AND (NOT revoked) AND ((grant_source ->> 'source_event'::text) = 'EACRolesChanged'::text))"#,
-}];
+        definition: r#"CREATE INDEX project_grant_resolver_role_holder_idx ON bigname_phase.project_grant USING btree (subject COLLATE "C", scope COLLATE "C") WHERE ((scope_kind = 'resolver'::text) AND (NOT revoked) AND ((grant_source ->> 'source_event'::text) = 'EACRolesChanged'::text))"#,
+    },
+    DroppedIndex {
+        name: "project_grant_root_role_holder_idx",
+        create: r#"CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_root_role_holder_idx
+    ON bigname_phase.project_grant (subject COLLATE "C", chain_id COLLATE "C",
+        lower(scope_detail ->> 'registry_address') COLLATE "C")
+    WHERE scope = 'root'
+      AND NOT revoked"#,
+        definition: r#"CREATE INDEX project_grant_root_role_holder_idx ON bigname_phase.project_grant USING btree (subject COLLATE "C", chain_id COLLATE "C", lower((scope_detail ->> 'registry_address'::text)) COLLATE "C") WHERE ((scope = 'root'::text) AND (NOT revoked))"#,
+    },
+];
+
+/// The install script of each index in [`PROJECT_GRANT_ADVISORY`], by index name.
+pub const PROJECT_GRANT_ADVISORY_INSTALL: &[(&str, &str)] = &[
+    (
+        "project_grant_resolver_role_holder_idx",
+        "ops/resolver-role-holder-index/install.sql",
+    ),
+    (
+        "project_grant_root_role_holder_idx",
+        "ops/root-role-holder-index/install.sql",
+    ),
+];

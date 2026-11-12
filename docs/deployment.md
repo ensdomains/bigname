@@ -5768,3 +5768,44 @@ gives the recovery steps. Then run the schema-migrations again.
 The index is advisory. The phase runner never builds it, and no walk drops it. The API starts
 and serves without it, with a WARN at startup when it is not in place, and the page then reads
 every grant of the holder.
+
+## Partial index for the registries of a role holder
+
+The build that adds `project_grant_root_role_holder_idx` serves
+`GET /v1/registries?role_holder=` ([table ownership](storage.md#table-ownership)).
+
+- The page reads the holder's live ENSv2 registry root grants through the new partial index,
+  one chain at a time, in registry address order from the cursor. It reads no revoked root
+  grant, per-name registry grant or resolver grant.
+- Neither content hash rotates. The baseline and the schema-migration are inputs of neither,
+  and the reader is a serving file, not a hashed one. No redo is needed. The change ships as an
+  image swap plus the schema-migration.
+- It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
+  watch plan are unchanged, so stamp no Ingest redo.
+
+Roll it out in this order on every database the build is deployed to:
+
+1. Build the index with
+   [`ops/root-role-holder-index/install.sql`](../ops/root-role-holder-index/README.md),
+   concurrently and outside a transaction.
+2. Check it with the query in that README: one valid and ready index with the reviewed
+   definition.
+3. Apply schema-migration `20261112170000_project_grant_root_role_holder_index.sql`.
+4. Swap the image.
+
+The build scans the whole of `project_grant`, so on a large database it takes minutes, and it
+adds replication lag while it runs. If the same release carries another `project_grant` index,
+build them one after the other in one session.
+
+The schema-migration adopts an index of the reviewed name that is valid and ready with the
+reviewed definition, without a build and without a lock, so it is a no-op on a database where
+the script already built it. An empty `project_grant` builds it directly. A populated table
+without it is refused, because an ordinary build would block writes to `project_grant` for the
+whole build. The schema-migration refuses a name that is not an index, an index on another
+table or one that is not valid and ready, and another definition. Its error names the index
+and, for another definition, prints the definition it found and the one it expects. The README
+gives the recovery steps. Then run the schema-migrations again.
+
+The index is advisory. The phase runner never builds it, and no walk drops it. The API starts
+and serves without it, with a WARN at startup when it is not in place, and the page then reads
+every grant of the holder.

@@ -16,13 +16,15 @@
 //! | 9 | No phase schema | Skipped, the API starts | `api_serve_tolerates_an_absent_phase_schema` (in `api_storage_quick_wins.rs`) |
 //! | 10 | A value other than `refuse` or `warn` | Argument parsing fails | `the_walk_index_set_check_refuses_by_default_and_takes_only_its_two_values` (in `cli.rs`) |
 //! | 11 | Every advisory index missing, under `refuse` | Serves, a WARN naming each one, gauge 0; with them in place, no such WARN | `the_api_serves_without_an_advisory_index_and_names_it` |
-//! | 12 | The `project_grant` advisory index missing, under `refuse` | Serves, a WARN naming it and its install script; in place with the baseline's definition, no `project_grant` advisory WARN of either kind | `the_api_serves_without_the_project_grant_advisory_index_and_names_it` |
+//! | 12 | The `project_grant` advisory indexes missing, under `refuse` | Serves, a WARN naming each one and its own install script; in place with the baseline's definitions, no `project_grant` advisory WARN of either kind | `the_api_serves_without_the_project_grant_advisory_indexes_and_names_them` |
 use std::{
     io::{Read, Write},
     sync::{Arc, Mutex},
 };
 
-use bigname_storage::walk_index_set::{ADVISORY, DROP_LIST, PROJECT_GRANT_ADVISORY};
+use bigname_storage::walk_index_set::{
+    ADVISORY, DROP_LIST, PROJECT_GRANT_ADVISORY, PROJECT_GRANT_ADVISORY_INSTALL,
+};
 use tracing::instrument::WithSubscriber;
 
 use super::*;
@@ -527,11 +529,12 @@ async fn the_api_serves_without_an_advisory_index_and_names_it() -> Result<()> {
     database.cleanup().await
 }
 
-/// The `project_grant` advisory index is outside the walk index set too. In place, as the
-/// baseline builds it, its definition is the one the build expects, so neither WARN appears.
-/// Without it the API starts, even under `refuse`, with a WARN naming it and its install script.
+/// The `project_grant` advisory indexes are outside the walk index set too. In place, as the
+/// baseline builds them, their definitions are the ones the build expects, so neither WARN
+/// appears. Without them the API starts, even under `refuse`, with a WARN naming each one and its
+/// own install script.
 #[tokio::test]
-async fn the_api_serves_without_the_project_grant_advisory_index_and_names_it() -> Result<()> {
+async fn the_api_serves_without_the_project_grant_advisory_indexes_and_names_them() -> Result<()> {
     const ADVISORY_TABLE: &str = "an advisory project_grant index";
     let _gauge = GAUGE.lock().await;
     let database = TestDatabase::new_migrated().await?;
@@ -547,11 +550,15 @@ async fn the_api_serves_without_the_project_grant_advisory_index_and_names_it() 
 
     assert!(error.starts_with(STARTED), "{error}: {logs}");
     for index in PROJECT_GRANT_ADVISORY {
+        let (_, install) = PROJECT_GRANT_ADVISORY_INSTALL
+            .iter()
+            .find(|(name, _)| *name == index.name)
+            .expect("every project_grant advisory index has an install script");
         let warned = line_with(&logs, "WARN", index.name);
         assert!(
             warned.contains("an advisory project_grant index is not in place")
                 && warned.contains("missing")
-                && warned.contains("ops/resolver-role-holder-index/install.sql"),
+                && warned.contains(install),
             "{warned}"
         );
     }

@@ -6,18 +6,20 @@
 //! | `SINGLE` | one live root grant | one row, count 1, the grant's powers sorted |
 //! | `REVOKED` | a revoked root grant on one registry, a live one on another | the live one only |
 //! | `WIDE` | one root grant on each of 60 registries whose addresses differ at digit and letter positions | every page size walks them in byte order, exact `has_more` |
-//! | `SKEWED` | 3 root grants, 2,000 per-name registry grants and 500 resolver grants | 3 rows; the plan reads 3 root rows |
-//! | `CHURN` | 1 live and 200 revoked root grants | 1 row; the plan reads the 201 root rows, no other |
+//! | `SKEWED` | 3 root grants, 2,000 per-name registry grants and 500 resolver grants | 3 rows; the plan reads 3 index entries |
+//! | `CHURN` | 1 live and 200 revoked root grants | 1 row; the plan reads 1 index entry |
 //! | `TWO_CHAINS` | a root grant on each chain | both, in chain slug order; one chain alone lists its own |
 //! | `PER_NAME` | per-name registry grants only | no row |
 //! | `MIXED_CASE` | addresses stored in upper case, one address stored in both cases by two instances | lower-case rows in lower-case byte order, the two instances in one row |
 //! | `NONE` | none | no row |
+//! | `NO_ROOT` | 5,000 per-name and resolver grants, no root grant | no row; the plan reads no entry |
 //!
-//! The plan test runs the statement as the reader sends it under both plan modes, and requires
-//! the only read of `project_grant` to be `project_grant_registry_parent_idx`, with the holder
-//! and the chains in its condition, reading only the holder's root rows on those chains.
-//! Dropping the index then shows the fixture would catch a wrong plan: the same statement reads
-//! the skewed holder's other grants too, and returns the same pages.
+//! The plan test runs the statement as the reader sends it under both plan modes, for the
+//! skewed, churned and no-root holders and for a cursor page of the wide one. It requires the
+//! only read of `project_grant` to be `project_grant_root_role_holder_idx`, with the holder and
+//! the chain in its condition, no sort, and only the entries the page groups read. Dropping the
+//! index then shows the fixture would catch a wrong plan: the same statement reads the skewed
+//! and no-root holders' other grants, and returns the same pages.
 use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::{PgConnection, Row, raw_sql};
@@ -27,7 +29,7 @@ use super::{REGISTRY_STATEMENT, RoleHolderRegistry, load_registries_by_role_hold
 const CHAIN: &str = "ethereum-mainnet";
 const OTHER_CHAIN: &str = "ethereum-sepolia";
 const MARKER: i64 = 1_000;
-const INDEX: &str = "project_grant_registry_parent_idx";
+const INDEX: &str = "project_grant_root_role_holder_idx";
 
 const SINGLE: &str = "0x00000000000000000000000000000000000000b1";
 const REVOKED: &str = "0x00000000000000000000000000000000000000b2";
@@ -38,13 +40,15 @@ const TWO_CHAINS: &str = "0x00000000000000000000000000000000000000b6";
 const PER_NAME: &str = "0x00000000000000000000000000000000000000b7";
 const MIXED_CASE: &str = "0x00000000000000000000000000000000000000b8";
 const NONE: &str = "0x00000000000000000000000000000000000000b9";
-const HOLDERS: [&str; 9] = [
-    SINGLE, REVOKED, WIDE, SKEWED, CHURN, TWO_CHAINS, PER_NAME, MIXED_CASE, NONE,
+const NO_ROOT: &str = "0x00000000000000000000000000000000000000ba";
+const HOLDERS: [&str; 10] = [
+    SINGLE, REVOKED, WIDE, SKEWED, CHURN, TWO_CHAINS, PER_NAME, MIXED_CASE, NONE, NO_ROOT,
 ];
 const WIDE_REGISTRIES: usize = 60;
 const SKEWED_ROOT: usize = 3;
 const SKEWED_OTHER: usize = 2_500;
 const CHURN_REVOKED: usize = 200;
+const NO_ROOT_GRANTS: usize = 5_000;
 
 /// Registry `n` as a lower-cased address.
 fn registry(n: u32) -> String {
@@ -108,6 +112,7 @@ async fn each_holder_class_lists_its_root_registries() -> Result<()> {
                 ],
             ),
             (NONE, Vec::new()),
+            (NO_ROOT, Vec::new()),
         ];
         for (holder, expected) in cases {
             let page = load(connection, holder, &all, None, 51).await?;
@@ -231,14 +236,15 @@ async fn the_page_reads_only_the_holders_root_rows_in_both_plan_modes() -> Resul
         let resume = wide_reference()[49].clone();
         let mut failures = Vec::new();
         let cases = [
-            ("skewed holder", SKEWED, None, SKEWED_ROOT),
-            ("churned holder", CHURN, None, 1 + CHURN_REVOKED),
+            ("skewed holder", SKEWED, "", SKEWED_ROOT),
+            ("churned holder", CHURN, "", 1),
             (
                 "wide holder after 50",
                 WIDE,
-                Some(resume.as_str()),
-                WIDE_REGISTRIES,
+                resume.as_str(),
+                WIDE_REGISTRIES - 50,
             ),
+            ("holder with no root grant", NO_ROOT, "", 0),
         ];
         for (label, holder, after, rows) in cases {
             for mode in ["force_custom_plan", "force_generic_plan"] {
@@ -252,19 +258,24 @@ async fn the_page_reads_only_the_holders_root_rows_in_both_plan_modes() -> Resul
         }
         ensure!(failures.is_empty(), "{}", failures.join("\n\n"));
 
-        // Without the index the same statement reads the skewed holder's other grants too, and
-        // the pages are the same.
+        // Without the index the same statement reads the skewed and no-root holders' other
+        // grants too, and the pages are the same.
         let before = all_pages(connection).await?;
         raw_sql(&format!("DROP INDEX {INDEX}"))
             .execute(&mut *connection)
             .await?;
-        let plan = explain(connection, "force_custom_plan", SKEWED, None).await?;
-        let read = rows_read(&plan);
-        ensure!(
-            read >= (SKEWED_ROOT + SKEWED_OTHER) as f64,
-            "without the index the skewed holder read {read} rows:\n{}",
-            plan.join("\n")
-        );
+        for (holder, grants) in [
+            (SKEWED, SKEWED_ROOT + SKEWED_OTHER),
+            (NO_ROOT, NO_ROOT_GRANTS),
+        ] {
+            let plan = explain(connection, "force_custom_plan", holder, "").await?;
+            let read = rows_read(&plan);
+            ensure!(
+                read >= grants as f64,
+                "without the index {holder} read {read} rows:\n{}",
+                plan.join("\n")
+            );
+        }
         ensure!(
             all_pages(connection).await? == before,
             "pages differ without the index"
@@ -285,13 +296,16 @@ fn wide_reference() -> Vec<String> {
     wide
 }
 
-/// What keeps `plan` from reading `project_grant` only through the index, with the holder and
-/// the chains in its condition and at most `rows` rows read: a sequential scan, another index of
-/// the table, more rows than that, or a condition without those terms.
+/// What keeps `plan` from reading `project_grant` only through the index, in page order, with
+/// the holder and the chain in its condition and at most `rows` rows read: a sequential scan, a
+/// sort, another index of the table, more rows than that, or a condition without those terms.
 fn plan_problems(plan: &[String], rows: usize) -> Vec<String> {
     let mut problems = Vec::new();
     if plan.iter().any(|line| line.contains("Seq Scan")) {
         problems.push("the plan scans a table sequentially".to_owned());
+    }
+    if plan.iter().any(|line| line.contains("Sort")) {
+        problems.push("the plan sorts".to_owned());
     }
     let indexes: Vec<&str> = plan.iter().filter_map(|line| scanned_index(line)).collect();
     if indexes.is_empty() {
@@ -316,7 +330,7 @@ fn plan_problems(plan: &[String], rows: usize) -> Vec<String> {
             .all(|term| line.contains(term))
     }) {
         problems.push(format!(
-            "no index condition has the holder and the chains: {conditions:?}"
+            "no index condition has the holder and the chain: {conditions:?}"
         ));
     }
     problems
@@ -363,11 +377,13 @@ fn actual_rows(line: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// The plan of the statement for `holder` on [`CHAIN`] after the address `after`, which is empty
+/// for the chain's first page, as the reader binds it.
 async fn explain(
     connection: &mut PgConnection,
     mode: &str,
     holder: &str,
-    after: Option<&str>,
+    after: &str,
 ) -> Result<Vec<String>> {
     // A name of its own for each call: DEALLOCATE ALL would also drop the statements sqlx has
     // prepared on this connection.
@@ -376,16 +392,11 @@ async fn explain(
         "registry_role_holder_page_{}",
         CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    let (after_chain, after_address) = match after {
-        Some(address) => (format!("'{CHAIN}'"), format!("'{address}'")),
-        None => ("NULL".to_owned(), "NULL".to_owned()),
-    };
     raw_sql(&format!(
-        "PREPARE {name}(text, text[], text, text, bigint) AS {REGISTRY_STATEMENT};
+        "PREPARE {name}(text, text, text, bigint) AS {REGISTRY_STATEMENT};
          SET plan_cache_mode = {mode};
          EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-             EXECUTE {name}('{holder}', ARRAY['{CHAIN}', '{OTHER_CHAIN}'], {after_chain},
-                            {after_address}, 51);
+             EXECUTE {name}('{holder}', '{CHAIN}', '{after}', 51);
          RESET plan_cache_mode;"
     ))
     .fetch_all(&mut *connection)
@@ -494,6 +505,12 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         INSERT INTO fixture_grant
         SELECT '{CHAIN}', '{SKEWED}', 800 + n % 100, n, '["set_addr"]', 'resolver', false
         FROM generate_series(1, 500) n;
+        -- NO_ROOT: per-name grants across 50 registries and resolver grants across 100
+        -- resolvers, no root grant.
+        INSERT INTO fixture_grant
+        SELECT '{CHAIN}', '{NO_ROOT}', CASE WHEN n % 2 = 0 THEN 1000 + n % 50 ELSE 1100 + n % 100 END,
+               n, '["renew"]', CASE WHEN n % 2 = 0 THEN 'registry' ELSE 'resolver' END, false
+        FROM generate_series(1, {NO_ROOT_GRANTS}) n;
 
         INSERT INTO project_grant (chain_id, resource_id, subject, scope, block_number,
             event_identity, event_kind, scope_kind, scope_detail, effective_powers,

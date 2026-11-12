@@ -157,39 +157,35 @@ pub struct RoleHolderRegistry {
     pub powers: Vec<String>,
 }
 
-/// The statement of [`load_registries_by_role_holder`]. Only an ENSv2 registry's
-/// `EACRolesChanged` on its root resource writes scope `root`
+/// The statement of [`load_registries_by_role_holder`], for one chain. Only an ENSv2
+/// registry's `EACRolesChanged` on its root resource writes scope `root`
 /// (crates/adapters/src/schema_v2/protocol/permissions.rs, `v2_states`, and
 /// crates/project/src/families/keys.rs, `grant_scope`), so `scope = 'root' AND NOT revoked` is
-/// the live root EAC grants, and the literal predicate is `project_grant_registry_parent_idx`'s.
-/// The index's equality prefix is the holder's root rows on the page's chains, revoked ones
-/// included; the page key is the lower-cased address, which that index does not order, so the
-/// statement sorts those rows. The page key and its cursor bound compare as bytes, whatever the
-/// database collation.
+/// the live root EAC grants. That is `project_grant_root_role_holder_idx`'s predicate, as
+/// literals, and the holder, the chain and the address bound are its index condition, so the
+/// page reads the holder's live root grants on the chain from the bound, in page order, under
+/// both plan modes. The page key and its bound compare as bytes, whatever the database
+/// collation.
 pub(crate) const REGISTRY_STATEMENT: &str = r#"/* storage:families.topology.registries_by_role_holder */
-SELECT grant_row.chain_id COLLATE "C" AS chain_id,
-       lower(grant_row.scope_detail ->> 'registry_address') COLLATE "C" AS registry_address,
+SELECT lower(grant_row.scope_detail ->> 'registry_address') COLLATE "C" AS registry_address,
        count(*) AS grant_count,
        jsonb_agg(grant_row.effective_powers) AS powers
 FROM bigname_phase.project_grant grant_row
-WHERE grant_row.subject = $1
-  AND grant_row.chain_id = ANY($2::text[])
+WHERE grant_row.subject COLLATE "C" = $1 COLLATE "C"
+  AND grant_row.chain_id COLLATE "C" = $2 COLLATE "C"
+  AND lower(grant_row.scope_detail ->> 'registry_address') COLLATE "C" > $3 COLLATE "C"
   AND grant_row.scope = 'root'
   AND NOT grant_row.revoked
-  AND ($3::text IS NULL
-       OR grant_row.chain_id COLLATE "C" > $3::text COLLATE "C"
-       OR (grant_row.chain_id = $3::text
-           AND lower(grant_row.scope_detail ->> 'registry_address') COLLATE "C"
-               > $4::text COLLATE "C"))
-GROUP BY 1, 2
-ORDER BY 1, 2
-LIMIT $5"#;
+GROUP BY 1
+ORDER BY 1
+LIMIT $4"#;
 
 /// The registries on `chains` after `after` (a chain slug and registry address) on which
 /// `holder` holds live ENSv2 root grants, at most `limit`, in page order: by chain slug, then by
-/// lower-cased registry address, both as bytes. A row groups the root grants at one address,
-/// whatever letter case stored it. Every chain's publication is checked on the same snapshot, and
-/// a chain whose marker is not servable fails the read with `FamilyPublicationUnavailable`.
+/// lower-cased registry address, both as bytes. It reads one chain at a time, from the cursor's
+/// chain on, until the page is full. A row groups the root grants at one address, whatever
+/// letter case stored it. Every chain's publication is checked on the same snapshot, and a chain
+/// whose marker is not servable fails the read with `FamilyPublicationUnavailable`.
 ///
 /// The stored row is the served one, as `GET /v1/permissions?registry=` composes a root
 /// resource: no wrapper row or lifecycle key state keys it, and an empty bitmap is `revoked`.
@@ -211,30 +207,40 @@ pub async fn load_registries_by_role_holder(
         return Ok(Vec::new());
     }
     let holder = holder.to_ascii_lowercase();
-    let after_chain = after.map(|(chain, _)| chain);
-    let after_address = after.map(|(_, address)| address.to_ascii_lowercase());
+    let mut ordered: Vec<&str> = chains.iter().map(String::as_str).collect();
+    ordered.sort_unstable();
+    ordered.dedup();
     let mut snapshot = db.into().snapshot().await?;
-    let rows: Vec<(String, String, i64, Value)> = sqlx::query_as(REGISTRY_STATEMENT)
-        .bind(&holder)
-        .bind(chains)
-        .bind(after_chain)
-        .bind(after_address.as_deref())
-        .bind(limit)
-        .fetch_all(&mut *snapshot)
-        .await
-        .with_context(|| format!("failed to load the registries of role holder {holder}"))?;
-    let page = rows
-        .into_iter()
-        .map(|(chain_id, registry_address, count, powers)| -> Result<_> {
-            let powers = powers_union(&powers, &format!("root:{chain_id}:{registry_address}"))?;
-            Ok(RoleHolderRegistry {
-                chain_id,
+    let mut page = Vec::new();
+    for chain in ordered {
+        let bound = match after {
+            Some((after_chain, _)) if chain < after_chain => continue,
+            Some((after_chain, address)) if chain == after_chain => address.to_ascii_lowercase(),
+            _ => String::new(),
+        };
+        let remaining = limit - i64::try_from(page.len())?;
+        if remaining < 1 {
+            break;
+        }
+        // Planned for this chain's bound each time, never as a cached generic plan.
+        let rows: Vec<(String, i64, Value)> = sqlx::query_as(REGISTRY_STATEMENT)
+            .bind(&holder)
+            .bind(chain)
+            .bind(&bound)
+            .bind(remaining)
+            .persistent(false)
+            .fetch_all(&mut *snapshot)
+            .await
+            .with_context(|| format!("failed to load the registries of role holder {holder}"))?;
+        for (registry_address, count, powers) in rows {
+            page.push(RoleHolderRegistry {
+                chain_id: chain.to_owned(),
+                powers: powers_union(&powers, &format!("root:{chain}:{registry_address}"))?,
                 registry_address,
                 grant_count: u64::try_from(count)?,
-                powers,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+            });
+        }
+    }
     ensure_published(&mut snapshot, chains).await?;
     snapshot.close().await?;
     Ok(page)

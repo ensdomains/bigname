@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use bigname_lookup::{ChainRpcUrls, RpcChainCheckError, verify_chain_rpc_url};
 use bigname_storage::walk_index_set::{
-    IndexState, IndexStatus, load_advisory_state, load_drop_list_state,
-    load_project_grant_advisory_state,
+    IndexState, IndexStatus, PROJECT_GRANT_ADVISORY_INSTALL, load_advisory_state,
+    load_drop_list_state, load_project_grant_advisory_state,
 };
 use sqlx::PgPool;
 
@@ -128,22 +128,20 @@ pub(crate) async fn ensure_walk_index_set(
 }
 
 /// Warns, naming each one, when an advisory index (`docs/storage.md`, Walk index set, and the
-/// `project_grant` advisory index under Table ownership) is not a valid, ready index on its
+/// `project_grant` advisory indexes under Table ownership) is not a valid, ready index on its
 /// table with the reviewed definition. It never refuses: the reads that use an advisory index
 /// return the same rows without it, more slowly. A catalog read that fails only warns too.
 /// Returns how many are not in place.
 pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
     let mut missing = 0;
-    for (table, install) in [
+    let tables: [(&str, fn(&str) -> &'static str); 2] = [
         (
             "normalized_events",
-            "ops/record-history-indexes/install.sql",
+            |_| "ops/record-history-indexes/install.sql",
         ),
-        (
-            "project_grant",
-            "ops/resolver-role-holder-index/install.sql",
-        ),
-    ] {
+        ("project_grant", project_grant_install),
+    ];
+    for (table, install) in tables {
         let statuses = match pool.acquire().await {
             Ok(mut connection) if table == "project_grant" => {
                 load_project_grant_advisory_state(&mut connection).await
@@ -156,9 +154,17 @@ pub(crate) async fn warn_on_advisory_indexes(pool: &PgPool) -> usize {
     missing
 }
 
+/// The install script of a `project_grant` advisory index.
+fn project_grant_install(index: &str) -> &'static str {
+    PROJECT_GRANT_ADVISORY_INSTALL
+        .iter()
+        .find(|(name, _)| *name == index)
+        .map_or("its install script under ops/", |(_, install)| *install)
+}
+
 fn warn_on(
     table: &str,
-    install: &str,
+    install: fn(&str) -> &'static str,
     statuses: Result<Option<Vec<IndexStatus>>, sqlx::Error>,
 ) -> usize {
     let statuses = match statuses {
@@ -196,6 +202,7 @@ fn warn_on(
             IndexState::Foreign { held_by } => format!("held by {held_by}"),
         };
         missing += 1;
+        let install = install(index);
         tracing::warn!(
             service = "api",
             index,

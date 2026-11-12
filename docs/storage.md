@@ -766,15 +766,20 @@ Family indexes serve these concrete readers:
   `crates/storage/src/families/topology/role_holder_tests.rs` checks the plan under both plan
   modes.
 - The registry role-holder page (`storage:families.topology.registries_by_role_holder`, for
-  `GET /v1/registries?role_holder=`) reads `project_grant_registry_parent_idx`,
-  `(chain_id, subject, (scope_detail ->> 'registry_address'))` over the root grants, whose
-  schema-migration is listed above. Its index condition is the page's chains and the holder,
-  so the page reads only the holder's root grants on those chains, revoked ones included. It
-  never reads the holder's per-name registry grants or resolver grants. The statement groups and
-  orders by the lower-cased registry address with `COLLATE "C"`, which the index does not
-  order, so it sorts the holder's root grants; there is one per registry the holder ever held
-  root roles on. The statement carries the index predicate `scope = 'root'` as a literal, so
-  the index qualifies under generic plans too. No new index serves it.
+  `GET /v1/registries?role_holder=`) reads `project_grant_root_role_holder_idx`,
+  `(subject COLLATE "C", chain_id COLLATE "C", lower(scope_detail ->> 'registry_address')
+  COLLATE "C")` over the root grants that are not revoked. The page reads one chain at a time.
+  Its index condition carries the holder, the chain and the cursor's address, so the page reads
+  only the holder's live root grants on that chain from the cursor, in page order, with no
+  sort. It never reads the holder's revoked root grants, per-name registry grants or resolver
+  grants. The statement carries the index predicate as literals, so the index qualifies under
+  generic plans too, and it is sent unprepared, so each page is planned for its own bound.
+  Schema-migration `20261112170000_project_grant_root_role_holder_index.sql` adopts the index.
+  It is advisory: an operator prebuilds it with
+  [`ops/root-role-holder-index/install.sql`](../ops/root-role-holder-index/README.md), the
+  phase runner never builds it, and the API starts and serves without it, with a WARN at
+  startup. Without it the page returns the same rows and reads every grant of the holder
+  through `project_grant_subject_resource_idx`.
   `crates/storage/src/families/topology/role_holder_registry_tests.rs` checks the plan under
   both plan modes.
 - The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes

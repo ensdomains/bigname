@@ -7,7 +7,9 @@
 use sqlx::{Connection, PgConnection};
 
 mod constants;
-pub use constants::{ADVISORY, DROP_LIST, KEPT, PROJECT_GRANT_ADVISORY};
+pub use constants::{
+    ADVISORY, DROP_LIST, KEPT, PROJECT_GRANT_ADVISORY, PROJECT_GRANT_ADVISORY_INSTALL,
+};
 
 pub const TABLE: &str = "bigname_phase.normalized_events";
 pub const PROJECT_GRANT_TABLE: &str = "bigname_phase.project_grant";
