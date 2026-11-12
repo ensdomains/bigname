@@ -860,7 +860,7 @@ const ROUTES = [
 },
 {
   id: 'resolvers-by-role-holder', method: 'GET', path: '/v1/resolvers', title: 'Resolvers by role holder',
-  summary: 'Lists the resolvers on which one address holds ENSv2 roles, one row per resolver. It is the inverse of <a href="#resolver-roles">resolver roles</a>.',
+  summary: 'Lists the resolvers on which one address holds ENSv2 roles, one row per resolver. It reads the other way from <a href="#resolver-roles">resolver roles</a>.',
   keywords: ['role_holder', 'roles', 'grant_count', 'powers', 'eac'],
   sample: s => ({ role_holder: s.address || '0x…' }),
   params: [{ name: 'role_holder', in: 'query', required: true, desc: 'The holder, an EVM hex address. A request without it is rejected with 400.' }, { name: 'chain_id', in: 'query', type: 'integer', desc: 'Keeps the resolvers on one numeric EVM chain.' }, P.cursor, P.pageSize],
@@ -869,7 +869,7 @@ const ROUTES = [
     sample: { data: [{ chain_id: 1, address: '0x…', grant_count: 2, powers: ['set_addr', 'set_text'] }], page: { cursor: null, next_cursor: null, page_size: 50, total_count: null, has_more: false }, meta: AS_OF },
   },
   outcomes: [['200', 'The page, empty when the address holds no ENSv2 resolver role.'], ['400 invalid_input', '<code>role_holder</code> is missing or malformed, the chain is invalid or not served by this deployment, the cursor is invalid, or a parameter is unknown.'], ['409 stale', 'The publication is unavailable or changed during the read; retry with the same cursor.']],
-  notes: [{ h: 'What is listed', html: '<p>Only ENSv2 Enhanced Access Control role grants are listed. Owning an ENSv1 or Basenames name does not list its resolver here; <a href="#permissions">permissions</a> with <code>address</code> returns that authority. Registry roles are not listed. Rows sort by chain, Base before Ethereum, then by resolver address, and the cursor binds the holder and the chain filter.</p>' }],
+  notes: [{ h: 'What is listed', html: '<p>Only ENSv2 Enhanced Access Control role grants are listed, as stored, including those on a resolver whose implementation resolver roles cannot enumerate or whose manifest is retired. For such a resolver, <a href="#resolver-roles">resolver roles</a> can answer an unsupported page or 404. Owning an ENSv1 or Basenames name does not list its resolver here; <a href="#permissions">permissions</a> with <code>address</code> returns that authority. Registry roles are not listed. Rows sort by chain, Base before Ethereum, then by resolver address, and the cursor binds the holder and the chain filter.</p>' }],
   related: ['resolver-roles', 'permissions', 'resolver'],
 },
 {

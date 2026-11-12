@@ -4934,9 +4934,13 @@ For a registrar lease first identified by a later readable observation, registra
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Tier: product read. The collection lists the resolvers on which one address
-  holds ENSv2 Enhanced Access Control (EAC) roles. It is the inverse of
+  holds ENSv2 Enhanced Access Control (EAC) roles. It reads the other way from
   [`/roles`](#get-v1resolverschain_idaddresslinks-and-roles), which lists the
-  holders of one resolver.
+  holders of one resolver, but it does not depend on that route's enumeration
+  support. It lists the stored EAC grants, including those on a resolver whose
+  implementation `/roles` cannot enumerate or whose manifest is retired. For a
+  resolver listed here, `/roles` can therefore answer an unsupported page or
+  `404 not_found`.
 - Parameters: `role_holder` is required. A request without it, or with a blank
   value, returns `400 invalid_input` with `role_holder is required`: the
   collection never lists every resolver. `chain_id` keeps one chain's resolvers;
