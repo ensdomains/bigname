@@ -167,19 +167,20 @@ pub struct RoleHolderRegistry {
 /// statement sorts those rows. The page key and its cursor bound compare as bytes, whatever the
 /// database collation.
 pub(crate) const REGISTRY_STATEMENT: &str = r#"/* storage:families.topology.registries_by_role_holder */
-SELECT grant_row.chain_id AS chain_id,
-       grant_row.scope_detail ->> 'registry_address' AS registry_address,
+SELECT grant_row.chain_id COLLATE "C" AS chain_id,
+       lower(grant_row.scope_detail ->> 'registry_address') COLLATE "C" AS registry_address,
        count(*) AS grant_count,
        jsonb_agg(grant_row.effective_powers) AS powers
 FROM bigname_phase.project_grant grant_row
 WHERE grant_row.subject = $1
   AND grant_row.chain_id = ANY($2::text[])
-  AND grant_row.scope_kind = 'root'
+  AND grant_row.scope = 'root'
   AND NOT grant_row.revoked
   AND ($3::text IS NULL
-       OR grant_row.chain_id > $3::text
+       OR grant_row.chain_id COLLATE "C" > $3::text COLLATE "C"
        OR (grant_row.chain_id = $3::text
-           AND grant_row.scope_detail ->> 'registry_address' > $4::text))
+           AND lower(grant_row.scope_detail ->> 'registry_address') COLLATE "C"
+               > $4::text COLLATE "C"))
 GROUP BY 1, 2
 ORDER BY 1, 2
 LIMIT $5"#;
