@@ -164,16 +164,62 @@ async fn finish(fixture: &Fixture) -> Result<FamilyOutcome> {
     Ok(outcome)
 }
 
+/// Finish the rebuild in one run, with the listing oracles checked after it rather than inside
+/// it, so a case records what differs instead of stopping at the first oracle.
+async fn finish_unchecked(fixture: &Fixture) -> Result<FamilyOutcome> {
+    let token = families::input_token(&fixture.pool, CHAIN).await?;
+    let outcome = families::apply(
+        &fixture.pool,
+        CHAIN,
+        &marker(TARGET),
+        FamilyMode::Normal,
+        &token,
+        &ranged(u64::MAX),
+    )
+    .await?;
+    ensure!(
+        fixture.marker().await?.0 == Some(TARGET),
+        "the rebuild finished: {outcome:?}"
+    );
+    Ok(outcome)
+}
+
+/// Each cut is a row of its own: every row runs, and the case fails naming each row whose
+/// families differ from block by block, whose pass was reset, or whose publication an oracle
+/// refuses.
 async fn cuts_resume(prefix: &str, cuts: &[Cut]) -> Result<()> {
     let fixture = seeded(prefix).await?;
     let expected = block_by_block(&fixture).await?;
     let mut skips = 0;
+    let mut failures = Vec::new();
     for &cut in cuts {
         skips += stop_at(&fixture, cut).await?;
-        let finished = finish(&fixture).await?;
-        ensure!(!finished.reset, "{cut:?}: the pass was resumed, not reset");
-        require_equal(&fixture, &expected, &format!("{cut:?}")).await?;
+        let finished = finish_unchecked(&fixture).await?;
+        let now = fixture.exact().await?;
+        let mut differs: Vec<String> = expected
+            .iter()
+            .zip(&now)
+            .filter(|((_, was), (_, rebuilt))| was != rebuilt)
+            .map(|((table, _), _)| table.clone())
+            .collect();
+        if finished.reset {
+            differs.push("the pass was reset".to_owned());
+        }
+        if let Err(error) = fixture.assert_child_listing(CHAIN).await {
+            differs.push(format!("child listing oracle: {error:#}"));
+        }
+        if let Err(error) = fixture.assert_address_listing(CHAIN).await {
+            differs.push(format!("address listing oracle: {error:#}"));
+        }
+        if !differs.is_empty() {
+            failures.push(format!("{cut:?}: {}", differs.join("; ")));
+        }
     }
+    ensure!(
+        failures.is_empty(),
+        "rows that differ from block by block:\n{}",
+        failures.join("\n")
+    );
     fixture.expect_listing_skips(skips);
     fixture.cleanup().await
 }
