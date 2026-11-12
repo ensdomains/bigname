@@ -249,8 +249,10 @@ pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) -> CancelOutcom
             return CancelOutcome::Settled;
         }
     };
+    // Red: the reply wait is cut at the acquire's bound.
+    let _ = CANCEL_REPLY_BACKSTOP;
     let replied = tokio::time::timeout(
-        CANCEL_REPLY_BACKSTOP,
+        CANCEL_WAIT,
         sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
             .bind(pid)
             .fetch_one(&mut *conn),
