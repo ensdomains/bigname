@@ -6955,19 +6955,24 @@ for a dense class and by id for any other. No statement reads this index, and ev
 - It adds no table, manifest or setting. The manifest-authority fingerprint and the compiled
   watch plan are unchanged, so stamp no Ingest redo.
 
-Schema-migration `20261105130000_name_surfaces_drop_raw_prefix_index.sql` drops the index
+Schema-migration `20261112160000_name_surfaces_drop_raw_prefix_index.sql` drops the index
 when it has the definition below, valid or not. A database without the name passes unchanged.
 The baseline does not define the index, and `20261028120000_serving_read_indexes.sql` no
 longer builds it.
 
-`DROP INDEX` holds an ACCESS EXCLUSIVE lock on `name_surfaces` until the schema-migration
-commits. Apply the schema-migration with the phase runner, redo processes and API stopped, with
-the same `statement_timeout` and retry procedure as the other index schema-migrations and
-`--target-version 20261105130000`. It sets its own five-second `lock_timeout`. On a timeout it
-fails unrecorded, and a rerun is safe.
+`DROP INDEX` takes an ACCESS EXCLUSIVE lock on `name_surfaces`. The drop only removes the
+index's catalog entry and its file, so the index's size does not matter, and the lock is held
+only until the schema-migration commits a moment later. To get the lock it first waits for
+every transaction that holds the table, and statements on the table queue behind it while it
+waits. Its own five-second `lock_timeout` bounds that wait. On a timeout it fails unrecorded,
+and a rerun is safe.
 
-To avoid that lock on a database that cannot take it, read the index first, outside a
-transaction:
+Apply it with the release's other schema-migrations. With the phase runner, redo processes and
+API stopped, nothing holds the table and the drop does not wait. A database promoted from a
+redo's seed that already ran the schema-migration has no index left to drop. On a database that
+keeps serving while the schema-migrations run, drop the index concurrently first, as below.
+
+To drop it without that lock, read the index first, outside a transaction:
 
 ```sql
 SET search_path = pg_catalog;

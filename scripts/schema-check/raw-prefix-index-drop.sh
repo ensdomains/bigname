@@ -1,5 +1,5 @@
 # Sourced by check-schema with its scratch schema and assertion helpers.
-# 20261105130000_name_surfaces_drop_raw_prefix_index.sql and
+# 20261112160000_name_surfaces_drop_raw_prefix_index.sql and
 # 20261028120000_serving_read_indexes.sql, in a schema of the current fresh baseline. The
 # baseline does not define the index, and neither schema-migration builds it from a schema
 # without it. The drop removes exactly the hand-built
