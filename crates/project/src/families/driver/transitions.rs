@@ -48,10 +48,8 @@ impl Run<'_> {
         outcome: &mut FamilyOutcome,
     ) -> Result<()> {
         let revision = token.revision();
-        let restart = revision.is_none()
-            || record.prefix_revision != revision
-            || !family.bootstrap
-            || !self.readable(family.current.as_ref()).await?;
+        // Red-first probe: a moved revision or an unreadable pass block no longer restarts.
+        let restart = revision.is_none() || !family.bootstrap;
         if restart {
             return self
                 .rebuild(
