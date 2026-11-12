@@ -162,14 +162,10 @@ impl Drop for ReadSnapshot {
             return;
         };
         runtime.spawn(async move {
-            let mut transaction = transaction;
-            if crate::serving_pool::cancel_statement(&cancels, pid).await
-                == CancelOutcome::Unsettled
-            {
-                transaction.close_on_drop();
-            }
-            // Only now may the connection go back to the pool.
+            // Red: the connection goes back before the cancel is sent, so nothing is left to close.
+            let _ = OwnedTransaction::close_on_drop;
             drop(transaction);
+            let _: CancelOutcome = crate::serving_pool::cancel_statement(&cancels, pid).await;
         });
     }
 }
