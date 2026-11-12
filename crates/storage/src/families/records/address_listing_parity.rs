@@ -102,15 +102,11 @@ pub async fn assert_address_listing_matches_the_route(
     let mut snapshot = crate::begin_read_snapshot(pool).await?;
     let publication = match servable_publication(&mut snapshot, chain_id).await {
         Ok(publication) => publication,
-        // End the snapshot before returning: a dropped one leaves its session idle in a
-        // transaction until the pool next hands the connection out.
-        Err(error) if is_publication_unavailable(&error) => {
-            snapshot.rollback().await?;
-            return Ok(false);
-        }
+        // A dropped snapshot would stay idle in a transaction until the pool reuses it.
         Err(error) => {
             snapshot.rollback().await?;
-            return Err(error);
+            let unavailable = is_publication_unavailable(&error);
+            return unavailable.then_some(false).ok_or(error);
         }
     };
     let addresses: Vec<String> = sqlx::query_scalar(ADDRESSES)
