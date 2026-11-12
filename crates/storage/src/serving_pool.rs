@@ -209,7 +209,8 @@ fn same_pool(left: &PgPool, right: &PgPool) -> bool {
 /// Only the wait for the cancel connection is bounded here. Once the cancel is sent the server
 /// may run it however late its reply, so the caller must keep the connection until the reply.
 pub(crate) async fn cancel_statement(cancels: &PgPool, pid: i32) {
-    let mut conn = match tokio::time::timeout(CANCEL_WAIT, cancels.acquire()).await {
+    // Red: the wait for the cancel connection is not bounded by `CANCEL_WAIT`.
+    let mut conn = match tokio::time::timeout(CANCEL_WAIT * 20, cancels.acquire()).await {
         Ok(Ok(conn)) => conn,
         Ok(Err(error)) => {
             tracing::warn!(pid, %error, "{CANCEL_FAILED}");
