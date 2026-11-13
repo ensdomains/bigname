@@ -388,15 +388,24 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
     SCOPED_ATTEMPTS.set(attempts);
     let (actual, session) = complete(prepared, &prior)?;
     assert_eq!(actual, expected, "complete scoped suffix output differs");
-    // Interpret applies the restore in chunks: an edge after every event must change nothing.
+    // Interpret applies the restore in chunks. An edge after every event must leave the session
+    // one call over every event leaves, and so the same output.
     let mut chunked = LookaheadRestore::new(begin()?);
-    for event in restored {
+    for event in restored.iter().cloned() {
         chunked.apply(vec![event], &loaded)?;
     }
+    let chunked = chunked.finish(predecessor, latest_v2, &loaded)?;
+    let begun = begin()?;
+    let whole =
+        restore_schema_v2_lookahead_session(begun, restored, predecessor, latest_v2, &loaded)?;
+    assert!(
+        chunked == whole,
+        "a restore applied one event at a time leaves another session"
+    );
     let chunked = prepare_schema_v2_batch_lookahead(
         input.clone(),
         provenance.clone(),
-        chunked.finish(predecessor, latest_v2, &loaded)?,
+        chunked,
         &loaded,
         StateCacheCapacity::Unlimited,
     )?;
