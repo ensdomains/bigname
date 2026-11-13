@@ -37,7 +37,7 @@ pub(super) async fn restore_closure(
 ) -> Result<Restored> {
     let names: Vec<_> = dependencies.nodes.iter().map(name_key).collect();
     let resources: Vec<_> = dependencies.resource_ids.iter().copied().collect();
-    let v2_keys: Vec<_> = dependencies.v2_keys.iter().cloned().collect();
+    let v2_keys: Vec<String> = Vec::new();
     #[cfg(test)]
     let mut recorded = super::CLOSURES.with_borrow_mut(|closure| {
         closure.as_mut().map(|closure| {
