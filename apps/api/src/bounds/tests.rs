@@ -1,12 +1,16 @@
+use std::panic::AssertUnwindSafe;
+
 use axum::{
     Router,
     body::{Body, to_bytes},
     http::{Method, Request as HttpRequest, Uri},
     routing::get,
 };
+use futures_util::FutureExt as _;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, Semaphore};
 use tower::ServiceExt;
+use tracing::instrument::WithSubscriber;
 
 use super::*;
 
@@ -138,12 +142,130 @@ async fn request_timeout_returns_json_error_envelope() {
         &config,
     );
 
-    let response = app
-        .oneshot(request("/slow"))
-        .await
-        .expect("bounded request must complete");
+    let (response, logs) = logged(app.oneshot(request("/slow"))).await;
+    let response = response.expect("bounded request must complete");
 
     assert_error(response, StatusCode::REQUEST_TIMEOUT, "request_timeout").await;
+    let warnings = lines_at(&logs, "WARN");
+    assert_eq!(warnings.len(), 1, "one WARN line per timeout: {logs}");
+    assert!(warnings[0].contains(r#"route="/slow""#), "{logs}");
+    assert!(warnings[0].contains("timeout_ms=5"), "{logs}");
+}
+
+#[tokio::test]
+async fn request_timeout_on_an_unmatched_path_logs_unmatched_not_the_path() {
+    let mut config = test_config();
+    config.request_timeout_ms = 5;
+    let app = apply_request_bounds(
+        Router::new().fallback(|| async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            "late"
+        }),
+        Router::new(),
+        &config,
+    );
+
+    let (response, logs) = logged(app.oneshot(request("/names/alice.eth"))).await;
+    let response = response.expect("bounded request must complete");
+
+    assert_error(response, StatusCode::REQUEST_TIMEOUT, "request_timeout").await;
+    let warnings = lines_at(&logs, "WARN");
+    assert_eq!(warnings.len(), 1, "one WARN line per timeout: {logs}");
+    assert!(warnings[0].contains(r#"route="unmatched""#), "{logs}");
+    assert!(
+        !logs.contains("alice.eth"),
+        "the raw path must not be logged: {logs}"
+    );
+}
+
+#[tokio::test]
+async fn timeout_cancels_a_handler_before_it_can_panic() {
+    let mut config = test_config();
+    config.request_timeout_ms = 5;
+    let app = apply_request_bounds(
+        Router::new().route("/late/{name}", get(panics_after_the_deadline)),
+        Router::new(),
+        &config,
+    );
+
+    let (response, logs) = logged(app.oneshot(request("/late/alice.eth"))).await;
+    let response = response.expect("bounded request must complete");
+
+    assert_error(response, StatusCode::REQUEST_TIMEOUT, "request_timeout").await;
+    let warnings = lines_at(&logs, "WARN");
+    assert_eq!(warnings.len(), 1, "one WARN line per timeout: {logs}");
+    assert!(warnings[0].contains(r#"route="/late/{name}""#), "{logs}");
+    assert!(warnings[0].contains("timeout_ms=5"), "{logs}");
+    assert!(
+        !logs.contains("alice.eth"),
+        "the raw path must not be logged: {logs}"
+    );
+    assert!(lines_at(&logs, "ERROR").is_empty(), "{logs}");
+}
+
+#[tokio::test]
+async fn panicking_handler_answers_500_with_a_request_id_and_one_error_line() {
+    let app = apply_request_bounds(panic_router(), Router::new(), &test_config())
+        .layer(middleware::from_fn(crate::metrics::track_http_request));
+    let counted = || crate::metrics::http_requests_count("/panics", "GET", "5xx");
+    let before = counted();
+
+    let (outcome, logs) = logged_unwind(app.oneshot(request("/panics"))).await;
+    let response = outcome
+        .expect("a handler panic must be answered, not unwound into the caller")
+        .expect("bounded request must complete");
+
+    assert_panic_answer(response, &logs, "boom").await;
+    assert_eq!(counted(), before + 1, "the caught panic counts as one 5xx");
+}
+
+#[tokio::test]
+async fn panicking_health_handler_answers_500_with_a_request_id() {
+    let app = apply_request_bounds(
+        Router::new(),
+        Router::new().route("/healthz", get(panicking_handler)),
+        &test_config(),
+    );
+
+    let (outcome, logs) = logged_unwind(app.oneshot(request("/healthz"))).await;
+    let response = outcome
+        .expect("a handler panic must be answered, not unwound into the caller")
+        .expect("bounded health request must complete");
+
+    assert_panic_answer(response, &logs, "boom").await;
+}
+
+#[tokio::test]
+async fn panic_response_logs_each_payload_class_under_a_fresh_request_id() {
+    let payloads: [(Box<dyn Any + Send>, &str); 3] = [
+        (Box::new(String::from("formatted 1")), "formatted 1"),
+        (Box::new("static"), "static"),
+        (Box::new(7_u8), "panic payload is not a string"),
+    ];
+    let mut request_ids = Vec::new();
+    for (payload, panic) in payloads {
+        let (response, logs) = logged(async move { panic_response(payload) }).await;
+        request_ids.push(assert_panic_answer(response, &logs, panic).await);
+    }
+    request_ids.sort();
+    request_ids.dedup();
+    assert_eq!(request_ids.len(), 3, "each panic gets its own request id");
+}
+
+#[tokio::test]
+async fn normal_handler_answers_unchanged_without_warn_or_error_lines() {
+    let app = apply_request_bounds(panic_router(), Router::new(), &test_config());
+
+    let (response, logs) = logged(app.oneshot(request("/fast"))).await;
+    let response = response.expect("bounded request must complete");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body must read");
+    assert_eq!(&body[..], b"fast");
+    assert!(lines_at(&logs, "WARN").is_empty(), "{logs}");
+    assert!(lines_at(&logs, "ERROR").is_empty(), "{logs}");
 }
 
 #[tokio::test]
@@ -661,6 +783,117 @@ async fn assert_error(response: Response, status: StatusCode, code: &str) {
     let payload: Value = serde_json::from_slice(&body).expect("error body must be JSON");
     assert_eq!(payload.pointer("/error/code"), Some(&json!(code)));
     assert_eq!(payload.pointer("/error/details"), Some(&json!({})));
+}
+
+fn panic_router() -> Router {
+    Router::new()
+        .route("/panics", get(panicking_handler))
+        .route("/fast", get(|| async { "fast" }))
+}
+
+async fn panicking_handler() -> &'static str {
+    panic!("boom")
+}
+
+async fn panics_after_the_deadline() -> &'static str {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    panic!("too late")
+}
+
+async fn assert_panic_answer(response: Response, logs: &str, panic: &str) -> String {
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("error body must read");
+    let text = std::str::from_utf8(&body).expect("error body must be UTF-8");
+    assert!(
+        !text.contains(panic),
+        "the panic text stays out of the body: {text}"
+    );
+    let payload: Value = serde_json::from_str(text).expect("error body must be JSON");
+    assert_eq!(
+        payload.pointer("/error/code"),
+        Some(&json!("internal_error"))
+    );
+    assert_eq!(
+        payload.pointer("/error/message"),
+        Some(&json!("request handler panicked"))
+    );
+    let request_id = payload
+        .pointer("/error/details/request_id")
+        .and_then(Value::as_str)
+        .expect("details.request_id must be a string");
+    assert!(!request_id.is_empty());
+    assert_eq!(
+        payload.pointer("/error/details"),
+        Some(&json!({ "request_id": request_id }))
+    );
+
+    let errors = lines_at(logs, "ERROR");
+    assert_eq!(errors.len(), 1, "one ERROR line per panic: {logs}");
+    assert!(
+        errors[0].contains(&format!("request_id={request_id}")),
+        "{logs}"
+    );
+    assert!(errors[0].contains(&format!(r#"panic="{panic}""#)), "{logs}");
+    assert!(lines_at(logs, "WARN").is_empty(), "{logs}");
+    request_id.to_owned()
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+async fn logged<F: Future>(work: F) -> (F::Output, String) {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let output = work.with_subscriber(subscriber).await;
+    (output, logs.text())
+}
+
+async fn logged_unwind<F: Future>(work: F) -> (std::thread::Result<F::Output>, String) {
+    logged(AssertUnwindSafe(work).catch_unwind()).await
+}
+
+fn lines_at<'a>(logs: &'a str, level: &str) -> Vec<&'a str> {
+    logs.lines()
+        .filter(|line| line.split_whitespace().next() == Some(level))
+        .collect()
 }
 
 #[test]
