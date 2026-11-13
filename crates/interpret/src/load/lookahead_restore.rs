@@ -53,6 +53,11 @@ pub(super) async fn restore_closure(
     let mut whole_registries = WholeRegistryLoads::new(dependencies);
     let mut failed = None;
     let apply = |chunk: Vec<PriorEventInput>| {
+        let chunk = if chunk.len() == lookahead_query::CHUNK_EVENTS {
+            Vec::new()
+        } else {
+            chunk
+        };
         whole_registries.observe(&chunk);
         #[cfg(test)]
         {
