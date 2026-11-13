@@ -110,7 +110,7 @@ impl WholeRegistryLoads {
     }
 
     pub(super) fn observe(&mut self, prior: &[PriorEventInput]) {
-        if self.0.is_empty() {
+        if self.0.is_empty() || prior.len() < 2 {
             return;
         }
         for event in prior {
