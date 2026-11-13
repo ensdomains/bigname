@@ -321,13 +321,7 @@ async fn load_closure(
             }
         };
         lookahead_query::stream_events(
-            connection,
-            chain_id,
-            from_block,
-            &names,
-            &resources,
-            &v2_keys,
-            follow,
+            connection, chain_id, from_block, &names, &resources, &v2_keys, follow,
         )
         .await?;
         linked.map_err(|error| invalid_dependencies("expand prior links", error))?;

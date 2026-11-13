@@ -97,8 +97,7 @@ async fn stream_chunks_end_exactly_at_the_chunk_size() -> Result {
             ControlFlow::Continue(())
         };
         let names = ["ens:a".to_owned()];
-        let read = stream_events(&mut connection, CHAIN, 5, &names, &[], &[], keep)
-            .await?;
+        let read = stream_events(&mut connection, CHAIN, 5, &names, &[], &[], keep).await?;
         assert_eq!(read, winners);
         assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), sizes);
         let streamed: Vec<_> = chunks.into_iter().flatten().collect();
@@ -315,8 +314,8 @@ async fn an_ensv2_key_seen_only_under_an_orphaned_alias_restores_nothing() -> Re
     let mut connection = db.pool().acquire().await?;
     let routed = |labelhash: &str| format!("0xreg:{}00000000", &labelhash[..58]);
     for (request, expected) in [(routed(&alpha), vec!["alpha"]), (routed(&beta), vec![])] {
-        let selected = super::ordered_events(&mut connection, CHAIN, 5, &[], &[], &[request])
-            .await?;
+        let selected =
+            super::ordered_events(&mut connection, CHAIN, 5, &[], &[], &[request]).await?;
         assert_eq!(identities(&selected), expected);
     }
     drop(connection);

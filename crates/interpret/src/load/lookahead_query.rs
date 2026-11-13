@@ -38,8 +38,7 @@ pub(super) async fn events(
     names: &[String],
     resources: &[Uuid],
 ) -> Result<Vec<PriorEventInput>> {
-    ordered_events(connection, chain, before, names, resources, &[])
-        .await
+    ordered_events(connection, chain, before, names, resources, &[]).await
 }
 
 /// Every event `stream_events` reads, at once.
@@ -57,8 +56,7 @@ pub(super) async fn ordered_events(
         events.extend(chunk);
         ControlFlow::Continue(())
     };
-    stream_events(connection, chain, before, names, resources, v2_keys, keep)
-        .await?;
+    stream_events(connection, chain, before, names, resources, v2_keys, keep).await?;
     Ok(events)
 }
 

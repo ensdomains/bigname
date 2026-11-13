@@ -71,13 +71,7 @@ pub(super) async fn restore_closure(
         }
     };
     let events = lookahead_query::stream_events(
-        connection,
-        chain_id,
-        from_block,
-        &names,
-        &resources,
-        &v2_keys,
-        apply,
+        connection, chain_id, from_block, &names, &resources, &v2_keys, apply,
     )
     .await?;
     #[cfg(test)]
