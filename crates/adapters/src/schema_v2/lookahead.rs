@@ -423,7 +423,7 @@ impl LookaheadRestore {
         let restore = &mut self.restore;
         let mut latest = None;
         let applied = coverage::checked(loaded, true, || {
-            latest = restore.apply_prior_event_rows(events)?;
+            restore.apply_prior_events(events)?;
             Ok(())
         });
         self.latest_v2_delta = self.latest_v2_delta.max(latest);
