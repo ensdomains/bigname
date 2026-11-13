@@ -26,6 +26,8 @@ pub(super) const OWNER: &str = "0x0000000000000000000000000000000000000051";
 pub(super) const SECOND_OWNER: &str = "0x0000000000000000000000000000000000000052";
 const RESOLVER: &str = "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41";
 pub(super) const CAPACITY: StateCacheCapacity = StateCacheCapacity::Entries(65_536);
+/// The most decoded prior events the lookahead loader may hold at once.
+pub(super) const CHUNK: usize = 1_024;
 /// A family lookahead does not cover, under which the drift tests retain history. No
 /// repository manifest declares one today; the check guards families added later.
 const UNCOVERED_FAMILY: &str = "dns_l1";
@@ -81,6 +83,17 @@ const LAPSED_AT_BIRTH_OFFSETS: [i64; 2] = [0, 12];
 /// Three blocks, twelve seconds apart, for the exact-equality cases.
 const EXPIRY_BOUNDARY_OFFSETS: [i64; 3] = [0, 12, 24];
 
+/// Names registered together in the wide-window history. Their histories, loaded together
+/// when they lapse, are more events than the loader holds at once.
+const WIDE_NAMES: usize = 400;
+
+const WIDE_WINDOW_OFFSETS: [i64; 4] = [
+    0,                   // 0: every wide name registered, then a subname of the first
+    1_000 + GRACE - 5,   // 1: quiet; nothing has lapsed
+    1_000 + GRACE + 1,   // 2: every wide name lapses; the second is registered again
+    1_000 + GRACE + 100, // 3: the first name's subname gets a resolver
+];
+
 #[derive(Clone, Copy)]
 pub(super) enum History {
     /// Registrations, renewals, transfers, a subname, lapses, and a re-registration.
@@ -91,6 +104,8 @@ pub(super) enum History {
     DeepSubname,
     /// Two registrations whose expiry plus grace period equals a block timestamp exactly.
     ExpiryBoundaries,
+    /// `WIDE_NAMES` registrations that lapse in one block.
+    WideWindow,
 }
 
 impl History {
@@ -99,6 +114,7 @@ impl History {
             Self::Lifecycle => &BLOCK_OFFSETS,
             Self::LapsedAtBirth | Self::DeepSubname => &LAPSED_AT_BIRTH_OFFSETS,
             Self::ExpiryBoundaries => &EXPIRY_BOUNDARY_OFFSETS,
+            Self::WideWindow => &WIDE_WINDOW_OFFSETS,
         }
     }
 
@@ -354,6 +370,32 @@ pub(super) async fn seed_history(pool: &PgPool, history: History) -> TestResult 
         // block later.
         return seed.register("june", OWNER, START + 12 - GRACE).await;
     }
+    if matches!(history, History::WideWindow) {
+        seed.block(FIRST_BLOCK).await?;
+        for n in 0..WIDE_NAMES {
+            seed.register(&format!("wide{n}"), OWNER, START + 1_000)
+                .await?;
+        }
+        // Written after every registration, so the subname's history and its parent's are
+        // restored in different chunks.
+        let parent = child(eth_node(), "wide0");
+        let subname = registry::NewOwner {
+            node: parent,
+            label: keccak256(b"sub"),
+            owner,
+        };
+        seed.log(ENS_REGISTRY, subname.encode_log_data()).await?;
+        // Released at this block's boundary, then registered again by the block's logs.
+        seed.block(FIRST_BLOCK + 2).await?;
+        seed.register("wide1", SECOND_OWNER, START + 3 * GRACE)
+            .await?;
+        seed.block(FIRST_BLOCK + 3).await?;
+        let resolver = registry::NewResolver {
+            node: child(parent, "sub"),
+            resolver: RESOLVER.parse()?,
+        };
+        return seed.log(ENS_REGISTRY, resolver.encode_log_data()).await;
+    }
     if matches!(history, History::LapsedAtBirth) {
         // The deployed registrar cannot record this (its `register` sets the expiry to the
         // block time plus a positive duration), but the adapter accepts it.
@@ -519,6 +561,8 @@ pub(super) struct Walk {
     pub(super) quiet_releases: usize,
     /// Every stored normalized event, without its surrogate id and insertion time.
     pub(super) stored: Vec<String>,
+    /// The most prior events one lookahead batch restored.
+    pub(super) most_restored: usize,
 }
 
 pub(super) async fn stored_events(pool: &PgPool, chain: &str) -> TestResult<Vec<String>> {
@@ -567,10 +611,12 @@ pub(super) async fn walk_seeded(
     let mut carried: Option<load::CachedPrior> = None;
     let mut all_released = BTreeSet::new();
     let mut quiet_releases = 0;
+    let mut most_restored = 0;
     let mut from = FIRST_BLOCK;
     let last_block = FIRST_BLOCK + i64::try_from(offsets.len())? - 1;
     while from <= last_block {
         let to = (from + i64::from(blocks_per_batch) - 1).min(last_block);
+        super::MAX_RESIDENT_EVENTS.set(0);
         let lookahead =
             match super::batch_input(pool, chain, from, to, None, CAPACITY, None).await? {
                 super::Attempt::Loaded(loaded) => *loaded,
@@ -578,6 +624,12 @@ pub(super) async fn walk_seeded(
                     anyhow::bail!("{chain} manifests must choose lookahead, got {choice:?}")
                 }
             };
+        let resident = super::MAX_RESIDENT_EVENTS.get();
+        assert!(
+            resident <= CHUNK,
+            "blocks {from}..={to}: the loader held {resident} prior events at once"
+        );
+        most_restored = most_restored.max(lookahead.restored_event_count);
         // Names the batch's own logs mention are loaded whether or not they are due.
         let mentioned: BTreeSet<String> =
             bigname_adapters::schema_v2::collect_v1_batch_dependencies(
@@ -666,6 +718,7 @@ pub(super) async fn walk_seeded(
         released: all_released,
         quiet_releases,
         stored,
+        most_restored,
     })
 }
 
@@ -740,6 +793,37 @@ async fn registration_recorded_already_lapsed_is_released_by_both_loaders() -> T
     let walk = walk(History::LapsedAtBirth, 1, false).await?;
     assert_eq!(walk.released, BTreeSet::from([name("gina")]));
     assert_eq!(walk.quiet_releases, 1);
+    Ok(())
+}
+
+/// Every wide name lapses at one block, so the batch over it restores more events than the
+/// loader holds at once. One of them is registered again in the block that releases it, and a
+/// subname whose history is restored in a later chunk than its parent's is written after the
+/// release. Each batch must match the full-state loader, which the walk checks along with
+/// how many events the loader held at once.
+#[tokio::test]
+async fn wide_due_window_restores_in_chunks_and_matches_full_state() -> TestResult {
+    let wide_names: BTreeSet<String> = (0..WIDE_NAMES)
+        .map(|n| name(&format!("wide{n}")))
+        .collect();
+    let mut grids = Vec::new();
+    for blocks_per_batch in [1, 2] {
+        let walk = walk(History::WideWindow, blocks_per_batch, false).await?;
+        assert_eq!(walk.released, wide_names);
+        assert!(
+            walk.most_restored > CHUNK,
+            "the lapse batch restores {} events, which fit one chunk",
+            walk.most_restored
+        );
+        grids.push((blocks_per_batch, walk.stored));
+    }
+    let full_state = walk(History::WideWindow, 1, true).await?.stored;
+    for (blocks_per_batch, stored) in grids {
+        assert_eq!(
+            stored, full_state,
+            "stored events differ for {blocks_per_batch} blocks per batch"
+        );
+    }
     Ok(())
 }
 

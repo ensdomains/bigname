@@ -144,6 +144,8 @@ pub(crate) async fn batch_input(
             &mut fetched,
         )
         .await?;
+        #[cfg(test)]
+        note_resident(fetched.events.len() + prior.len());
         let restored_event_count = prior.len();
         #[cfg(test)]
         let restored_kinds: Vec<String> =
@@ -320,6 +322,8 @@ async fn load_closure(
             connection, chain_id, from_block, &names, &resources, &v2_keys,
         )
         .await?;
+        #[cfg(test)]
+        note_resident(fetched.events.len() + events.len());
         fetched.names.extend(nodes);
         fetched.resources.extend(resources);
         fetched.v2_keys.extend(v2_keys);
@@ -488,6 +492,15 @@ thread_local! {
     /// stays `None` otherwise, so no other test's timing or memory includes the recording.
     pub(super) static CLOSURES: std::cell::RefCell<Option<Closure>> =
         const { std::cell::RefCell::new(None) };
+    /// The most decoded prior events `batch_input` held at once on this thread, counting every
+    /// copy kept beside them.
+    pub(super) static MAX_RESIDENT_EVENTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_resident(events: usize) {
+    MAX_RESIDENT_EVENTS.set(MAX_RESIDENT_EVENTS.get().max(events));
 }
 
 #[cfg(test)]
@@ -497,6 +510,8 @@ pub(super) struct Closure {
     pub(super) requests: Vec<(Vec<String>, Vec<Uuid>, Vec<String>)>,
     /// Each attempt's restore input and the dependencies it was loaded for.
     pub(super) attempts: Vec<(Vec<PriorEventInput>, V1BatchDependencies)>,
+    /// The names, resources and ENSv2 state keys of the query each attempt restored from.
+    pub(super) final_passes: Vec<(Vec<String>, Vec<Uuid>, Vec<String>)>,
 }
 
 #[cfg(test)]
