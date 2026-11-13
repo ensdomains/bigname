@@ -104,9 +104,7 @@ pub(super) async fn stream_events(
             return Ok(read);
         }
     }
-    if !chunk.is_empty() {
-        let _ = apply(chunk);
-    }
+    drop(chunk);
     Ok(read)
 }
 
