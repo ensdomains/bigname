@@ -35,7 +35,12 @@ pub(super) async fn restore_closure(
     predecessor: Option<time::OffsetDateTime>,
     latest_v2_topology: Option<time::OffsetDateTime>,
 ) -> Result<Restored> {
-    let names: Vec<_> = dependencies.nodes.iter().map(name_key).collect();
+    let names: Vec<_> = dependencies
+        .nodes
+        .iter()
+        .filter(|request| request.namespace == "ens")
+        .map(name_key)
+        .collect();
     let resources: Vec<_> = dependencies.resource_ids.iter().copied().collect();
     let v2_keys: Vec<_> = dependencies.v2_keys.iter().cloned().collect();
     #[cfg(test)]
