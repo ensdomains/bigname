@@ -215,7 +215,7 @@ async fn panicking_handler_answers_500_with_a_request_id_and_one_error_line() {
         .expect("a handler panic must be answered, not unwound into the caller")
         .expect("bounded request must complete");
 
-    assert_panic_answer(response, &logs).await;
+    assert_panic_answer(response, &logs, "boom").await;
     assert_eq!(counted(), before + 1, "the caught panic counts as one 5xx");
 }
 
@@ -232,7 +232,24 @@ async fn panicking_health_handler_answers_500_with_a_request_id() {
         .expect("a handler panic must be answered, not unwound into the caller")
         .expect("bounded health request must complete");
 
-    assert_panic_answer(response, &logs).await;
+    assert_panic_answer(response, &logs, "boom").await;
+}
+
+#[tokio::test]
+async fn panic_response_logs_each_payload_class_under_a_fresh_request_id() {
+    let payloads: [(Box<dyn Any + Send>, &str); 3] = [
+        (Box::new(String::from("formatted 1")), "formatted 1"),
+        (Box::new("static"), "static"),
+        (Box::new(7_u8), "panic payload is not a string"),
+    ];
+    let mut request_ids = Vec::new();
+    for (payload, panic) in payloads {
+        let (response, logs) = logged(async move { panic_response(payload) }).await;
+        request_ids.push(assert_panic_answer(response, &logs, panic).await);
+    }
+    request_ids.sort();
+    request_ids.dedup();
+    assert_eq!(request_ids.len(), 3, "each panic gets its own request id");
 }
 
 #[tokio::test]
@@ -783,7 +800,7 @@ async fn panics_after_the_deadline() -> &'static str {
     panic!("too late")
 }
 
-async fn assert_panic_answer(response: Response, logs: &str) {
+async fn assert_panic_answer(response: Response, logs: &str, panic: &str) -> String {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
         response
@@ -797,7 +814,7 @@ async fn assert_panic_answer(response: Response, logs: &str) {
         .expect("error body must read");
     let text = std::str::from_utf8(&body).expect("error body must be UTF-8");
     assert!(
-        !text.contains("boom"),
+        !text.contains(panic),
         "the panic text stays out of the body: {text}"
     );
     let payload: Value = serde_json::from_str(text).expect("error body must be JSON");
@@ -825,8 +842,9 @@ async fn assert_panic_answer(response: Response, logs: &str) {
         errors[0].contains(&format!("request_id={request_id}")),
         "{logs}"
     );
-    assert!(errors[0].contains(r#"panic="boom""#), "{logs}");
+    assert!(errors[0].contains(&format!(r#"panic="{panic}""#)), "{logs}");
     assert!(lines_at(logs, "WARN").is_empty(), "{logs}");
+    request_id.to_owned()
 }
 
 #[derive(Clone, Default)]
