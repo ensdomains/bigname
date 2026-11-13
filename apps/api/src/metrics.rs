@@ -120,6 +120,14 @@ where
 }
 
 #[cfg(test)]
+pub(crate) fn http_requests_count(route: &str, method: &str, status_class: &str) -> u64 {
+    api_metrics()
+        .http_requests
+        .with_label_values(&[route, method, status_class])
+        .get()
+}
+
+#[cfg(test)]
 fn record_verified_execution_outcome(outcome: &'static str) {
     let _ = VERIFIED_EXECUTION_OUTCOMES.try_with(|outcomes| outcomes.borrow_mut().push(outcome));
 }
