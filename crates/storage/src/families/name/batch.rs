@@ -210,22 +210,29 @@ pub async fn load_family_names_by_logical_name_ids(
 }
 
 /// One composed row per resource: of the names whose row is bound to the resource, the first by
-/// raw name then name id (`load_current_names_by_resource_ids`).
+/// raw name then name id (`load_current_names_by_resource_ids`). Only the names bound on
+/// `chain_ids`, the chains of the caller's publication, are read. An empty `chain_ids` reads
+/// none.
 pub async fn load_family_names_by_resource_ids(
     db: impl Into<ReadDb<'_>>,
     resource_ids: &[Uuid],
+    chain_ids: &[String],
 ) -> Result<BTreeMap<Uuid, NameCurrentRow>> {
-    if resource_ids.is_empty() {
+    if resource_ids.is_empty() || chain_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
     let mut snapshot = db.into().snapshot().await?;
+    // Every index of the table leads with the chain, so the chain key lets the lookup seek
+    // project_binding_candidate_resource_idx instead of walking it.
     let names: Vec<String> = sqlx::query_scalar(
         "/* storage:families.name.by_resource */
          SELECT DISTINCT candidate.logical_name_id
          FROM bigname_phase.project_binding_candidate candidate
-         WHERE candidate.resource_id = ANY($1::uuid[])",
+         WHERE candidate.chain_id = ANY($2::text[])
+           AND candidate.resource_id = ANY($1::uuid[])",
     )
     .bind(resource_ids)
+    .bind(chain_ids)
     .fetch_all(&mut *snapshot)
     .await
     .context("failed to load the names bound to resources")?;

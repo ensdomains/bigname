@@ -110,13 +110,15 @@ pub const COMPOSE_CHUNK_KEYS: usize = 1000;
 pub const COMPOSE_WORKERS: u16 = 1;
 
 /// The block spans the composition pass's catalogue build scans the interpreted events in, each
-/// one transaction. On mainnet's 120 M events 64 spans keep one span near two minutes if the
-/// whole scan is about two hours, an estimate, well under the runner's 900 s heartbeat alarm.
+/// one transaction. The event count stream (`compose_stream` 6) scans in the same spans. On
+/// mainnet's 120 M events 64 spans keep one span near two minutes if the whole scan is about two
+/// hours, an estimate, well under the runner's 900 s heartbeat alarm.
 pub const COMPOSE_BUILDER_BLOCK_SPANS: u16 = 64;
 
 /// The key partitions of the catalogue build's keyed steps, each one transaction, a power of two.
-/// 16 keep one anchor partition under ten minutes if the whole membership pass takes one to three
-/// hours on mainnet, an estimate.
+/// The event count and leads streams (`compose_stream` 6 and 7) split their keyed steps into the
+/// same partitions. 16 keep one anchor partition under ten minutes if the whole membership pass
+/// takes one to three hours on mainnet, an estimate.
 pub const COMPOSE_BUILDER_KEY_PARTITIONS: u16 = 16;
 
 /// The most key partitions of the catalogue build: partition numbers fit a `smallint`.
@@ -256,11 +258,14 @@ pub struct FamilyOptions {
     /// pass's output does not depend on it. More than one needs a pool of one connection more
     /// than the workers, or the pass is refused at its start.
     pub compose_workers: u16,
-    /// Block spans of the composition pass's catalogue build, at least one. The build's output
-    /// does not depend on it. A build resumed with another count is refused.
+    /// Block spans of the composition pass's catalogue build and event count stream, at least
+    /// one. The output does not depend on it. The catalogue build, the event count stream or the
+    /// leads stream resumed with another count, or on another Postgres server version, is
+    /// refused.
     pub compose_builder_block_spans: u16,
-    /// Key partitions of the catalogue build, a power of two. The output does not depend on it.
-    /// A build resumed with another count is refused.
+    /// Key partitions of the composition pass's catalogue build, event count stream and leads
+    /// stream, a power of two. The output does not depend on it. Any of them resumed with another
+    /// count, or on another Postgres server version, is refused.
     pub compose_builder_key_partitions: u16,
     /// `work_mem` of each catalogue build transaction, a Postgres memory value set for that
     /// transaction alone. The server's setting applies when it is unset.

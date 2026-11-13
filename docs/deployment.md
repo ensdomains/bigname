@@ -7272,15 +7272,42 @@ row, as block-by-block publication gives them.
   address listing's `registration_lead` per key partition of the addresses. The names
   stream's workers write the listing rows and decide no lead, since one group's rows can lie
   in several workers' chunks.
+- A pass stopped inside the event count or leads stream refuses to continue if
+  `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_BLOCK_SPANS`,
+  `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_COMPOSE_KEY_PARTITIONS` or the PostgreSQL server
+  version changed since, as the catalogue build does. Put the old values back.
 - The child listing parents stream is `compose_stream` 5. The values 3 and 4 keep their
   meaning. The pass runs 0, 7, 5, 1, 2, 4, 6, then 3.
 - The schema-migration `20261112120000_project_compose_stream_order_comments.sql` changes the
   repair record's `compose_stream` and `compose_cursor` comments only. The schema-migration
   `20261112130000_project_compose_event_count_work.sql` adds the event count stream's work
-  table, empty. Every family run of this build writes it, so run it first. The API reads
-  neither and needs no grant.
+  table, empty. A family reset and every composition pass of this build write it, so run it
+  first. The API reads neither and needs no grant.
 - Before a database takes this build, `project_repair_record` must show no row in state
   `composing`. A pass an older build left is reset, never resumed, but the check keeps an
   interrupted pass from going unnoticed.
 - The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
   Ingest redo.
+
+## The current-name lookup by resource is keyed by chain
+
+`GET /v1/permissions?address=…` and a resolver's `/roles` list name each row's resource
+through one lookup: the names bound to the page's resources in `project_binding_candidate`.
+Before this build it filtered on the resource id alone. Every index of that table leads with
+the chain, so the lookup walked the whole of `project_binding_candidate_resource_idx` on every
+request, and a page of five rows took seconds. The lookup now takes the chains of the
+request's publication as the leading key, so it seeks that index.
+
+- The rows are the same. A binding candidate is on its resource's chain, and both routes
+  pass every chain of their publication. No response changes.
+- It rotates the [projection content hash](glossary.md#projection-content-hash) from
+  `90642c42` to `01bbd68f`. Three of its inputs change: the lookup in
+  `crates/storage/src/families/name/batch.rs`, and comment-only edits in
+  `crates/project/src/families/mod.rs` and `crates/project/src/families/event_counts.rs`. The
+  [interpreter content hash](glossary.md#interpreter-content-hash) stays `4056df69`.
+- The rotation is formal. Project never sends the lookup, and the other two edits change
+  comments only, so the full-range Project redo rewrites every projected row to the same
+  values. The release that carries the change redoes Project anyway, so it adds no redo of
+  its own.
+- It adds no schema-migration, index, table, manifest or setting. The manifest-authority
+  fingerprint and the compiled watch plan are unchanged, so stamp no Ingest redo.

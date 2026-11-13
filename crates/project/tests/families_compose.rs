@@ -1171,8 +1171,25 @@ async fn a_redo_resumes_or_restarts_a_rebuild_in_its_pass() -> Result<()> {
 // a reset never reads it. Run to its end, the rebuild equals a plain one.
 #[tokio::test]
 async fn a_pass_an_older_build_left_in_its_stream_3_is_reset_not_resumed() -> Result<()> {
+    an_older_pass_is_reset(3, "20").await
+}
+
+// The same for a record an older build left in its stream 4 with a JSON pair cursor. Before main's
+// streams merged into this branch, 4 was the child listing parents stream, which this build
+// numbers 5. This build's 4 is the lookup inventories stream, whose cursor is a name, so a resume
+// would read the pair as a name. A reset never parses it.
+#[tokio::test]
+async fn a_pass_an_older_build_left_in_its_stream_4_is_reset_not_parsed() -> Result<()> {
+    an_older_pass_is_reset(
+        4,
+        r#"["ens","0x0000000000000000000000000000000000000000000000000000000000000001"]"#,
+    )
+    .await
+}
+
+async fn an_older_pass_is_reset(stream: i16, cursor: &str) -> Result<()> {
     for (resumed, moved) in [(false, false), (true, false), (false, true), (true, true)] {
-        let case = format!("resumed redo {resumed}, moved revision {moved}");
+        let case = format!("stream {stream}, resumed redo {resumed}, moved revision {moved}");
         let fixture = Fixture::new("families_compose_older_pass", 30).await?;
         for block in 11..=25 {
             fixture
@@ -1200,8 +1217,9 @@ async fn a_pass_an_older_build_left_in_its_stream_3_is_reset_not_resumed() -> Re
             "{case}: the pass began: {:?}",
             pass_state(&fixture).await?
         );
-        sqlx::raw_sql(
-            "UPDATE project_repair_record SET compose_stream = 3, compose_cursor = '20';
+        let older = format!(
+            "UPDATE project_repair_record
+                 SET compose_stream = {stream}, compose_cursor = '{cursor}';
              UPDATE project_family_marker SET input_content_hash = 'an-older-build';
              CREATE TABLE older_pass_log (seen bigserial PRIMARY KEY, cursor text);
              CREATE FUNCTION older_pass_log() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1210,11 +1228,10 @@ async fn a_pass_an_older_build_left_in_its_stream_3_is_reset_not_resumed() -> Re
                  RETURN NEW;
              END $$;
              CREATE TRIGGER older_pass_log AFTER UPDATE ON project_repair_record
-             FOR EACH ROW WHEN (OLD.compose_stream = 3 AND NEW.compose_stream IS NOT NULL)
-             EXECUTE FUNCTION older_pass_log();",
-        )
-        .execute(&fixture.pool)
-        .await?;
+             FOR EACH ROW WHEN (OLD.compose_stream = {stream} AND NEW.compose_stream IS NOT NULL)
+             EXECUTE FUNCTION older_pass_log();"
+        );
+        sqlx::raw_sql(&older).execute(&fixture.pool).await?;
         if moved {
             fixture.interpret_row(CONTENT_HASH, 3, false).await?;
         }
@@ -1242,10 +1259,10 @@ async fn a_pass_an_older_build_left_in_its_stream_3_is_reset_not_resumed() -> Re
             "{case}: the pass fields were cleared: {:?}",
             pass_state(&fixture).await?
         );
-        let resumed_in_3 = count(&fixture, "SELECT count(*) FROM older_pass_log").await?;
+        let moved_on = count(&fixture, "SELECT count(*) FROM older_pass_log").await?;
         ensure!(
-            resumed_in_3 == 0,
-            "{case}: {resumed_in_3} updates moved on from the older build's stream 3"
+            moved_on == 0,
+            "{case}: {moved_on} updates moved on from the older build's stream {stream}"
         );
         if resumed {
             let record = fixture.repair_record().await?.unwrap_or_default();

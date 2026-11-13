@@ -2,9 +2,9 @@
 //! anchor, namespace and event kind, the number of product-visible events at or below the
 //! publication's block that the anchor's event read admits. A block adds the counts of the events
 //! in its range after the family marker's block, in the block's own transaction, and journals
-//! each touched key's before-image, so an undo restores the counts with the other families. The
-//! composition pass adds the counts of each catalogue window the same way. A count of zero has no
-//! row.
+//! each touched key's before-image, so an undo restores the counts with the other families. A
+//! rebuild's composition pass builds the counts once at the pass block instead, in its event count
+//! stream (compose_counts.rs). A count of zero has no row.
 use std::{collections::BTreeMap, sync::LazyLock};
 
 use bigname_storage::history_count_contract::block_event_counts_sql;
