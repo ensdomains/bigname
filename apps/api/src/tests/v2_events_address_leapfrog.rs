@@ -189,11 +189,9 @@ async fn walked_on(
         contract_leapfrog: leapfrog,
         ..Default::default()
     }));
-    let body = bigname_storage::with_address_history_working_set(
-        stats.clone(),
-        payload_on(state, uri),
-    )
-    .await?;
+    let body =
+        bigname_storage::with_address_history_working_set(stats.clone(), payload_on(state, uri))
+            .await?;
     let stats = stats.lock().unwrap().clone();
     assert_eq!(
         stats.counters.get("catalogue"),
@@ -462,6 +460,18 @@ async fn events_address_contract_keeps_to_the_requested_namespace() -> Result<()
     database.cleanup().await
 }
 
+/// Publishes base-mainnet, with no events, so that a basenames read has a collection publication
+/// to read at, as `publish_v2_names_fixture` does for name reads.
+async fn publish_base(database: &TestDatabase) -> Result<()> {
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"base":{
+            "chain_id":"base-mainnet", "block_number":100, "block_hash":"0xbase-history-head",
+            "timestamp":"2026-04-17T00:00:00Z"
+        }}))
+        .await?;
+    rebuild_fixture_families(&database.pool, "base-mainnet", 100, "0xbase-history-head").await
+}
+
 /// The `contract_address` reads of the namespace rows, each with the resolver of
 /// [`seed_cross_namespace`].
 #[derive(Clone, Copy)]
@@ -484,6 +494,9 @@ enum ContractRead {
 async fn assert_namespace_row(namespace: Option<&str>, read: ContractRead) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let ens_events = seed_cross_namespace(&database).await?;
+    if namespace == Some("basenames") {
+        publish_base(&database).await?;
+    }
     // The address holds no basenames name, so a basenames read admits none of its events.
     let mut expected = match (namespace, read) {
         (Some("basenames"), _) | (_, ContractRead::WithoutTheAddresssEvents) => Vec::new(),
