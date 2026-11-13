@@ -27,6 +27,7 @@ mod policy;
 mod select;
 mod served;
 mod tombstone;
+mod unleased;
 pub mod view;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -279,5 +280,7 @@ pub(crate) fn staged_as_own(facts: &NameFacts, event: &rows::LifecycleEvent) -> 
 
 #[cfg(test)]
 mod implied_lease_tests;
+#[cfg(test)]
+mod never_registered_tests;
 #[cfg(test)]
 mod place_tests;

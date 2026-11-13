@@ -5037,6 +5037,12 @@ For a registrar lease first identified by a later readable observation, registra
   different: its event-derived resolver
   binding is eligible for `bound_names` only where that resolver family's
   existing binding-enumeration capability is supported.
+  A `.eth` second-level name only the 2017 registry recorded, with no
+  BaseRegistrar row and no live ENSv2 entry, was never registered and stands on
+  no binding. As for an ownerless name, the resolver its retained registry
+  resolver pointer names lists it in `bound_names` only where that resolver
+  family's binding-enumeration capability is supported. No ENSv1 resolver
+  family supports it, so no ENSv1 resolver's `bound_names` lists the name.
   The overview carries no section counts and no sampled sections. A
   resolver's record links and resolver-scoped permission rows
   are the paginated `/links` and `/roles` collections below, each

@@ -2304,8 +2304,9 @@ node other than the root is a `NewOwner` from its parent
 Project records `old` for a name on the ENSv1
 [authority epoch](#authority-epoch) arm when the 2017 registry recorded an
 owner for the node and no current-registry ownership record has been observed,
-and `current` otherwise. The API serves `old` as `authority=ens_v0`. An ENSv1
-registry child with no name surface, which has no selected arm, serves its
+and `current` otherwise. The API serves `old` as `authority=ens_v0`, except on a
+`.eth` second-level name with no BaseRegistrar row and no live ENSv2 entry, which
+has a record and no registration and serves no `authority`. An ENSv1 registry child with no name surface, which has no selected arm, serves its
 node's generation the same way: `ens_v0` for `old`, `ens_v1` for `current`.
 The first current-registry `NewOwner` or `Transfer` for the node is its
 [registry fallback handoff](#registry-fallback-handoff) and makes the name
@@ -2313,7 +2314,7 @@ The first current-registry `NewOwner` or `Transfer` for the node is its
 The root is always `current`, because the current registry's constructor
 writes the root record without an event
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L23-L26 @ ens_v1@91c966f).
-Registry generation never changes which arm is selected, how registration,
+Apart from that name, registry generation never changes which arm is selected, how registration,
 control or permission handles are derived, or verified-read admission, which
 keeps reading the stored `ens_v1` arm. It is unrelated to the ENSv1→ENSv2
 migration that `migrated_at` and `is_migrated` describe.

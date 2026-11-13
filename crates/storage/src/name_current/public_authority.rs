@@ -41,7 +41,8 @@ pub fn name_current_is_ownerless_registry(provenance: &Value) -> bool {
 /// for the node
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
-/// `None` for Basenames, an unresolved selection, or an ownerless registry row without a lease.
+/// `None` for Basenames, an unresolved selection, an ownerless registry row without a lease, or a
+/// `.eth` second-level name only the 2017 registry recorded with no BaseRegistrar row.
 pub fn name_current_public_authority(provenance: &Value) -> Option<&'static str> {
     crate::families::name::public_authority(provenance)
 }
@@ -81,6 +82,8 @@ pub(crate) fn push_public_authority_predicate(
                       OR {alias}.provenance
                           #> '{{authority_selection,lease_without_registry_owner}}'
                           = 'true'::jsonb)
+                  AND {alias}.provenance #> '{{authority_selection,old_record_without_lease}}'
+                          IS DISTINCT FROM 'true'::jsonb
                   AND CASE {alias}.provenance #>> '{{authority_selection,authority_arm}}'
                           WHEN 'ens_v1' THEN CASE
                               WHEN {alias}.provenance
@@ -135,6 +138,11 @@ mod tests {
                 json!({"authority_arm": "ens_v1", "registry_generation": "current",
                        "ownerless_registry": true, "lease_without_registry_owner": true}),
                 Some("ens_v1"),
+            ),
+            (
+                json!({"authority_arm": "ens_v1", "registry_generation": "old",
+                       "old_record_without_lease": true}),
+                None,
             ),
         ] {
             assert_eq!(

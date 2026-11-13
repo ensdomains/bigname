@@ -230,6 +230,10 @@ pub(crate) const COMPOSITION_FILES: &[Classified] = &[
         LIFECYCLE,
     ),
     project(
+        "crates/storage/src/families/control/lifecycle/unleased.rs",
+        LIFECYCLE,
+    ),
+    project(
         "crates/storage/src/families/control/lifecycle/view.rs",
         LIFECYCLE,
     ),
