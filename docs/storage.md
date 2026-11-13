@@ -1224,6 +1224,7 @@ paths, before paging and before counting. A change to either path is checked aga
 - one winner among registry handoff copies, chosen over the same filters;
 - the cursor position in the shared history order;
 - `at` and `finality`, refused before either path reads.
+
 The three indexes cover only activated rows in readable canonicality states, so an anchor read
 that drops either condition cannot use them and falls back to a broad scan, such as
 `normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the

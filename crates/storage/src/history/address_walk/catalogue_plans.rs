@@ -265,9 +265,13 @@ fn collect_scans(node: &Value, scans: &mut Vec<Value>) {
 /// The contract side of the `contract_address` walk reads the emitter's own index with the
 /// emitter and the block bound in its index condition, and sorts nothing, in both orders and
 /// for the null bucket, under a forced generic plan and after six runs of a prepared statement.
+/// It holds for an emitter among many with a few dozen rows each, an emitter with one row, and
+/// a registry-shaped emitter that holds most of the rows.
 #[tokio::test]
 async fn emitter_seek_keeps_its_index_under_a_generic_plan() -> Result<()> {
-    const EMITTER: &str = "0x0000000000000000000000000000000000000021";
+    const SPREAD: &str = "0x0000000000000000000000000000000000000021";
+    const ONE: &str = "0x00000000000000000000000000000000000000e1";
+    const SKEWED: &str = "0x00000000000000000000000000000000000000d1";
     let database = bigname_test_support::TestDatabase::create(
         bigname_test_support::TestDatabaseConfig::new("catalogue_emitter_seek_plan"),
     )
@@ -275,53 +279,75 @@ async fn emitter_seek_keeps_its_index_under_a_generic_plan() -> Result<()> {
     let result = async {
         let mut connection = database.pool().acquire().await?;
         super::plan_tests::install(&mut connection, 32, 3_200).await?;
-        // Ninety-seven emitters share the fixture's events, so the planner sees a selective key.
-        sqlx::raw_sql(
+        // The registry-shaped emitter holds three rows in four. Ninety-seven emitters share the
+        // rest, so the key is selective for them. One emitter holds a single row, in bucket 5.
+        // ANALYZE samples every row of a table this small, so every run plans on the same
+        // statistics.
+        sqlx::raw_sql(&format!(
             "UPDATE normalized_events SET raw_fact_ref = jsonb_build_object('emitting_address',
-                 '0x' || lpad(to_hex(normalized_event_id % 97), 40, '0'));
-             ANALYZE normalized_events",
-        )
+                 CASE WHEN event_identity = 'plan:grant:1300' THEN '{ONE}'
+                      WHEN normalized_event_id % 4 <> 0 THEN '{SKEWED}'
+                      ELSE '0x' || lpad(to_hex(normalized_event_id % 97), 40, '0') END);
+             ANALYZE normalized_events"
+        ))
         .execute(&mut *connection)
         .await?;
-        for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
-            let filter = EventHistoryReadFilter {
-                order,
-                ..Default::default()
-            };
-            for bucket in [0, 5, crate::history::catalogue_contract::NULL_BUCKET] {
-                for (mode, runs) in [("force_generic_plan", 1), ("auto", 6)] {
-                    let label = format!("{order:?} bucket {bucket} {mode}");
-                    let plan = prepared_emitter_plan(
-                        &mut connection,
-                        EMITTER,
-                        &filter,
-                        bucket,
-                        mode,
-                        runs,
-                    )
-                    .await?;
-                    let mut scans = Vec::new();
-                    collect_scans(&plan[0]["Plan"], &mut scans);
-                    collect_nodes(&plan[0]["Plan"], &mut scans);
-                    ensure!(
-                        scans.iter().all(|node| node["type"] != "Seq Scan"
-                            && node["type"] != "Sort"
-                            && node["type"] != "Bitmap Heap Scan"),
-                        "{label}: {scans:?}"
-                    );
-                    let reads = scans
-                        .iter()
-                        .filter(|scan| scan["relation"] == "normalized_events")
-                        .collect::<Vec<_>>();
-                    ensure!(!reads.is_empty(), "{label}: {scans:?}");
-                    for read in reads {
-                        let condition = read["condition"].as_str().unwrap_or_default();
+        let (spread, one, skewed, total): (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE emitter = $1), count(*) FILTER (WHERE emitter = $2),
+                    count(*) FILTER (WHERE emitter = $3), count(*)
+             FROM (SELECT raw_fact_ref ->> 'emitting_address' AS emitter
+                   FROM normalized_events) events",
+        )
+        .bind(SPREAD)
+        .bind(ONE)
+        .bind(SKEWED)
+        .fetch_one(&mut *connection)
+        .await?;
+        ensure!(
+            spread > 1 && one == 1 && skewed * 2 > total,
+            "fixture: {spread} {one} {skewed} of {total}"
+        );
+        for (shape, emitter) in [("spread", SPREAD), ("one row", ONE), ("skewed", SKEWED)] {
+            for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
+                let filter = EventHistoryReadFilter {
+                    order,
+                    ..Default::default()
+                };
+                for bucket in [0, 5, crate::history::catalogue_contract::NULL_BUCKET] {
+                    for (mode, runs) in [("force_generic_plan", 1), ("auto", 6)] {
+                        let label = format!("{shape} {order:?} bucket {bucket} {mode}");
+                        let plan = prepared_emitter_plan(
+                            &mut connection,
+                            emitter,
+                            &filter,
+                            bucket,
+                            mode,
+                            runs,
+                        )
+                        .await?;
+                        let mut scans = Vec::new();
+                        collect_scans(&plan[0]["Plan"], &mut scans);
+                        collect_nodes(&plan[0]["Plan"], &mut scans);
                         ensure!(
-                            read["index"] == "normalized_events_emitter_history_idx"
-                                && condition.contains("emitting_address")
-                                && condition.contains("block_number"),
+                            scans.iter().all(|node| node["type"] != "Seq Scan"
+                                && node["type"] != "Sort"
+                                && node["type"] != "Bitmap Heap Scan"),
                             "{label}: {scans:?}"
                         );
+                        let reads = scans
+                            .iter()
+                            .filter(|scan| scan["relation"] == "normalized_events")
+                            .collect::<Vec<_>>();
+                        ensure!(!reads.is_empty(), "{label}: {scans:?}");
+                        for read in reads {
+                            let condition = read["condition"].as_str().unwrap_or_default();
+                            ensure!(
+                                read["index"] == "normalized_events_emitter_history_idx"
+                                    && condition.contains("emitting_address")
+                                    && condition.contains("block_number"),
+                                "{label}: {scans:?}"
+                            );
+                        }
                     }
                 }
             }

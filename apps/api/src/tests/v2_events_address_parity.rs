@@ -530,7 +530,7 @@ async fn events_address_other_anchors_keep_the_sql_page() -> Result<()> {
 /// catalogue bucket, with no block window. The emitter probe finds its event, so the walk probes
 /// that bucket and returns the empty page. The buckets it visited are recorded.
 #[tokio::test]
-async fn events_address_contract_without_the_addresss_events_walks_every_bucket() -> Result<()> {
+async fn events_address_contract_without_the_addresss_events_probes_one_bucket() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_names(&database, 3).await?;
     let mut elsewhere = address_fixture_event(
