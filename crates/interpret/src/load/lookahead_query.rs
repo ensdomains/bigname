@@ -105,6 +105,7 @@ pub(super) async fn stream_events(
         }
     }
     if !chunk.is_empty() {
+        chunk.reverse();
         let _ = apply(chunk);
     }
     Ok(read)
