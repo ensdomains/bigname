@@ -138,6 +138,7 @@ pub(crate) async fn batch_input(
     dependencies.v2_due_window = Some(window);
     // Shared by every attempt: a retry reads only the keys it adds and what they link to.
     let mut fetched = Fetched::default();
+    let mut first_attempt: Option<V1BatchDependencies> = None;
     let (prepared, restored_event_count, whole_registries) = loop {
         load_closure(
             &mut tx,
@@ -164,11 +165,14 @@ pub(crate) async fn batch_input(
         // derive, so the attempts end. A key read under another spelling than the loaded one
         // fails only when that spelling is loaded too; otherwise it loads no history, so the
         // state maps' keys must match the `state_scope` events are filed under.
+        let requested = first_attempt
+            .get_or_insert_with(|| dependencies.clone())
+            .clone();
         let restored = restore_pass::restore_closure(
             &mut tx,
             chain_id,
             from_block,
-            &dependencies,
+            &requested,
             restore,
             predecessor,
             latest_v2_topology,
