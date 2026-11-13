@@ -334,20 +334,23 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
     }
     // Mirrors the Interpret loader: an attempt that reads a key outside the loaded set is
     // discarded, and the next attempt loads that key too.
+    let begin = || {
+        begin_schema_v2_adapter_restore(
+            input.chain_id.clone(),
+            input.manifests.clone(),
+            input.discovery_rules.clone(),
+            input.admissions.clone(),
+            StateCacheCapacity::Unlimited,
+        )
+    };
     let mut attempts = 0;
-    let (prepared, loaded) = loop {
+    let (prepared, loaded, restored) = loop {
         attempts += 1;
         let (scoped, rows) = scope(dependencies.clone(), &prior)?;
         assert!(scoped.unsupported.is_empty());
         let attempt = restore_schema_v2_lookahead_session(
-            begin_schema_v2_adapter_restore(
-                input.chain_id.clone(),
-                input.manifests.clone(),
-                input.discovery_rules.clone(),
-                input.admissions.clone(),
-                StateCacheCapacity::Unlimited,
-            )?,
-            rows,
+            begin()?,
+            rows.clone(),
             predecessor,
             latest_v2,
             &scoped,
@@ -362,7 +365,7 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
             )
         });
         match attempt {
-            Ok(prepared) => break (prepared, scoped),
+            Ok(prepared) => break (prepared, scoped, rows),
             Err(error) => {
                 let Some(unloaded) = error.downcast_ref::<UnloadedKeys>() else {
                     return Err(error);
@@ -385,6 +388,23 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
     SCOPED_ATTEMPTS.set(attempts);
     let (actual, session) = complete(prepared, &prior)?;
     assert_eq!(actual, expected, "complete scoped suffix output differs");
+    // Interpret applies the restore in chunks: an edge after every event must change nothing.
+    let mut chunked = LookaheadRestore::new(begin()?);
+    for event in restored {
+        chunked.apply(vec![event], &loaded)?;
+    }
+    let chunked = prepare_schema_v2_batch_lookahead(
+        input.clone(),
+        provenance.clone(),
+        chunked.finish(predecessor, latest_v2, &loaded)?,
+        &loaded,
+        StateCacheCapacity::Unlimited,
+    )?;
+    assert_eq!(
+        complete(chunked, &prior)?.0,
+        expected,
+        "a restore applied one event at a time differs"
+    );
     SCOPED_COMPARISONS.set(SCOPED_COMPARISONS.get() + 1);
     Ok((session, loaded))
 }

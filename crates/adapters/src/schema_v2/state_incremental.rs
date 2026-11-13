@@ -161,8 +161,27 @@ impl State {
         self.prune_unbacked_surfaces();
     }
 
-    pub(in crate::schema_v2) fn restore_prior_event_chunk(&mut self, prior: Vec<PriorEventInput>) {
-        self.apply_prior_events(prior, true, false);
+    /// Apply restored events without advancing time-derived state, and return the latest
+    /// ENSv2 topology timestamp among them. Events applied in several calls in restore order,
+    /// then settled once at the greatest returned timestamp, leave the state one call over all
+    /// of them and its settle leave: the restore of an expiry reads `latest_v2_timestamp`
+    /// (`set_v2_expiry`), which only the settle moves.
+    pub(in crate::schema_v2) fn restore_prior_event_rows(
+        &mut self,
+        prior: Vec<PriorEventInput>,
+    ) -> Option<i64> {
+        self.apply_prior_event_rows(prior, true, &mut V2RefreshTargets::default())
+    }
+
+    pub(in crate::schema_v2) fn settle_restored_prior_events(
+        &mut self,
+        latest_delta_timestamp: Option<i64>,
+    ) {
+        self.latest_v2_timestamp = self.latest_v2_timestamp.max(latest_delta_timestamp);
+        if let Some(delta_timestamp) = latest_delta_timestamp {
+            self.refresh_dirty_v2_names(delta_timestamp);
+            self.v2_reachability_changes.clear();
+        }
     }
 
     /// Raise the restored ENSv2 topology timestamp to `at`, the latest one among events a
@@ -199,6 +218,35 @@ impl State {
         full_restore: bool,
         finish_restore: bool,
     ) {
+        let previous_v2_timestamp = self.latest_v2_timestamp;
+        let mut refresh_targets = V2RefreshTargets::default();
+        let latest_delta_timestamp =
+            self.apply_prior_event_rows(prior, full_restore, &mut refresh_targets);
+        self.latest_v2_timestamp = if full_restore {
+            previous_v2_timestamp.max(latest_delta_timestamp)
+        } else {
+            previous_v2_timestamp
+        };
+        if full_restore && finish_restore {
+            self.finish_prior_event_restore(None);
+        } else if let Some(delta_timestamp) = latest_delta_timestamp {
+            self.v2_dirty_tokens.extend(refresh_targets.tokens);
+            self.v2_dirty_registries.extend(refresh_targets.registries);
+            self.refresh_dirty_v2_names(delta_timestamp);
+            self.v2_reachability_changes.clear();
+        }
+        if !full_restore {
+            self.finish_v1_registry_only_restore();
+            self.prune_unbacked_surfaces();
+        }
+    }
+
+    fn apply_prior_event_rows(
+        &mut self,
+        prior: Vec<PriorEventInput>,
+        full_restore: bool,
+        refresh_targets: &mut V2RefreshTargets,
+    ) -> Option<i64> {
         for token_lineage_id in prior.iter().filter_map(|event| {
             event
                 .after_state
@@ -208,9 +256,7 @@ impl State {
         }) {
             self.materialized_token_lineages.insert(token_lineage_id);
         }
-        let previous_v2_timestamp = self.latest_v2_timestamp;
         let mut latest_delta_timestamp = None;
-        let mut refresh_targets = V2RefreshTargets::default();
         for event in prior {
             self.replace_restored_surface_source(&event.retained_state_key);
             self.restoring_state_key = Some(event.retained_state_key.clone());
@@ -239,7 +285,7 @@ impl State {
                         .map(time::OffsetDateTime::unix_timestamp),
                 );
                 if !full_restore {
-                    self.capture_v2_refresh_targets(&event, &mut refresh_targets);
+                    self.capture_v2_refresh_targets(&event, refresh_targets);
                 }
             }
             let scope = event.state_scope.as_deref().unwrap_or("legacy");
@@ -256,27 +302,11 @@ impl State {
             crate::schema_v2::state_restore::v1(self, &event);
             crate::schema_v2::state_restore::v2(self, &event);
             if is_v2_topology && !full_restore {
-                self.capture_v2_refresh_targets(&event, &mut refresh_targets);
+                self.capture_v2_refresh_targets(&event, refresh_targets);
             }
             self.restoring_state_key = None;
         }
-        self.latest_v2_timestamp = if full_restore {
-            previous_v2_timestamp.max(latest_delta_timestamp)
-        } else {
-            previous_v2_timestamp
-        };
-        if full_restore && finish_restore {
-            self.finish_prior_event_restore(None);
-        } else if let Some(delta_timestamp) = latest_delta_timestamp {
-            self.v2_dirty_tokens.extend(refresh_targets.tokens);
-            self.v2_dirty_registries.extend(refresh_targets.registries);
-            self.refresh_dirty_v2_names(delta_timestamp);
-            self.v2_reachability_changes.clear();
-        }
-        if !full_restore {
-            self.finish_v1_registry_only_restore();
-            self.prune_unbacked_surfaces();
-        }
+        latest_delta_timestamp
     }
 
     fn capture_v2_refresh_targets(&self, event: &PriorEventInput, targets: &mut V2RefreshTargets) {

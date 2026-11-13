@@ -66,7 +66,7 @@ async fn walk_closures(
         let mut connection = pool.acquire().await?;
         for (prior, dependencies) in &closure.attempts {
             let (names, resources, v2_keys) = final_set(dependencies);
-            let mut once = super::super::lookahead_query::ordered_events(
+            let once = super::super::lookahead_query::ordered_events(
                 &mut connection,
                 chain,
                 from,
@@ -75,8 +75,6 @@ async fn walk_closures(
                 &v2_keys,
             )
             .await?;
-            once.sort_by_key(|ordered| ordered.order);
-            let once: Vec<_> = once.into_iter().map(|ordered| ordered.event).collect();
             assert!(
                 *prior == once,
                 "blocks {from}..={to}: the closure restores {} events, one query over its \

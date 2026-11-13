@@ -722,6 +722,10 @@ pub(super) async fn walk_seeded(
     })
 }
 
+fn wide_name(n: usize) -> String {
+    name(&format!("wide{n}"))
+}
+
 fn lapsed_names() -> BTreeSet<String> {
     BTreeSet::from([name("alice"), name("carol"), name("erin")])
 }
@@ -803,9 +807,7 @@ async fn registration_recorded_already_lapsed_is_released_by_both_loaders() -> T
 /// how many events the loader held at once.
 #[tokio::test]
 async fn wide_due_window_restores_in_chunks_and_matches_full_state() -> TestResult {
-    let wide_names: BTreeSet<String> = (0..WIDE_NAMES)
-        .map(|n| name(&format!("wide{n}")))
-        .collect();
+    let wide_names: BTreeSet<_> = (0..WIDE_NAMES).map(wide_name).collect();
     let mut grids = Vec::new();
     for blocks_per_batch in [1, 2] {
         let walk = walk(History::WideWindow, blocks_per_batch, false).await?;

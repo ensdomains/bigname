@@ -7284,3 +7284,23 @@ row, as block-by-block publication gives them.
   interrupted pass from going unnoticed.
 - The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
   Ingest redo.
+
+## The lookahead loader restores prior events in chunks
+
+The build that changes the [lookahead loader](glossary.md#lookahead-loader) no longer keeps
+every prior event it reads for a batch, nor a copy of them. Its rounds read events only to
+follow their references. Its restore reads the final set's events again in one query and
+applies them in chunks of 1,024 events, in restore order. Every batch stores the same
+normalized events as before, row for row.
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) rotates, and the
+  [projection content hash](glossary.md#projection-content-hash) with it: the adapter gains an
+  entry point that applies one restore over several calls. The integration branch already
+  rotates both, so this change adds no redo beyond the full re-derivation that branch needs.
+- The adapter state for every loaded name is still held until the batch ends. A batch whose
+  time span makes many registrations fall due still needs memory in proportion to them.
+- Each lookahead batch reads its prior events twice: once to follow references, once to
+  restore them.
+- No schema-migration and no new setting.
+- The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+  Ingest redo.
