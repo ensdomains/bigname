@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use bigname_adapters::schema_v2::{
     PriorEventInput, PriorWritePosition,
     seam::{
@@ -17,6 +19,8 @@ use crate::{InterpretError, Result};
 // set (many names falling due at one timestamp, say) must load all of it; memory is the
 // operator's concern, managed through `BIGNAME_INTERPRET_BLOCKS_PER_BATCH`.
 const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
+/// The most decoded prior events `stream_events` holds at once.
+pub(super) const CHUNK_EVENTS: usize = 1_024;
 const EVENTS: &str = include_str!("lookahead/events.sql");
 pub(super) const V2_KEYS: &str = include_str!("lookahead/v2_keys.sql");
 const DUE_NAMES: &str = include_str!("lookahead/due_names.sql");
@@ -26,12 +30,6 @@ const RETAINED_FAMILIES: &str = include_str!("lookahead/retained_families.sql");
 
 type EventRow = (Value, Option<OffsetDateTime>);
 
-/// A loaded event with the position the restore must apply it in.
-pub(super) struct OrderedEvent {
-    pub(super) order: (i64, i64),
-    pub(super) event: PriorEventInput,
-}
-
 #[cfg(test)]
 pub(super) async fn events(
     connection: &mut PgConnection,
@@ -40,18 +38,11 @@ pub(super) async fn events(
     names: &[String],
     resources: &[Uuid],
 ) -> Result<Vec<PriorEventInput>> {
-    Ok(
-        ordered_events(connection, chain, before, names, resources, &[])
-            .await?
-            .into_iter()
-            .map(|ordered| ordered.event)
-            .collect(),
-    )
+    ordered_events(connection, chain, before, names, resources, &[]).await
 }
 
-/// The latest event of every state key among the events of `names` (every covered family),
-/// of `resources` (ENSv1-model events naming no name) and of the ENSv2 state keys `v2_keys`,
-/// in restore order.
+/// Every event `stream_events` reads, at once.
+#[cfg(test)]
 pub(super) async fn ordered_events(
     connection: &mut PgConnection,
     chain: &str,
@@ -59,9 +50,32 @@ pub(super) async fn ordered_events(
     names: &[String],
     resources: &[Uuid],
     v2_keys: &[String],
-) -> Result<Vec<OrderedEvent>> {
+) -> Result<Vec<PriorEventInput>> {
+    let mut events = Vec::new();
+    let keep = |chunk: Vec<PriorEventInput>| {
+        events.extend(chunk);
+        ControlFlow::Continue(())
+    };
+    stream_events(connection, chain, before, names, resources, v2_keys, keep).await?;
+    Ok(events)
+}
+
+/// The latest event of every state key among the events of `names` (every covered family),
+/// of `resources` (ENSv1-model events naming no name) and of the ENSv2 state keys `v2_keys`,
+/// handed to `apply` in restore order, `CHUNK_EVENTS` at a time, as the rows arrive. A chunk is
+/// dropped once `apply` returns, and `apply` may stop the read. Returns the number of events
+/// read.
+pub(super) async fn stream_events(
+    connection: &mut PgConnection,
+    chain: &str,
+    before: i64,
+    names: &[String],
+    resources: &[Uuid],
+    v2_keys: &[String],
+    mut apply: impl FnMut(Vec<PriorEventInput>) -> ControlFlow<()>,
+) -> Result<usize> {
     if names.is_empty() && resources.is_empty() && v2_keys.is_empty() {
-        return Ok(Vec::new());
+        return Ok(0);
     }
     let query = EVENTS
         .replace("{v2_keys}", V2_KEYS.trim_end())
@@ -77,27 +91,23 @@ pub(super) async fn ordered_events(
         .bind(resources)
         .bind(v2_keys)
         .fetch(connection);
-    let mut result = Vec::new();
-    while let Some((mut body, timestamp)) = rows
+    let mut read = 0_usize;
+    let mut chunk = Vec::new();
+    while let Some((body, timestamp)) = rows
         .try_next()
         .await
         .map_err(|error| InterpretError::database("failed to load lookahead prior events", error))?
     {
-        let normalized_event_id = body["normalized_event_id"].as_i64().ok_or_else(|| {
-            InterpretError::data_integrity("lookahead prior event has no normalized event id")
-        })?;
-        let block_number = body["block_number"].as_i64().ok_or_else(|| {
-            InterpretError::data_integrity("lookahead prior event has no block number")
-        })?;
-        if let Some(fields) = body.as_object_mut() {
-            fields.remove("normalized_event_id");
+        chunk.push(decode_event(body, timestamp)?);
+        read += 1;
+        if chunk.len() == CHUNK_EVENTS && apply(std::mem::take(&mut chunk)).is_break() {
+            return Ok(read);
         }
-        result.push(OrderedEvent {
-            order: (block_number, normalized_event_id),
-            event: decode_event(body, timestamp)?,
-        });
     }
-    Ok(result)
+    if !chunk.is_empty() {
+        let _ = apply(chunk);
+    }
+    Ok(read)
 }
 
 /// The ENSv2 state keys of the tokens whose expiry lies in `(start, end]`; see

@@ -3,7 +3,8 @@
 //! final set of names, resources and ENSv2 state keys returns.
 use std::{collections::BTreeSet, num::NonZeroU32};
 
-use sqlx::PgPool;
+use bigname_adapters::schema_v2::V1BatchDependencies;
+use sqlx::{PgPool, types::Uuid};
 
 use super::{
     CLOSURES, Closure, ensv2_equivalence_tests,
@@ -13,9 +14,23 @@ use crate::{BatchRequest, Engine, Marker, RunMode};
 
 type TestResult<T = ()> = anyhow::Result<T>;
 
+/// The names, resources and ENSv2 state keys of `dependencies`, as the loader binds them.
+fn final_set(dependencies: &V1BatchDependencies) -> (Vec<String>, Vec<Uuid>, Vec<String>) {
+    (
+        dependencies
+            .nodes
+            .iter()
+            .map(|request| format!("{}:{}", request.namespace, request.node))
+            .collect(),
+        dependencies.resource_ids.iter().copied().collect(),
+        dependencies.v2_keys.iter().cloned().collect(),
+    )
+}
+
 /// Loads every batch of `blocks` blocks through the lookahead loader, interpreting each with
-/// the engine before loading the next, and returns each batch's closure. Each attempt's
-/// restore input must equal one query over the dependencies it was loaded for.
+/// the engine before loading the next, and returns each batch's closure. Each attempt must
+/// restore from one query over the dependencies it was loaded for, and its restore input must
+/// equal what that query returns.
 async fn walk_closures(
     pool: &PgPool,
     chain: &'static str,
@@ -36,16 +51,22 @@ async fn walk_closures(
         let super::Attempt::Loaded(_) = loaded? else {
             anyhow::bail!("{chain} manifests must choose lookahead");
         };
+        assert_eq!(
+            closure.final_passes.len(),
+            closure.attempts.len(),
+            "blocks {from}..={to}: each attempt restores from one query"
+        );
+        for (pass, (_, dependencies)) in closure.final_passes.iter().zip(&closure.attempts) {
+            assert!(
+                *pass == final_set(dependencies),
+                "blocks {from}..={to}: an attempt restores from a query over other elements \
+                 than its final set"
+            );
+        }
         let mut connection = pool.acquire().await?;
         for (prior, dependencies) in &closure.attempts {
-            let names: Vec<_> = dependencies
-                .nodes
-                .iter()
-                .map(|request| format!("{}:{}", request.namespace, request.node))
-                .collect();
-            let resources: Vec<_> = dependencies.resource_ids.iter().copied().collect();
-            let v2_keys: Vec<_> = dependencies.v2_keys.iter().cloned().collect();
-            let mut once = super::super::lookahead_query::ordered_events(
+            let (names, resources, v2_keys) = final_set(dependencies);
+            let once = super::super::lookahead_query::ordered_events(
                 &mut connection,
                 chain,
                 from,
@@ -54,8 +75,6 @@ async fn walk_closures(
                 &v2_keys,
             )
             .await?;
-            once.sort_by_key(|ordered| ordered.order);
-            let once: Vec<_> = once.into_iter().map(|ordered| ordered.event).collect();
             assert!(
                 *prior == once,
                 "blocks {from}..={to}: the closure restores {} events, one query over its \

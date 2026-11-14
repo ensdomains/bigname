@@ -1,6 +1,9 @@
-use super::{ENS_GRACE_PERIOD_SECS, due_names, events};
-use bigname_adapters::schema_v2::seam::{
-    INTERPRETER_STATE_KEY, SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY,
+use std::ops::ControlFlow;
+
+use super::{CHUNK_EVENTS, ENS_GRACE_PERIOD_SECS, due_names, events, stream_events};
+use bigname_adapters::schema_v2::{
+    PriorEventInput,
+    seam::{INTERPRETER_STATE_KEY, SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY},
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
@@ -60,6 +63,53 @@ fn identities(events: &[bigname_adapters::schema_v2::PriorEventInput]) -> Vec<&s
         .iter()
         .map(|event| event.after_state["fixture_identity"].as_str().unwrap())
         .collect()
+}
+
+/// The stream hands over full chunks of `CHUNK_EVENTS` events and then the rest, in restore
+/// order across the chunk edge. Later blocks are inserted first, so id order alone would be
+/// wrong.
+#[tokio::test]
+async fn stream_chunks_end_exactly_at_the_chunk_size() -> Result {
+    for (winners, sizes) in [
+        (CHUNK_EVENTS, vec![CHUNK_EVENTS]),
+        (CHUNK_EVENTS + 1, vec![CHUNK_EVENTS, 1]),
+    ] {
+        let db = database().await?;
+        let later = winners / 2;
+        for n in 0..winners {
+            let block = if n < later { 2 } else { 1 };
+            seed(
+                db.pool(),
+                &format!("wide-{n}"),
+                Some("ens:a"),
+                None,
+                block,
+                Some(0),
+                key(&format!("key-{n}")),
+                json!({}),
+            )
+            .await?;
+        }
+        let mut connection = db.pool().acquire().await?;
+        let mut chunks = Vec::new();
+        let keep = |chunk: Vec<PriorEventInput>| {
+            chunks.push(chunk);
+            ControlFlow::Continue(())
+        };
+        let names = ["ens:a".to_owned()];
+        let read = stream_events(&mut connection, CHAIN, 5, &names, &[], &[], keep).await?;
+        assert_eq!(read, winners);
+        assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), sizes);
+        let streamed: Vec<_> = chunks.into_iter().flatten().collect();
+        let expected: Vec<_> = (later..winners)
+            .chain(0..later)
+            .map(|n| format!("wide-{n}"))
+            .collect();
+        assert_eq!(identities(&streamed), expected);
+        drop(connection);
+        db.cleanup().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -225,10 +275,7 @@ async fn keys_seen_only_on_orphaned_blocks_restore_nothing() -> Result {
         &[resource],
         &[format!("0xreg:{token}")],
     )
-    .await?
-    .into_iter()
-    .map(|ordered| ordered.event)
-    .collect::<Vec<_>>();
+    .await?;
     assert_eq!(
         identities(&selected),
         [
@@ -267,11 +314,8 @@ async fn an_ensv2_key_seen_only_under_an_orphaned_alias_restores_nothing() -> Re
     let mut connection = db.pool().acquire().await?;
     let routed = |labelhash: &str| format!("0xreg:{}00000000", &labelhash[..58]);
     for (request, expected) in [(routed(&alpha), vec!["alpha"]), (routed(&beta), vec![])] {
-        let selected = super::ordered_events(&mut connection, CHAIN, 5, &[], &[], &[request])
-            .await?
-            .into_iter()
-            .map(|ordered| ordered.event)
-            .collect::<Vec<_>>();
+        let selected =
+            super::ordered_events(&mut connection, CHAIN, 5, &[], &[], &[request]).await?;
         assert_eq!(identities(&selected), expected);
     }
     drop(connection);

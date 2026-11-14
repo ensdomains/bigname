@@ -1,18 +1,21 @@
 //! Per-batch ENSv1, ENSv2 and Basenames Base state loading: restore only the history of the
 //! names, resources and [ENSv2 state keys](../../../../docs/glossary.md#ensv2-state-key) the
 //! batch touches. Canonical history remains the sole durable state.
-use std::collections::{BTreeMap, BTreeSet};
+use std::{collections::BTreeSet, ops::ControlFlow};
 
 use bigname_adapters::schema_v2::{
     BatchInput, ManifestInput, PriorEventInput, StateCacheCapacity, UnloadedKeys,
     V1BatchDependencies, V1NodeRequest, begin_schema_v2_adapter_restore_with_provenance,
-    collect_v1_batch_dependencies, prepare_schema_v2_batch_lookahead,
-    restore_schema_v2_lookahead_session, v1_lookahead_supports_family, v2_key, v2_key_loaded,
+    collect_v1_batch_dependencies, prepare_schema_v2_batch_lookahead, v1_lookahead_supports_family,
+    v2_key_loaded,
 };
 use sqlx::{PgPool, types::Uuid};
 
 use super::{LoadedBatch, cache, lookahead_query, manifests, migration, resume};
 use crate::{FullStateReason, InterpretError, Result, StateLoader};
+
+#[path = "lookahead_restore.rs"]
+mod restore_pass;
 
 /// Either the batch restored by lookahead, or the reason this chain needs the full-state loader.
 pub(crate) enum Attempt {
@@ -136,7 +139,7 @@ pub(crate) async fn batch_input(
     // Shared by every attempt: a retry reads only the keys it adds and what they link to.
     let mut fetched = Fetched::default();
     let (prepared, restored_event_count, whole_registries) = loop {
-        let prior = load_closure(
+        load_closure(
             &mut tx,
             chain_id,
             from_block,
@@ -144,17 +147,6 @@ pub(crate) async fn batch_input(
             &mut fetched,
         )
         .await?;
-        let restored_event_count = prior.len();
-        #[cfg(test)]
-        let restored_kinds: Vec<String> =
-            prior.iter().map(|event| event.event_kind.clone()).collect();
-        let whole_registries = whole_registry_loads(&prior, &dependencies);
-        #[cfg(test)]
-        CLOSURES.with_borrow_mut(|closure| {
-            if let Some(closure) = closure {
-                closure.attempts.push((prior.clone(), dependencies.clone()));
-            }
-        });
         let restore = begin_schema_v2_adapter_restore_with_provenance(
             chain_id.to_owned(),
             input.manifests.clone(),
@@ -172,14 +164,17 @@ pub(crate) async fn batch_input(
         // derive, so the attempts end. A key read under another spelling than the loaded one
         // fails only when that spelling is loaded too; otherwise it loads no history, so the
         // state maps' keys must match the `state_scope` events are filed under.
-        let attempt = restore_schema_v2_lookahead_session(
+        let restored = restore_pass::restore_closure(
+            &mut tx,
+            chain_id,
+            from_block,
+            &dependencies,
             restore,
-            prior,
             predecessor,
             latest_v2_topology,
-            &dependencies,
         )
-        .and_then(|session| {
+        .await?;
+        let attempt = restored.session.and_then(|session| {
             prepare_schema_v2_batch_lookahead(
                 input.clone(),
                 provenance.clone(),
@@ -192,9 +187,9 @@ pub(crate) async fn batch_input(
             Ok(prepared) => {
                 #[cfg(test)]
                 LOADED_BATCHES.with_borrow_mut(|batches| {
-                    batches.insert(from_block, (dependencies.v2_keys.clone(), restored_kinds))
+                    batches.insert(from_block, (dependencies.v2_keys.clone(), restored.kinds))
                 });
-                break (prepared, restored_event_count, whole_registries);
+                break (prepared, restored.events, restored.whole_registries);
             }
             Err(error) => match error.downcast_ref::<UnloadedKeys>() {
                 Some(unloaded)
@@ -256,13 +251,12 @@ pub(crate) async fn batch_input(
 }
 
 /// What the batch's closure has already read in its snapshot: the names, resources and ENSv2
-/// state keys queried, and the events those queries returned, keyed by restore order.
+/// state keys queried.
 #[derive(Default)]
 struct Fetched {
     names: BTreeSet<V1NodeRequest>,
     resources: BTreeSet<Uuid>,
     v2_keys: BTreeSet<String>,
-    events: BTreeMap<(i64, i64), PriorEventInput>,
 }
 
 /// Load the events of the requested names, resources and ENSv2 state keys, add the ones those
@@ -272,18 +266,20 @@ struct Fetched {
 /// that history is finite and fixed inside this snapshot, and nothing is ever removed, so the
 /// set stops growing after finitely many rounds. A subname many labels deep costs one round
 /// per label, because each stored `NewOwner` links a name to its parent, and each stored ENSv2
-/// `ParentChanged` a registry to its parent token. Returns the loaded events in restore order.
+/// `ParentChanged` a registry to its parent token.
 ///
-/// Each round queries only what `fetched` has not: every query side is a union over its
-/// requested elements and the latest event of a state key does not depend on the request, so
-/// in one snapshot the rounds' rows together are what one query over the final set returns.
+/// Each round queries only what `fetched` has not, and reads the events only for their links,
+/// a chunk at a time. The restore reads the final set's events again in one query
+/// (`restore_closure`): every query side is a union over its requested elements and the latest
+/// event of a state key does not depend on the request, so in one snapshot the rounds' rows
+/// together are what that query returns.
 async fn load_closure(
     connection: &mut sqlx::PgConnection,
     chain_id: &str,
     from_block: i64,
     dependencies: &mut V1BatchDependencies,
     fetched: &mut Fetched,
-) -> Result<Vec<PriorEventInput>> {
+) -> Result<()> {
     loop {
         validate_dependencies(dependencies)?;
         let nodes: Vec<_> = dependencies
@@ -302,12 +298,9 @@ async fn load_closure(
             .cloned()
             .collect();
         if nodes.is_empty() && resources.is_empty() && v2_keys.is_empty() {
-            return Ok(fetched.events.values().cloned().collect());
+            return Ok(());
         }
-        let names: Vec<_> = nodes
-            .iter()
-            .map(|request| format!("{}:{}", request.namespace, request.node))
-            .collect();
+        let names: Vec<_> = nodes.iter().map(name_key).collect();
         #[cfg(test)]
         CLOSURES.with_borrow_mut(|closure| {
             if let Some(closure) = closure {
@@ -316,26 +309,31 @@ async fn load_closure(
                     .push((names.clone(), resources.clone(), v2_keys.clone()));
             }
         });
-        let events = lookahead_query::ordered_events(
-            connection, chain_id, from_block, &names, &resources, &v2_keys,
+        let mut linked = Ok(());
+        let follow = |chunk: Vec<PriorEventInput>| {
+            #[cfg(test)]
+            note_resident(chunk.len());
+            linked = dependencies.include_prior_events(&chunk);
+            if linked.is_ok() {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            }
+        };
+        lookahead_query::stream_events(
+            connection, chain_id, from_block, &names, &resources, &v2_keys, follow,
         )
         .await?;
+        linked.map_err(|error| invalid_dependencies("expand prior links", error))?;
         fetched.names.extend(nodes);
         fetched.resources.extend(resources);
         fetched.v2_keys.extend(v2_keys);
-        let new: Vec<_> = events
-            .into_iter()
-            .filter(|ordered| !fetched.events.contains_key(&ordered.order))
-            .collect();
-        dependencies
-            .include_prior_events(new.iter().map(|ordered| &ordered.event))
-            .map_err(|error| invalid_dependencies("expand prior links", error))?;
         dependencies.include_registry_only_resources(chain_id);
-        fetched.events.extend(
-            new.into_iter()
-                .map(|ordered| (ordered.order, ordered.event)),
-        );
     }
+}
+
+fn name_key(request: &V1NodeRequest) -> String {
+    format!("{}:{}", request.namespace, request.node)
 }
 
 /// The first manifest, in the loader's stable order, whose source family lookahead does not
@@ -408,52 +406,6 @@ async fn retained_family_reason(
     }))
 }
 
-/// For each whole registry the batch read, its tokens, its restored events and the bytes of
-/// those events' state, in one pass over the restored events.
-fn whole_registry_loads(
-    prior: &[PriorEventInput],
-    dependencies: &V1BatchDependencies,
-) -> Vec<(String, usize, usize, usize)> {
-    let mut whole = dependencies
-        .v2_keys
-        .iter()
-        .filter_map(|key| key.strip_suffix(":*"))
-        .map(|registry| {
-            (
-                registry.to_ascii_lowercase(),
-                (std::collections::BTreeSet::new(), 0, 0),
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    if whole.is_empty() {
-        return Vec::new();
-    }
-    for event in prior {
-        // `<registry>:-:<token or resource id>:-:<source event>`, as `lookahead/v2_keys.sql`
-        // reads it. A token's ids share one key, so the key counts the token.
-        let mut scope = event.state_scope.as_deref().unwrap_or_default().split(':');
-        let Some((emitter, (tokens, events, bytes))) = scope.next().and_then(|emitter| {
-            whole
-                .get_mut(&emitter.to_ascii_lowercase())
-                .map(|loads| (emitter, loads))
-        }) else {
-            continue;
-        };
-        *events += 1;
-        *bytes += event.after_state.to_string().len();
-        tokens.extend(
-            scope
-                .nth(1)
-                .filter(|token| !matches!(*token, "" | "-"))
-                .map(|token| v2_key(emitter, token)),
-        );
-    }
-    whole
-        .into_iter()
-        .map(|(registry, (tokens, events, bytes))| (registry, tokens.len(), events, bytes))
-        .collect()
-}
-
 fn validate_dependencies(dependencies: &V1BatchDependencies) -> Result<()> {
     if !dependencies.unsupported.is_empty() {
         // The loader was chosen because every manifest family is covered, and the prior-event
@@ -488,6 +440,15 @@ thread_local! {
     /// stays `None` otherwise, so no other test's timing or memory includes the recording.
     pub(super) static CLOSURES: std::cell::RefCell<Option<Closure>> =
         const { std::cell::RefCell::new(None) };
+    /// The most decoded prior events `batch_input` held at once on this thread, counting every
+    /// copy kept beside them.
+    pub(super) static MAX_RESIDENT_EVENTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_resident(events: usize) {
+    MAX_RESIDENT_EVENTS.set(MAX_RESIDENT_EVENTS.get().max(events));
 }
 
 #[cfg(test)]
@@ -497,6 +458,8 @@ pub(super) struct Closure {
     pub(super) requests: Vec<(Vec<String>, Vec<Uuid>, Vec<String>)>,
     /// Each attempt's restore input and the dependencies it was loaded for.
     pub(super) attempts: Vec<(Vec<PriorEventInput>, V1BatchDependencies)>,
+    /// The names, resources and ENSv2 state keys of the query each attempt restored from.
+    pub(super) final_passes: Vec<(Vec<String>, Vec<Uuid>, Vec<String>)>,
 }
 
 #[cfg(test)]
