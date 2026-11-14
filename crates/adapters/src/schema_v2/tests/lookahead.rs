@@ -1064,3 +1064,99 @@ fn covered_families_outside_the_name_families_refuse_registrar_events() {
     }
     assert!(!v1_lookahead_supports_family("dns_l1"));
 }
+
+/// Interpret restores in chunks and settles time-derived state once, after the last chunk, as
+/// one call over every event does. A retirement restored in one chunk, then an expiry in a later
+/// chunk that had lapsed at its own block but not at the previous chunk's latest ENSv2
+/// timestamp, keeps the retirement. A settle after every chunk reads that expiry as live at the
+/// earlier timestamp and clears it.
+#[test]
+fn chunked_restore_keeps_a_retirement_a_later_lapsed_expiry_leaves() -> anyhow::Result<()> {
+    const REGISTRY: &str = "0x00000000000000000000000000000000000000b2";
+    let at = |seconds: i64| OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(seconds);
+    let event = |kind: &str, seconds: i64, after_state: Value| PriorEventInput {
+        retained_state_key: format!("state:{kind}"),
+        chain_id: CHAIN.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: kind.to_owned(),
+        source_family: "ens_v2_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        emitting_address: None,
+        state_scope: Some(format!("{REGISTRY}:-:0x01:-:{kind}")),
+        block_timestamp: Some(at(seconds)),
+        write_position: None,
+        after_state,
+    };
+    // Registered at 50 until 100 and retired at 150 at its own expiry. The expiry of 200,
+    // written at 300, has lapsed at its own block but is live at 150.
+    let prior = vec![
+        event(
+            "RegistrationGranted",
+            50,
+            json!({
+                "source_event": "LabelRegistered",
+                "token_id": "0x01",
+                "label": "alpha",
+                "expiry": 100,
+            }),
+        ),
+        event(
+            "RegistrationReleased",
+            150,
+            json!({
+                "source_event": "RegistryPathExpired",
+                "derived_from": "interpreter_state",
+                "terminal_reason": "registry_name_binding_expired",
+                "token_id": "0x01",
+                "expiry": 100,
+            }),
+        ),
+        event(
+            "ExpiryChanged",
+            300,
+            json!({"source_event": "ExpiryUpdated", "token_id": "0x01", "expiry": 200}),
+        ),
+    ];
+    let (predecessor, latest_v2) = (Some(at(400)), Some(at(300)));
+    let loaded = V1BatchDependencies {
+        v2_keys: BTreeSet::from([v2_registry_key(REGISTRY)]),
+        v2_due_window: Some((i64::MIN, i64::MAX)),
+        ..V1BatchDependencies::default()
+    };
+    let begin = || {
+        begin_schema_v2_adapter_restore(
+            CHAIN.to_owned(),
+            vec![registrar_manifest()],
+            vec![],
+            vec![],
+            StateCacheCapacity::Unlimited,
+        )
+    };
+    let mut whole = begin()?;
+    whole.apply_prior_events(prior.clone())?;
+    whole.include_v2_topology_timestamp(latest_v2);
+    let whole = whole.finish(predecessor);
+    assert_eq!(
+        whole.v2_expiry_retirement(REGISTRY, "0x01"),
+        Some((true, true)),
+        "one call keeps the retirement"
+    );
+    let mut chunked = LookaheadRestore::new(begin()?);
+    for row in prior {
+        chunked.apply(vec![row], &loaded)?;
+    }
+    let chunked = chunked.finish(predecessor, latest_v2, &loaded)?;
+    assert_eq!(
+        chunked.v2_expiry_retirement(REGISTRY, "0x01"),
+        Some((true, true)),
+        "a restore in chunks keeps the retirement"
+    );
+    assert!(
+        chunked == whole,
+        "a restore in chunks leaves another session than one call"
+    );
+    Ok(())
+}
