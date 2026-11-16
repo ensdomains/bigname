@@ -144,7 +144,7 @@ async fn source_resources(
         .collect();
     let mut opened = open_block(&pool, 10).await?;
     bind_log::start();
-    let found = prepare::dependent_resources(&mut opened.transaction, CHAIN, sources.into())
+    let found = prepare::dependent_resources(&mut opened.transaction, CHAIN, sources)
         .await?
         .into_iter()
         .collect();
