@@ -84,6 +84,8 @@ impl RowSet {
         if wanted.is_empty() {
             return Ok(());
         }
+        #[cfg(test)]
+        super::bind_log::record("families.store.load", &wanted);
         let columns = table.key.join(", ");
         let rows: Vec<Value> = sqlx::query_scalar(&format!(
             "/* project:families.store.load_{name} */ SELECT to_jsonb(family_row)
@@ -366,6 +368,8 @@ pub(crate) async fn replace(
     let columns = table.key.join(", ");
     let mut touched = 0;
     if !keys.is_empty() {
+        #[cfg(test)]
+        super::bind_log::record("families.store.delete", &keys);
         touched += sqlx::query(&format!(
             "/* project:families.store.delete_{name} */ DELETE FROM {name}
              WHERE ({columns}) IN (
@@ -382,6 +386,8 @@ pub(crate) async fn replace(
         .rows_affected();
     }
     if !rows.is_empty() {
+        #[cfg(test)]
+        super::bind_log::record("families.store.insert", &rows);
         let inserted = sqlx::query(&format!(
             "/* project:families.store.insert_{name} */ INSERT INTO {name}
              SELECT * FROM jsonb_populate_recordset(NULL::{name}, $1)",

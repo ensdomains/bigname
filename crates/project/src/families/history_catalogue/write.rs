@@ -50,6 +50,8 @@ pub(in crate::families) async fn replace(
     }
     // Membership and its final source envelope can change the same anchor within one
     // publication. Keep the image from before the first change, never the intermediate row.
+    #[cfg(test)]
+    super::super::bind_log::record("history.insert_journal", &journal);
     let count = sqlx::query(
         "/* project:history.insert_journal */ INSERT INTO project_family_undo
            (chain_id,block_number,block_hash,family,key,before_image)

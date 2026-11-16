@@ -445,6 +445,8 @@ pub(crate) async fn insert_journal(
     if !block.journal {
         return Ok(0);
     }
+    #[cfg(test)]
+    super::bind_log::record("families.block.insert_journal", &journal);
     Ok(sqlx::query(
         "/* project:families.block.insert_journal */ INSERT INTO project_family_undo (
              chain_id, block_number, block_hash, family, key, before_image

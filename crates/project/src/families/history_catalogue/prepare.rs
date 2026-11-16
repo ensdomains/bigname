@@ -126,6 +126,11 @@ pub(super) async fn dependent_resources(
     chain: &str,
     sources: Value,
 ) -> Result<Vec<Uuid>> {
+    #[cfg(test)]
+    super::super::bind_log::record(
+        "history.source_resources",
+        sources.as_array().map(Vec::as_slice).unwrap_or_default(),
+    );
     sqlx::query_scalar(
         "/* project:history.source_resources */
         SELECT DISTINCT edge.resource_id FROM jsonb_to_recordset($2)

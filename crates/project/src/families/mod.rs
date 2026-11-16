@@ -558,6 +558,12 @@ async fn current_marker(pool: &PgPool, chain_id: &str) -> (Option<Marker>, bool)
 }
 
 #[cfg(test)]
+#[path = "bind_log.rs"]
+mod bind_log;
+#[cfg(test)]
+#[path = "bind_tests.rs"]
+mod bind_tests;
+#[cfg(test)]
 #[path = "guard_tests.rs"]
 mod guard_tests;
 #[cfg(test)]

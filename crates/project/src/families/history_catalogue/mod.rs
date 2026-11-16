@@ -127,3 +127,7 @@ pub(crate) async fn restored(
     .map_err(|e| ProjectError::database("failed to re-stamp restored history catalogue", e))?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "bind_tests.rs"]
+mod bind_tests;
