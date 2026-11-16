@@ -82,9 +82,7 @@ pub(in crate::schema_v2) fn loaded_set_builds() -> usize {
     LOADED_SET_BUILDS.get()
 }
 struct Coverage {
-    names: BTreeSet<String>,
-    v2_keys: BTreeSet<String>,
-    v2_due_window: Option<(i64, i64)>,
+    loaded: LoadedSets,
     restoring: bool,
     missing_names: BTreeSet<String>,
     missing_v2_keys: BTreeSet<String>,
@@ -97,16 +95,20 @@ impl Drop for Clear {
     }
 }
 
-pub(super) fn checked<T>(
-    loaded: &V1BatchDependencies,
-    restoring: bool,
-    operation: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    #[cfg(test)]
-    LOADED_SET_BUILDS.set(LOADED_SET_BUILDS.get() + 1);
-    COVERAGE.with_borrow_mut(|scope| {
-        anyhow::ensure!(scope.is_none(), "nested lookahead preparation");
-        *scope = Some(Coverage {
+/// The names, ENSv2 state keys and due window a check compares reads against: `loaded` as
+/// the check reads it. A restore in chunks builds it once and lends it to every check.
+#[derive(Default)]
+pub(super) struct LoadedSets {
+    names: BTreeSet<String>,
+    v2_keys: BTreeSet<String>,
+    v2_due_window: Option<(i64, i64)>,
+}
+
+impl LoadedSets {
+    pub(super) fn new(loaded: &V1BatchDependencies) -> Self {
+        #[cfg(test)]
+        LOADED_SET_BUILDS.set(LOADED_SET_BUILDS.get() + 1);
+        Self {
             names: loaded
                 .nodes
                 .iter()
@@ -114,6 +116,29 @@ pub(super) fn checked<T>(
                 .collect(),
             v2_keys: loaded.v2_keys.clone(),
             v2_due_window: loaded.v2_due_window,
+        }
+    }
+}
+
+pub(super) fn checked<T>(
+    loaded: &V1BatchDependencies,
+    restoring: bool,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    checked_with(&mut LoadedSets::new(loaded), restoring, operation)
+}
+
+/// `checked` against sets built once: they move into the scope and back out, so a check
+/// copies none of them.
+pub(super) fn checked_with<T>(
+    loaded: &mut LoadedSets,
+    restoring: bool,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    COVERAGE.with_borrow_mut(|scope| {
+        anyhow::ensure!(scope.is_none(), "nested lookahead preparation");
+        *scope = Some(Coverage {
+            loaded: std::mem::take(loaded),
             restoring,
             missing_names: BTreeSet::new(),
             missing_v2_keys: BTreeSet::new(),
@@ -125,6 +150,7 @@ pub(super) fn checked<T>(
     let result = operation();
     let (missing_names, v2_keys, uncovered_window) = COVERAGE.with_borrow_mut(|scope| {
         let scope = scope.as_mut().unwrap();
+        *loaded = std::mem::take(&mut scope.loaded);
         (
             std::mem::take(&mut scope.missing_names),
             std::mem::take(&mut scope.missing_v2_keys),
@@ -201,7 +227,7 @@ pub(in crate::schema_v2) fn observe_name(logical_name_id: &str) {
 pub(in crate::schema_v2) fn observe_node(key: &str) {
     COVERAGE.with_borrow_mut(|scope| {
         if let Some(scope) = scope
-            && !scope.names.contains(key)
+            && !scope.loaded.names.contains(key)
         {
             scope.missing_names.insert(key.to_owned());
         }
@@ -226,8 +252,8 @@ pub(in crate::schema_v2) fn observe_v2_registry(address: &str) {
 fn observe_v2_key(key: String, address: &str) {
     COVERAGE.with_borrow_mut(|scope| {
         if let Some(scope) = scope
-            && !scope.v2_keys.contains(&key)
-            && !scope.v2_keys.contains(&v2_registry_key(address))
+            && !scope.loaded.v2_keys.contains(&key)
+            && !scope.loaded.v2_keys.contains(&v2_registry_key(address))
         {
             scope.missing_v2_keys.insert(key);
         }
@@ -239,6 +265,7 @@ pub(in crate::schema_v2) fn observe_v2_expiry_window(previous: i64, current: i64
     COVERAGE.with_borrow_mut(|scope| {
         let Some(scope) = scope else { return };
         let covered = scope
+            .loaded
             .v2_due_window
             .is_some_and(|(start, end)| current <= start || (previous >= start && current <= end));
         if !covered {

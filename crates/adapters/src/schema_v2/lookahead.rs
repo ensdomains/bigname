@@ -388,9 +388,9 @@ pub fn restore_schema_v2_lookahead_session(
     latest_v2_topology: Option<time::OffsetDateTime>,
     loaded: &V1BatchDependencies,
 ) -> anyhow::Result<AdapterSession> {
-    let mut restore = LookaheadRestore::new(restore);
-    restore.apply(prior_events, loaded)?;
-    restore.finish(resume_predecessor_timestamp, latest_v2_topology, loaded)
+    let mut restore = LookaheadRestore::new(restore, loaded);
+    restore.apply(prior_events)?;
+    restore.finish(resume_predecessor_timestamp, latest_v2_topology)
 }
 
 /// `restore_schema_v2_lookahead_session` with the prior events handed over in restore order
@@ -398,16 +398,21 @@ pub fn restore_schema_v2_lookahead_session(
 /// applied under the loaded-keys check. Time-derived state advances once, in `finish`, and
 /// the unloaded keys every step read are reported together there, so the session, or the
 /// error, is the one a single call over all the events gives.
+///
+/// Every check reads the loaded names and ENSv2 state keys `new` was given, built once. No
+/// later call takes another set, so one restore cannot be checked against two.
 pub struct LookaheadRestore {
     restore: AdapterSessionRestore,
+    loaded: coverage::LoadedSets,
     latest_v2_delta: Option<i64>,
     unloaded: Option<UnloadedKeys>,
 }
 
 impl LookaheadRestore {
-    pub fn new(restore: AdapterSessionRestore) -> Self {
+    pub fn new(restore: AdapterSessionRestore, loaded: &V1BatchDependencies) -> Self {
         Self {
             restore,
+            loaded: coverage::LoadedSets::new(loaded),
             latest_v2_delta: None,
             unloaded: None,
         }
@@ -415,14 +420,10 @@ impl LookaheadRestore {
 
     /// Apply the next prior events. An unloaded key is kept for `finish`, so only another
     /// error ends the restore here.
-    pub fn apply(
-        &mut self,
-        events: Vec<PriorEventInput>,
-        loaded: &V1BatchDependencies,
-    ) -> anyhow::Result<()> {
+    pub fn apply(&mut self, events: Vec<PriorEventInput>) -> anyhow::Result<()> {
         let restore = &mut self.restore;
         let mut latest = None;
-        let applied = coverage::checked(loaded, true, || {
+        let applied = coverage::checked_with(&mut self.loaded, true, || {
             latest = restore.apply_prior_event_rows(events)?;
             Ok(())
         });
@@ -439,14 +440,14 @@ impl LookaheadRestore {
         self,
         resume_predecessor_timestamp: Option<time::OffsetDateTime>,
         latest_v2_topology: Option<time::OffsetDateTime>,
-        loaded: &V1BatchDependencies,
     ) -> anyhow::Result<AdapterSession> {
         let Self {
             mut restore,
+            mut loaded,
             latest_v2_delta,
             unloaded,
         } = self;
-        let session = coverage::checked(loaded, true, || {
+        let session = coverage::checked_with(&mut loaded, true, || {
             restore.settle_prior_events(latest_v2_delta)?;
             restore.include_v2_topology_timestamp(latest_v2_topology);
             Ok(restore.finish(resume_predecessor_timestamp))

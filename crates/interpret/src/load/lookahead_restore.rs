@@ -49,7 +49,7 @@ pub(super) async fn restore_closure(
     });
     #[cfg(test)]
     let mut kinds = Vec::new();
-    let mut restore = LookaheadRestore::new(restore);
+    let mut restore = LookaheadRestore::new(restore, dependencies);
     let mut whole_registries = WholeRegistryLoads::new(dependencies);
     let mut failed = None;
     let apply = |chunk: Vec<PriorEventInput>| {
@@ -62,7 +62,7 @@ pub(super) async fn restore_closure(
                 recorded.extend(chunk.iter().cloned());
             }
         }
-        match restore.apply(chunk, dependencies) {
+        match restore.apply(chunk) {
             Ok(()) => ControlFlow::Continue(()),
             Err(error) => {
                 failed = Some(error);
@@ -82,7 +82,7 @@ pub(super) async fn restore_closure(
     });
     let session = match failed {
         Some(error) => Err(error),
-        None => restore.finish(predecessor, latest_v2_topology, dependencies),
+        None => restore.finish(predecessor, latest_v2_topology),
     };
     Ok(Restored {
         session,

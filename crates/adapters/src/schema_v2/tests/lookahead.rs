@@ -390,11 +390,11 @@ fn scoped_match(mut input: BatchInput) -> anyhow::Result<(AdapterSession, V1Batc
     assert_eq!(actual, expected, "complete scoped suffix output differs");
     // Interpret applies the restore in chunks. An edge after every event must leave the session
     // one call over every event leaves, and so the same output.
-    let mut chunked = LookaheadRestore::new(begin()?);
+    let mut chunked = LookaheadRestore::new(begin()?, &loaded);
     for event in restored.iter().cloned() {
-        chunked.apply(vec![event], &loaded)?;
+        chunked.apply(vec![event])?;
     }
-    let chunked = chunked.finish(predecessor, latest_v2, &loaded)?;
+    let chunked = chunked.finish(predecessor, latest_v2)?;
     let begun = begin()?;
     let whole =
         restore_schema_v2_lookahead_session(begun, restored, predecessor, latest_v2, &loaded)?;
@@ -1144,11 +1144,11 @@ fn chunked_restore_keeps_a_retirement_a_later_lapsed_expiry_leaves() -> anyhow::
         Some((true, true)),
         "one call keeps the retirement"
     );
-    let mut chunked = LookaheadRestore::new(begin()?);
+    let mut chunked = LookaheadRestore::new(begin()?, &loaded);
     for row in prior {
-        chunked.apply(vec![row], &loaded)?;
+        chunked.apply(vec![row])?;
     }
-    let chunked = chunked.finish(predecessor, latest_v2, &loaded)?;
+    let chunked = chunked.finish(predecessor, latest_v2)?;
     assert_eq!(
         chunked.v2_expiry_retirement(REGISTRY, "0x01"),
         Some((true, true)),
@@ -1170,17 +1170,18 @@ fn chunked_restore_builds_its_loaded_key_sets_once() -> anyhow::Result<()> {
         ..V1BatchDependencies::default()
     };
     let before = crate::schema_v2::lookahead::loaded_set_builds();
-    let mut restore = LookaheadRestore::new(begin_schema_v2_adapter_restore(
+    let restore = begin_schema_v2_adapter_restore(
         CHAIN.to_owned(),
         vec![registrar_manifest()],
         vec![],
         vec![],
         StateCacheCapacity::Unlimited,
-    )?);
+    )?;
+    let mut restore = LookaheadRestore::new(restore, &loaded);
     for _ in 0..4 {
-        restore.apply(Vec::new(), &loaded)?;
+        restore.apply(Vec::new())?;
     }
-    restore.finish(None, None, &loaded)?;
+    restore.finish(None, None)?;
     assert_eq!(
         crate::schema_v2::lookahead::loaded_set_builds() - before,
         1,
