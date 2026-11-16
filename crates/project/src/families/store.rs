@@ -14,7 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 use sqlx::{Postgres, Transaction};
 
-use super::tables::{self, TableSpec};
+use super::{
+    bind,
+    tables::{self, TableSpec},
+};
 use crate::{ProjectError, Result};
 
 pub(crate) type Row = Map<String, Value>;
@@ -84,29 +87,34 @@ impl RowSet {
         if wanted.is_empty() {
             return Ok(());
         }
-        #[cfg(test)]
-        super::bind_log::record("families.store.load", &wanted);
         let columns = table.key.join(", ");
-        let rows: Vec<Value> = sqlx::query_scalar(&format!(
+        let load = format!(
             "/* project:families.store.load_{name} */ SELECT to_jsonb(family_row)
              FROM {name} family_row
              WHERE ({columns}) IN (
                  SELECT {columns} FROM jsonb_populate_recordset(NULL::{name}, $1)
              )",
             name = table.name,
-        ))
-        .bind(Value::Array(wanted))
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database(format!("failed to load {} rows", table.name), error)
-        })?;
-        for row in rows {
-            let Value::Object(row) = row else { continue };
-            let slot = slots.entry(key_text(table, &row)).or_default();
-            slot.before = Some(row.clone());
-            slot.base = Some(row.clone());
-            slot.after = Some(row);
+        );
+        // Every piece reads on the block's transaction, which holds the chain's family marker
+        // (`marker::lock`), so no other publication of the chain commits between two pieces.
+        for chunk in bind::chunks(wanted) {
+            #[cfg(test)]
+            super::bind_log::record("families.store.load", &chunk);
+            let rows: Vec<Value> = sqlx::query_scalar(&load)
+                .bind(Value::Array(chunk))
+                .fetch_all(&mut **transaction)
+                .await
+                .map_err(|error| {
+                    ProjectError::database(format!("failed to load {} rows", table.name), error)
+                })?;
+            for row in rows {
+                let Value::Object(row) = row else { continue };
+                let slot = slots.entry(key_text(table, &row)).or_default();
+                slot.before = Some(row.clone());
+                slot.base = Some(row.clone());
+                slot.after = Some(row);
+            }
         }
         Ok(())
     }
@@ -358,7 +366,8 @@ pub(crate) fn key_object(table: &TableSpec, key: &str) -> Result<Row> {
 }
 
 /// Delete the rows at `keys` and insert `rows`, in one pass per table. Returns the number of
-/// rows written or removed.
+/// rows written or removed. Each list is bound in pieces (`bind.rs`), every delete before any
+/// insert, so a key's row is deleted and then inserted as when each list is bound whole.
 pub(crate) async fn replace(
     transaction: &mut Transaction<'_, Postgres>,
     table: &TableSpec,
@@ -366,41 +375,43 @@ pub(crate) async fn replace(
     rows: Vec<Value>,
 ) -> Result<u64> {
     let columns = table.key.join(", ");
-    let mut touched = 0;
-    if !keys.is_empty() {
+    let delete = format!(
+        "/* project:families.store.delete_{name} */ DELETE FROM {name}
+         WHERE ({columns}) IN (
+             SELECT {columns} FROM jsonb_populate_recordset(NULL::{name}, $1)
+         )",
+        name = table.name,
+    );
+    let mut deleted = 0;
+    for chunk in bind::chunks(keys) {
         #[cfg(test)]
-        super::bind_log::record("families.store.delete", &keys);
-        touched += sqlx::query(&format!(
-            "/* project:families.store.delete_{name} */ DELETE FROM {name}
-             WHERE ({columns}) IN (
-                 SELECT {columns} FROM jsonb_populate_recordset(NULL::{name}, $1)
-             )",
-            name = table.name,
-        ))
-        .bind(Value::Array(keys))
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database(format!("failed to delete {} rows", table.name), error)
-        })?
-        .rows_affected();
+        super::bind_log::record("families.store.delete", &chunk);
+        deleted += sqlx::query(&delete)
+            .bind(Value::Array(chunk))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database(format!("failed to delete {} rows", table.name), error)
+            })?
+            .rows_affected();
     }
-    if !rows.is_empty() {
+    let insert = format!(
+        "/* project:families.store.insert_{name} */ INSERT INTO {name}
+         SELECT * FROM jsonb_populate_recordset(NULL::{name}, $1)",
+        name = table.name,
+    );
+    let mut inserted = 0;
+    for chunk in bind::chunks(rows) {
         #[cfg(test)]
-        super::bind_log::record("families.store.insert", &rows);
-        let inserted = sqlx::query(&format!(
-            "/* project:families.store.insert_{name} */ INSERT INTO {name}
-             SELECT * FROM jsonb_populate_recordset(NULL::{name}, $1)",
-            name = table.name,
-        ))
-        .bind(Value::Array(rows))
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database(format!("failed to write {} rows", table.name), error)
-        })?
-        .rows_affected();
-        touched = touched.max(inserted);
+        super::bind_log::record("families.store.insert", &chunk);
+        inserted += sqlx::query(&insert)
+            .bind(Value::Array(chunk))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database(format!("failed to write {} rows", table.name), error)
+            })?
+            .rows_affected();
     }
-    Ok(touched)
+    Ok(deleted.max(inserted))
 }

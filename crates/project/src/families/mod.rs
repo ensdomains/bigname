@@ -2,6 +2,7 @@
 //! Rebuild and replay use the same reducers and undo journal as live follow. A failed block
 //! leaves the marker and every family at the preceding complete publication.
 mod addresses;
+mod bind;
 mod block;
 mod child_registrations;
 mod classification;

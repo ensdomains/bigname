@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
-use super::super::{input::BlockHeader, store, tables::TableSpec};
+use super::super::{bind, input::BlockHeader, store, tables::TableSpec};
 use crate::{ProjectError, Result};
 
 /// Diff rows already loaded on the locked chain transaction. The caller includes every row
@@ -50,25 +50,29 @@ pub(in crate::families) async fn replace(
     }
     // Membership and its final source envelope can change the same anchor within one
     // publication. Keep the image from before the first change, never the intermediate row.
-    #[cfg(test)]
-    super::super::bind_log::record("history.insert_journal", &journal);
-    let count = sqlx::query(
-        "/* project:history.insert_journal */ INSERT INTO project_family_undo
-           (chain_id,block_number,block_hash,family,key,before_image)
-         SELECT $1,$2,$3,entry.family,entry.key,NULLIF(entry.before_image,'null'::jsonb)
-         FROM jsonb_to_recordset($4) entry(family text,key text,before_image jsonb)
-         ON CONFLICT (chain_id,block_number,family,key) DO NOTHING",
-    )
-    .bind(chain)
-    .bind(block.number)
-    .bind(&block.hash)
-    .bind(Value::Array(journal))
-    .execute(&mut **transaction)
-    .await
-    .map_err(|e| {
-        ProjectError::database(format!("failed to journal {} before-images", table.name), e)
-    })?
-    .rows_affected();
+    // The keys are distinct (`all`), so binding the journal in pieces keeps the same images.
+    let mut count = 0;
+    for chunk in bind::chunks(journal) {
+        #[cfg(test)]
+        super::super::bind_log::record("history.insert_journal", &chunk);
+        count += sqlx::query(
+            "/* project:history.insert_journal */ INSERT INTO project_family_undo
+               (chain_id,block_number,block_hash,family,key,before_image)
+             SELECT $1,$2,$3,entry.family,entry.key,NULLIF(entry.before_image,'null'::jsonb)
+             FROM jsonb_to_recordset($4) entry(family text,key text,before_image jsonb)
+             ON CONFLICT (chain_id,block_number,family,key) DO NOTHING",
+        )
+        .bind(chain)
+        .bind(block.number)
+        .bind(&block.hash)
+        .bind(Value::Array(chunk))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|e| {
+            ProjectError::database(format!("failed to journal {} before-images", table.name), e)
+        })?
+        .rows_affected();
+    }
     let written = store::replace(transaction, table, keys, rows).await?;
     Ok((written, count))
 }

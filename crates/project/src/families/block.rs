@@ -10,13 +10,16 @@
 //! A rebuild generation applied before the rebuild's composition pass (driver/compose.rs), which
 //! the repair record says by its unset `composed_block`, writes the family rows only: it composes
 //! nothing and journals nothing, not even the prior marker.
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use super::{
-    FamilyOptions, hydrate, input,
+    FamilyOptions, bind, hydrate, input,
     input::Revision,
     keys, manifests,
     marker::{self, FamilyMarker, RecordedToken},
@@ -436,6 +439,10 @@ async fn write(
 /// Journal each family once. The resolution-path refresh revisits summary and lookup keys the
 /// ordinary refresh already wrote in this block. Preserve such a key's first before-image
 /// while keeping duplicate checks for other families.
+///
+/// The journal is bound in pieces (`bind.rs`), and a piece's `NOT EXISTS` sees the pieces before
+/// it. So a key repeated within one call is refused before any piece: bound whole, the repeat
+/// failed on the primary key, while in pieces the arm would skip it.
 pub(crate) async fn insert_journal(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -445,10 +452,44 @@ pub(crate) async fn insert_journal(
     if !block.journal {
         return Ok(0);
     }
-    #[cfg(test)]
-    super::bind_log::record("families.block.insert_journal", &journal);
-    Ok(sqlx::query(
-        "/* project:families.block.insert_journal */ INSERT INTO project_family_undo (
+    refuse_repeated_keys(block, &journal)?;
+    let mut journalled = 0;
+    for chunk in bind::chunks(journal) {
+        #[cfg(test)]
+        super::bind_log::record("families.block.insert_journal", &chunk);
+        journalled += sqlx::query(INSERT_JOURNAL)
+            .bind(chain_id)
+            .bind(block.number)
+            .bind(&block.hash)
+            .bind(Value::Array(chunk))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to journal family before-images", error)
+            })?
+            .rows_affected();
+    }
+    Ok(journalled)
+}
+
+fn refuse_repeated_keys(block: &input::BlockHeader, journal: &[Value]) -> Result<()> {
+    let mut keys = BTreeSet::new();
+    for entry in journal {
+        let (family, key) = (entry["family"].as_str(), entry["key"].as_str());
+        if !keys.insert((family, key)) {
+            return Err(ProjectError::data_integrity(format!(
+                "the family journal of block {} repeats {} key {}",
+                block.number,
+                family.unwrap_or_default(),
+                key.unwrap_or_default()
+            )));
+        }
+    }
+    Ok(())
+}
+
+const INSERT_JOURNAL: &str =
+    "/* project:families.block.insert_journal */ INSERT INTO project_family_undo (
              chain_id, block_number, block_hash, family, key, before_image
          )
          SELECT $1, $2, $3, entry.family, entry.key, NULLIF(entry.before_image, 'null'::jsonb)
@@ -458,17 +499,7 @@ pub(crate) async fn insert_journal(
              'project_lookup_dependency') OR NOT EXISTS (
              SELECT 1 FROM project_family_undo prior
              WHERE prior.chain_id=$1 AND prior.block_number=$2
-               AND prior.family=entry.family AND prior.key=entry.key)",
-    )
-    .bind(chain_id)
-    .bind(block.number)
-    .bind(&block.hash)
-    .bind(Value::Array(journal))
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to journal family before-images", error))?
-    .rows_affected())
-}
+               AND prior.family=entry.family AND prior.key=entry.key)";
 
 /// The prior marker, journalled on every block including an empty one.
 async fn journal_marker(

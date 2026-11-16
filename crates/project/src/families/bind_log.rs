@@ -44,3 +44,7 @@ pub(super) fn take() -> Vec<Bind> {
 pub(super) fn set_budget(bytes: Option<usize>) {
     BUDGET.set(bytes);
 }
+
+pub(super) fn budget() -> Option<usize> {
+    BUDGET.get()
+}

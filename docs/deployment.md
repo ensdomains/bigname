@@ -7284,3 +7284,21 @@ row, as block-by-block publication gives them.
   interrupted pass from going unnoticed.
 - The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
   Ingest redo.
+
+## Project binds a block's journal and rows in pieces
+
+The build that binds Project's journal, row keys and rows in pieces runs each such statement
+once per 16 MiB of JSON text, instead of once per block
+([publication and resumption](projections.md#publication-and-resumption)). A block with a very
+wide expiry window no longer fails on PostgreSQL's limit on one jsonb array. Every block stores
+the same family rows and journal as before, row for row.
+
+- The [projection content hash](glossary.md#projection-content-hash) rotates: the change is in
+  `crates/project/src`. The [interpreter content hash](glossary.md#interpreter-content-hash)
+  does not. The integration branch already rotates the projection hash, so this change adds no
+  redo beyond the full re-derivation that branch needs.
+- A journal call that names one family key twice now fails before any statement, as a
+  data-integrity error. No caller builds such a journal.
+- No schema-migration and no new setting.
+- The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
+  Ingest redo.

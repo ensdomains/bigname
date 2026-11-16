@@ -5,6 +5,7 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+use super::super::bind;
 use crate::{ProjectError, Result};
 
 #[derive(Default)]
@@ -121,27 +122,34 @@ SELECT DISTINCT name FROM (
     })
 }
 
+/// The resources whose edges name one of `sources`, the source rows a block changed, which are
+/// bound in pieces (`bind.rs`).
 pub(super) async fn dependent_resources(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
-    sources: Value,
-) -> Result<Vec<Uuid>> {
-    #[cfg(test)]
-    super::super::bind_log::record(
-        "history.source_resources",
-        sources.as_array().map(Vec::as_slice).unwrap_or_default(),
-    );
-    sqlx::query_scalar(
-        "/* project:history.source_resources */
-        SELECT DISTINCT edge.resource_id FROM jsonb_to_recordset($2)
-          source(source_kind smallint, source_key text, resolver_address text)
-        JOIN project_history_source_edge edge ON edge.chain_id=$1
-          AND edge.source_kind=source.source_kind AND edge.source_key=source.source_key
-          AND edge.source_resolver=source.resolver_address",
-    )
-    .bind(chain)
-    .bind(sources)
-    .fetch_all(&mut **transaction)
-    .await
-    .map_err(|e| ProjectError::database("failed to find history source resource envelopes", e))
+    sources: Vec<Value>,
+) -> Result<BTreeSet<Uuid>> {
+    let mut resources = BTreeSet::new();
+    for chunk in bind::chunks(sources) {
+        #[cfg(test)]
+        super::super::bind_log::record("history.source_resources", &chunk);
+        resources.extend(
+            sqlx::query_scalar::<_, Uuid>(
+                "/* project:history.source_resources */
+                SELECT DISTINCT edge.resource_id FROM jsonb_to_recordset($2)
+                  source(source_kind smallint, source_key text, resolver_address text)
+                JOIN project_history_source_edge edge ON edge.chain_id=$1
+                  AND edge.source_kind=source.source_kind AND edge.source_key=source.source_key
+                  AND edge.source_resolver=source.resolver_address",
+            )
+            .bind(chain)
+            .bind(Value::Array(chunk))
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|e| {
+                ProjectError::database("failed to find history source resource envelopes", e)
+            })?,
+        );
+    }
+    Ok(resources)
 }

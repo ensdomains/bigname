@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::{
-    FamilyOptions, bind_log, block,
+    FamilyOptions,
+    bind::{self, BIND_BYTES},
+    bind_log, block,
     guard_tests::{CHAIN, NO_INTERPRET, database},
     hydrate, marker,
     store::{self, Change, Row, RowSet},
@@ -561,13 +563,10 @@ fn rows_a_release_writes_carry_no_hydration_bind() {
     }
 }
 
-/// The bind budget in code.
-const BUDGET: usize = 16 * 1024 * 1024;
-
-/// A JSON array of copies of `element`, as long as fits `BUDGET` bytes.
+/// A JSON array of copies of `element`, as long as fits `BIND_BYTES` bytes.
 fn full_piece(element: &str) -> String {
-    let copies = (BUDGET - 1) / (element.len() + 1);
-    let mut text = String::with_capacity(BUDGET);
+    let copies = (BIND_BYTES - 1) / (element.len() + 1);
+    let mut text = String::with_capacity(BIND_BYTES);
     text.push('[');
     for copy in 0..copies {
         if copy > 0 {
@@ -576,13 +575,13 @@ fn full_piece(element: &str) -> String {
         text.push_str(element);
     }
     text.push(']');
-    assert!(text.len() <= BUDGET && text.len() + element.len() + 1 > BUDGET);
+    assert!(text.len() <= BIND_BYTES && text.len() + element.len() + 1 > BIND_BYTES);
     text
 }
 
 /// One-digit numbers under one-letter keys, and in an array, take the most stored jsonb bytes
-/// for their text. A full piece of each is accepted, under PostgreSQL's 268,435,455-byte limit
-/// on a jsonb array's elements.
+/// for their text. A full piece of each, sent as the JSON text a bound piece carries, is
+/// accepted, under PostgreSQL's 268,435,455-byte limit on a jsonb array's elements.
 #[tokio::test]
 async fn a_full_piece_of_the_densest_rows_is_accepted() -> Result<()> {
     let (database, pool) = database().await?;
@@ -602,4 +601,32 @@ async fn a_full_piece_of_the_densest_rows_is_accepted() -> Result<()> {
         );
     }
     database.cleanup().await
+}
+
+#[test]
+fn pieces_keep_every_value_in_order_and_take_all_that_fit() {
+    bind_log::set_budget(Some(1_000));
+    let mut values: Vec<Value> = (0..200)
+        .map(|i| json!({"i": i, "filler": "w".repeat((i * 37) % 300)}))
+        .collect();
+    values.insert(50, json!("v".repeat(1_500)));
+    let pieces: Vec<Vec<Value>> = bind::chunks(values.clone()).collect();
+    assert_eq!(pieces.concat(), values, "every value once, in order");
+    let text = |values: &[Value]| serde_json::to_vec(values).expect("JSON").len();
+    for piece in &pieces {
+        assert!(
+            text(piece.as_slice()) <= 1_000 || piece.len() == 1,
+            "{} bytes",
+            text(piece.as_slice())
+        );
+    }
+    for (piece, next) in pieces.iter().zip(&pieces[1..]) {
+        let longer = [piece.as_slice(), &next[..1]].concat();
+        assert!(
+            text(longer.as_slice()) > 1_000,
+            "a piece takes every value that fits"
+        );
+    }
+    assert_eq!(bind::chunks(Vec::new()).count(), 0, "no piece for no value");
+    bind_log::set_budget(None);
 }
