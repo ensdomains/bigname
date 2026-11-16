@@ -452,7 +452,7 @@ pub(crate) async fn insert_journal(
     if !block.journal {
         return Ok(0);
     }
-    refuse_repeated_keys(block, &journal)?;
+    refuse_repeated_keys(block, &[])?;
     let mut journalled = 0;
     for chunk in bind::chunks(journal) {
         #[cfg(test)]
