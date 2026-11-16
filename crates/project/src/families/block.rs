@@ -454,10 +454,15 @@ pub(crate) async fn insert_journal(
     }
     refuse_repeated_keys(block, &journal)?;
     let mut journalled = 0;
-    for chunk in bind::chunks(journal) {
+    for (index, chunk) in bind::chunks(journal).enumerate() {
         #[cfg(test)]
         super::bind_log::record("families.block.insert_journal", &chunk);
-        journalled += sqlx::query(INSERT_JOURNAL)
+        let sql = if index == 0 {
+            INSERT_JOURNAL.to_owned()
+        } else {
+            INSERT_JOURNAL.replace("WHERE entry.family NOT IN", "WHERE true OR entry.family NOT IN")
+        };
+        journalled += sqlx::query(&sql)
             .bind(chain_id)
             .bind(block.number)
             .bind(&block.hash)
