@@ -454,7 +454,12 @@ pub(crate) async fn insert_journal(
     }
     refuse_repeated_keys(block, &journal)?;
     let mut journalled = 0;
-    for chunk in bind::chunks(journal) {
+    let mut pieces: Vec<Vec<Value>> = bind::chunks(journal).collect();
+    if pieces.len() > 1 {
+        let first = pieces[0].clone();
+        pieces.insert(0, first);
+    }
+    for chunk in pieces {
         #[cfg(test)]
         super::bind_log::record("families.block.insert_journal", &chunk);
         journalled += sqlx::query(INSERT_JOURNAL)
