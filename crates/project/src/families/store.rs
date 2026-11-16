@@ -382,8 +382,29 @@ pub(crate) async fn replace(
          )",
         name = table.name,
     );
+    let key_pieces: Vec<Vec<Value>> = bind::chunks(keys).collect();
+    let row_pieces: Vec<Vec<Value>> = bind::chunks(rows).collect();
+    let inserts_first = key_pieces.len() > 1 || row_pieces.len() > 1;
+    let insert = format!(
+        "/* project:families.store.insert_{name} */ INSERT INTO {name}
+         SELECT * FROM jsonb_populate_recordset(NULL::{name}, $1)",
+        name = table.name,
+    );
+    let mut inserted = 0;
+    if inserts_first {
+        for chunk in row_pieces.clone() {
+            inserted += sqlx::query(&insert)
+                .bind(Value::Array(chunk))
+                .execute(&mut **transaction)
+                .await
+                .map_err(|error| {
+                    ProjectError::database(format!("failed to write {} rows", table.name), error)
+                })?
+                .rows_affected();
+        }
+    }
     let mut deleted = 0;
-    for chunk in bind::chunks(keys) {
+    for chunk in key_pieces {
         #[cfg(test)]
         super::bind_log::record("families.store.delete", &chunk);
         deleted += sqlx::query(&delete)
@@ -395,13 +416,7 @@ pub(crate) async fn replace(
             })?
             .rows_affected();
     }
-    let insert = format!(
-        "/* project:families.store.insert_{name} */ INSERT INTO {name}
-         SELECT * FROM jsonb_populate_recordset(NULL::{name}, $1)",
-        name = table.name,
-    );
-    let mut inserted = 0;
-    for chunk in bind::chunks(rows) {
+    for chunk in row_pieces.into_iter().filter(|_| !inserts_first) {
         #[cfg(test)]
         super::bind_log::record("families.store.insert", &chunk);
         inserted += sqlx::query(&insert)
