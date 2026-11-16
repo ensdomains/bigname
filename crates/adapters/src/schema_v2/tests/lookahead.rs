@@ -1160,3 +1160,31 @@ fn chunked_restore_keeps_a_retirement_a_later_lapsed_expiry_leaves() -> anyhow::
     );
     Ok(())
 }
+
+/// A restore in chunks builds the names and ENSv2 state keys its checks read once, not once
+/// per chunk: four chunks and the finish build them once.
+#[test]
+fn chunked_restore_builds_its_loaded_key_sets_once() -> anyhow::Result<()> {
+    let loaded = V1BatchDependencies {
+        v2_due_window: Some((i64::MIN, i64::MAX)),
+        ..V1BatchDependencies::default()
+    };
+    let before = crate::schema_v2::lookahead::loaded_set_builds();
+    let mut restore = LookaheadRestore::new(begin_schema_v2_adapter_restore(
+        CHAIN.to_owned(),
+        vec![registrar_manifest()],
+        vec![],
+        vec![],
+        StateCacheCapacity::Unlimited,
+    )?);
+    for _ in 0..4 {
+        restore.apply(Vec::new(), &loaded)?;
+    }
+    restore.finish(None, None, &loaded)?;
+    assert_eq!(
+        crate::schema_v2::lookahead::loaded_set_builds() - before,
+        1,
+        "the loaded names and ENSv2 state keys are built once per restore"
+    );
+    Ok(())
+}

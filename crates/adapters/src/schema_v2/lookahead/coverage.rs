@@ -72,6 +72,15 @@ use std::{cell::RefCell, collections::BTreeSet};
 thread_local! {
     static COVERAGE: RefCell<Option<Coverage>> = const { RefCell::new(None) };
 }
+#[cfg(test)]
+thread_local! {
+    /// How many times a check built its loaded names and ENSv2 state keys on this thread.
+    static LOADED_SET_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(in crate::schema_v2) fn loaded_set_builds() -> usize {
+    LOADED_SET_BUILDS.get()
+}
 struct Coverage {
     names: BTreeSet<String>,
     v2_keys: BTreeSet<String>,
@@ -93,6 +102,8 @@ pub(super) fn checked<T>(
     restoring: bool,
     operation: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
+    #[cfg(test)]
+    LOADED_SET_BUILDS.set(LOADED_SET_BUILDS.get() + 1);
     COVERAGE.with_borrow_mut(|scope| {
         anyhow::ensure!(scope.is_none(), "nested lookahead preparation");
         *scope = Some(Coverage {

@@ -477,6 +477,8 @@ pub fn v2_key_loaded(loaded: &V1BatchDependencies, key: &str) -> bool {
             .is_some_and(|(address, _)| loaded.v2_keys.contains(&v2_registry_key(address)))
 }
 
+#[cfg(test)]
+pub(super) use coverage::loaded_set_builds;
 pub use coverage::{UnloadedKeys, v2_key, v2_registry_key};
 pub(super) use coverage::{
     observe_name, observe_node, observe_v2, observe_v2_expiry_window, observe_v2_registry,
