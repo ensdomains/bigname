@@ -2804,6 +2804,13 @@ manifest input and are selected at each block; the marker records that set.
 
 The transaction journals each changed row's before-image and the prior marker,
 writes the changed keys and derived state, and advances the marker sequence.
+
+A statement that carries a block's journal entries, row keys or rows binds them
+as JSON arrays of at most 16 MiB of text each, and runs once per array, in
+order, on the block's transaction. PostgreSQL refuses one jsonb array whose
+elements take more than 268,435,455 bytes once stored, which a block with a
+very wide expiry window would otherwise pass. A journal call that names one
+family key twice is refused before its first statement.
 Conflicting duplicate deliveries of one event identity keep the first in
 canonical order and increment the anomaly metric. The normalized input table
 already enforces unique event identities.
