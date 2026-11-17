@@ -5768,3 +5768,19 @@ gives the recovery steps. Then run the schema-migrations again.
 The index is advisory. The phase runner never builds it, and no walk drops it. The API starts
 and serves without it, with a WARN at startup when it is not in place, and the page then reads
 every grant of the holder.
+
+## A handler panic answers 500, and a request timeout logs a WARN
+
+The build that adds a catch-panic layer to the API changes what a client and an operator see
+when a request fails inside the API.
+
+- A panic in a request handler answers `500 internal_error` with `details.request_id`, and
+  logs one ERROR line with the same id and the panic text. Before this build the connection
+  dropped with no response and no log line, so the proxy in front answered its own `502`.
+- A request that reaches `BIGNAME_API_REQUEST_TIMEOUT_MS` still answers `408 request_timeout`.
+  It now also logs one WARN line with the matched route template, or `unmatched`, and the
+  configured deadline as `timeout_ms`.
+- Neither content hash rotates. `apps/api` is an input of neither. No redo is needed.
+- It adds no schema-migration, table, manifest or setting. The manifest-authority fingerprint
+  and the compiled watch plan are unchanged, so stamp no Ingest redo.
+- The change ships as an image swap.

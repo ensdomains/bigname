@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    any::Any,
+    collections::{BTreeMap, HashMap},
     net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex,
@@ -10,9 +11,9 @@ use std::{
 
 use anyhow::{Result, ensure};
 use axum::{
-    BoxError, Router,
+    BoxError, Json, Router,
     error_handling::HandleErrorLayer,
-    extract::{ConnectInfo, Request, State},
+    extract::{ConnectInfo, MatchedPath, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -23,8 +24,12 @@ use tower::{
     ServiceBuilder, limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer,
     timeout::TimeoutLayer,
 };
+use tower_http::catch_panic::CatchPanicLayer;
 
-use crate::ApiError;
+use crate::{
+    ApiError,
+    errors::{ErrorBody, ErrorResponse},
+};
 
 #[path = "bounds/classification.rs"]
 mod classification;
@@ -197,8 +202,13 @@ where
         .layer(GlobalConcurrencyLimitLayer::new(
             config.health_max_in_flight,
         ));
+    let timeout_ms = config.request_timeout_ms;
+    let on_timeout = move |route: Option<MatchedPath>, error: BoxError| {
+        handle_request_timeout(route, timeout_ms, error)
+    };
     let request_timeout = ServiceBuilder::new()
-        .layer(HandleErrorLayer::new(handle_global_bound_error))
+        .layer(CatchPanicLayer::custom(panic_response))
+        .layer(HandleErrorLayer::new(on_timeout))
         .layer(TimeoutLayer::new(config.request_timeout()));
 
     let bounded_router = bounded_router
@@ -216,14 +226,28 @@ where
         .layer(request_timeout)
 }
 
-async fn handle_global_bound_error(error: BoxError) -> Response {
+async fn handle_request_timeout(
+    route: Option<MatchedPath>,
+    timeout_ms: u64,
+    error: BoxError,
+) -> Response {
     if error.is::<tower::timeout::error::Elapsed>() {
+        tracing::warn!(
+            service = "api",
+            route = route.as_ref().map_or("unmatched", MatchedPath::as_str),
+            timeout_ms,
+            "request exceeded the configured time limit"
+        );
         return bound_error(
             StatusCode::REQUEST_TIMEOUT,
             "request_timeout",
             "request exceeded the configured time limit",
         );
     }
+    handle_global_bound_error(error).await
+}
+
+async fn handle_global_bound_error(error: BoxError) -> Response {
     if error.is::<tower::load_shed::error::Overloaded>() {
         return overloaded_response();
     }
@@ -328,6 +352,39 @@ fn bound_error(status: StatusCode, code: &'static str, message: &'static str) ->
         message: message.to_owned(),
     }
     .into_response();
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response
+}
+
+/// Runs outside the CORS route layer, so it adds the wildcard origin itself, as `bound_error`
+/// does. The payload goes to the log only: panic text can carry file paths and internal values.
+fn panic_response(payload: Box<dyn Any + Send + 'static>) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let panic = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("panic payload is not a string");
+    tracing::error!(
+        service = "api",
+        request_id = %request_id,
+        panic,
+        "request handler panicked"
+    );
+    let mut response = (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: ErrorBody {
+                code: "internal_error".to_owned(),
+                message: "request handler panicked".to_owned(),
+                details: BTreeMap::from([("request_id".to_owned(), request_id)]),
+            },
+        }),
+    )
+        .into_response();
     response.headers_mut().insert(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
         HeaderValue::from_static("*"),
