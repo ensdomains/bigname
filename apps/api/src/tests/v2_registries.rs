@@ -1151,6 +1151,7 @@ async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> 
         ],
     )
     .await?;
+    rebuild_fixture_families(&database.pool, REGISTRY_CHAIN_ID, 83, "0xregistry83").await?;
 
     let overview = registry_payload(
         &database,
@@ -1301,6 +1302,7 @@ async fn v2_get_registry_event_count_includes_every_namespace_the_feed_default_d
     other.namespace = "basenames".to_owned();
     other.log_index = Some(3);
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[other]).await?;
+    rebuild_fixture_families(&database.pool, REGISTRY_CHAIN_ID, 83, "0xregistry83").await?;
     let overview = registry_payload(
         &database,
         &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),

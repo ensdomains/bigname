@@ -2771,7 +2771,9 @@ read (`crates/storage/src/history/resolver_source.rs`):
 So the kind 0 rows of an address are what `GET /v1/events?contract_address=`
 counts for it, per namespace and kind, and the three kinds of a resolver add up
 to what `GET /v1/events?resolver=` counts. The rows hold every event kind,
-product kind or not. A count of zero has no row.
+product kind or not. A count of zero has no row. A sum of these rows is exact
+with no cap. The row count those reads ran before, and still run when the
+counts cannot serve them, is exact up to 10,000 rows only.
 
 An event is counted under the predicate those reads apply, built from the same
 code (`crates/storage/src/history/count_contract.rs`):
@@ -2821,7 +2823,30 @@ redo.
 The table is journalled and undone like every family. Schema-migration
 `20261104130000_project_event_count.sql` adds it to an existing phase schema
 empty, and the projection content-hash rotation that ships with it rebuilds the
-families. No read serves it yet.
+families.
+
+The `/v1/events` reads that only an emitting contract anchors, and the registry
+overview's `counts.events` on the current position, serve the sum of the key's
+rows as `total_count` (`crates/storage/src/history/stored_count.rs`). A read is
+served from the counts only when every filter it carries is a column of the
+key: no record key, no block or timestamp window, and no resolver with a
+different `contract_address`. Inside the page's own read transaction, the
+API's role must hold `SELECT` on the table, and each chain's family marker must
+be servable and stand at the block the read is bound to. A marker that is
+servable under this build's projection content hash stands over blocks that
+build's families counted, block by block or in a rebuild's composition pass,
+so a servable marker never stands over an unfilled table. Any other read counts its rows,
+exact up to 10,000 ([history collection filters](api-v1-routes.md#history-collection-filters)).
+
+A block counts a row in the row's own block range only, as the row stands when
+that block is applied, so the stored counts rely on Interpret never changing a
+stored row's `consumer_visibility` in place: its upsert's conflict clause
+updates only `canonicality_state` and `observed_at`, and refuses a row whose
+visibility differs
+(`crates/interpret/src/write/normalized.rs`), and a redo that re-derives a block
+forces Project's own undo and replay of it. A writer that updates visibility in
+place would have to touch the counter too
+(`crates/project/tests/families_event_counts_visibility_guard.rs`).
 
 ### Publication and resumption
 
@@ -2849,6 +2874,13 @@ manifest input and are selected at each block; the marker records that set.
 
 The transaction journals each changed row's before-image and the prior marker,
 writes the changed keys and derived state, and advances the marker sequence.
+
+A statement that carries a block's journal entries, row keys or rows binds them
+as JSON arrays of at most 16 MiB of text each, and runs once per array, in
+order, on the block's transaction. PostgreSQL refuses one jsonb array whose
+elements take more than 268,435,455 bytes once stored, which a block with a
+very wide expiry window would otherwise pass. A journal call that names one
+family key twice is refused before its first statement.
 Conflicting duplicate deliveries of one event identity keep the first in
 canonical order and increment the anomaly metric. The normalized input table
 already enforces unique event identities.

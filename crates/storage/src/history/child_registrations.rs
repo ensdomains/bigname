@@ -114,7 +114,7 @@ pub async fn load_name_history_page_with_child_registrations(
         HistorySummaryMode::Count => {
             Some(count(&mut transaction, &filter, arm.as_ref(), None).await?)
         }
-        HistorySummaryMode::CappedCount(cap) => {
+        HistorySummaryMode::CappedCount(cap) | HistorySummaryMode::StoredOrCapped(cap) => {
             Some(count(&mut transaction, &filter, arm.as_ref(), Some(cap)).await?)
         }
         HistorySummaryMode::Full => bail!("name history with child registrations counts only"),
@@ -373,6 +373,7 @@ async fn count(
         manifest_versions: Vec::new(),
         chain_position_samples: Vec::new(),
         last_updated: None,
+        count_cap: cap,
     })
 }
 

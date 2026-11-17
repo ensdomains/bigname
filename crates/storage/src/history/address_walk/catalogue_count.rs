@@ -39,7 +39,7 @@ pub(super) async fn count(
         return Ok(CountOutcome::Exact(0));
     }
     let cap = match summary {
-        HistorySummaryMode::CappedCount(cap) => Some(cap),
+        HistorySummaryMode::CappedCount(cap) | HistorySummaryMode::StoredOrCapped(cap) => Some(cap),
         HistorySummaryMode::Count => None,
         _ => return Ok(CountOutcome::Unknown),
     };

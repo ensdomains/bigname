@@ -62,6 +62,16 @@ impl AdapterSessionRestore {
         &mut self,
         events: Vec<super::PriorEventInput>,
     ) -> anyhow::Result<()> {
+        let latest_v2_delta = self.apply_prior_event_rows(events)?;
+        self.settle_prior_events(latest_v2_delta)
+    }
+
+    /// `apply_prior_events` without its settle, for a restore that arrives in several calls:
+    /// returns the latest ENSv2 topology timestamp among `events` for `settle_prior_events`.
+    pub(super) fn apply_prior_event_rows(
+        &mut self,
+        events: Vec<super::PriorEventInput>,
+    ) -> anyhow::Result<Option<i64>> {
         if let Some(event) = events.iter().find(|event| event.chain_id != self.chain_id) {
             bail!(
                 "restored event for chain {} cannot enter adapter session for chain {}",
@@ -69,9 +79,15 @@ impl AdapterSessionRestore {
                 self.chain_id
             );
         }
-        self.state.restore_prior_event_chunk(events);
-        self.state.ensure_restore_succeeded()?;
-        Ok(())
+        Ok(self.state.restore_prior_event_rows(events))
+    }
+
+    pub(super) fn settle_prior_events(
+        &mut self,
+        latest_v2_delta: Option<i64>,
+    ) -> anyhow::Result<()> {
+        self.state.settle_restored_prior_events(latest_v2_delta);
+        self.state.ensure_restore_succeeded()
     }
 
     pub(super) fn include_v2_topology_timestamp(&mut self, at: Option<time::OffsetDateTime>) {
