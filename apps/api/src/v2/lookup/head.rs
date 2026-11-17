@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
 use bigname_storage::{
-    SelectedSnapshot, SnapshotConsistency, SnapshotSelectionError, SnapshotSelectionErrorKind,
-    SnapshotSelectionScope, load_served_project_generation, resolve_exact_name_snapshot_selection,
-    snapshot_chain_has_head,
+    ReadSnapshot, SelectedSnapshot, SnapshotConsistency, SnapshotSelectionError,
+    SnapshotSelectionErrorKind, SnapshotSelectionScope, load_served_project_generation,
+    resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 
 use crate::v2::{
     Meta, SnapshotReadResource, V2Error, V2Result, sanitized_snapshot_internal_error,
@@ -31,7 +31,7 @@ impl ServedHead {
 
     /// Begins the read snapshot the whole batch reads on, once it still serves the captured
     /// publication of every selected chain. A block or rebuild after this cannot reach the batch.
-    pub(crate) async fn pin(&self, pool: &PgPool) -> V2Result<Transaction<'static, Postgres>> {
+    pub(crate) async fn pin(&self, pool: &PgPool) -> V2Result<ReadSnapshot> {
         #[cfg(test)]
         served_head_revalidation_test_hooks::run_at(
             &mut pool.into(),

@@ -283,18 +283,10 @@ async fn load_history_internal(
 pub(super) async fn begin_history_snapshot(
     pool: &PgPool,
     read: &str,
-) -> Result<sqlx::Transaction<'static, Postgres>> {
-    let mut transaction = pool
-        .begin()
+) -> Result<crate::ReadSnapshot> {
+    crate::read_db::open_read_snapshot(pool)
         .await
-        .with_context(|| format!("failed to begin normalized-event history {read} transaction"))?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *transaction)
-        .await
-        .with_context(|| {
-            format!("failed to configure normalized-event history {read} transaction")
-        })?;
-    Ok(transaction)
+        .with_context(|| format!("failed to begin normalized-event history {read} transaction"))
 }
 
 /// The read's conditions over `ne`. `resolver_source` is what the statement's
