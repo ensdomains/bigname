@@ -2346,7 +2346,7 @@ A recognized namespace with no available publication returns retryable `409 stal
   `include=total_count`, whatever anchors the read. With the flag, a read that
   `name`, `registration_id`, `address`, or `resolver` bounds runs the exact,
   uncapped count described above, over the page's filters and in its read
-  transaction, except for the emitter-only reads in the next item. Unanchored
+  transaction, except for the emitter-only reads in the next items. Unanchored
   `/v1/events` reads (namespace, type, and block or timestamp windows only)
   never count and always report `total_count=null`.
   A `/v1/events` read bounded only by `contract_address` also defaults to
@@ -2358,12 +2358,27 @@ A recognized namespace with no available publication returns retryable `409 stal
   counts again at its current published position. No cached or approximate
   total is returned, and an exact empty result is zero.
 - A `/v1/events` read that only an emitting contract anchors (`resolver`,
-  `contract_address`, or both, with no `name`, `registration_id`, or
-  `address`) caps the opt-in count at 10,000 rows. One contract can emit more
-  rows than an exact count reads within the request deadline. Up to the cap
-  `include=total_count` returns the exact total as above. Above it the count
-  stops after 10,001 rows and the page reports `total_count=null`. The rows,
-  `next_cursor`, and `has_more` are the same as without the flag.
+  `contract_address`, or both naming one contract, with no `name`,
+  `registration_id`, or `address`) serves `include=total_count` from the
+  projection's stored [event counts](projections.md#event-counts). The total
+  is exact with no cap, at the page's published position, under any
+  `namespace`, `type`, `exclude_type`, and `kind` filter. It is the number of
+  rows the read's pages list, as above.
+- The same read keeps the capped row count in these cases:
+  - With `record_key`.
+  - With `from_block`, `to_block`, `from_timestamp`, or `to_timestamp`.
+  - With a `resolver` and a different `contract_address`.
+  - While the stored counts do not describe the page's published position, as
+    during a Project redo or when a publication lands between the page's
+    capture and its count.
+  - When the API's database role cannot read the stored counts.
+
+  The capped count is exact up to 10,000 rows. One contract can emit more rows
+  than an exact count reads within the request deadline, so above the cap the
+  count stops after 10,001 rows and the page reports `total_count=null`. So
+  `null` still occurs, and a client that reads `null` as "more than 10,000"
+  keeps working. The rows, `next_cursor`, and `has_more` are the same in every
+  case, and the same as without the flag.
 
 ### History event payloads (`include=data`, `include=raw`)
 
@@ -4721,7 +4736,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total, and page.total_count is null without it. When only resolver or contract_address anchors the read, it is exact up to 10,000 rows and null above. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total, and page.total_count is null without it. When only resolver or contract_address anchors the read, the total is the stored event count, exact with no cap. With record_key, a block or timestamp window, or a resolver and a different contract_address, it is exact up to 10,000 rows and null above. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4850,8 +4865,9 @@ For a registrar lease first identified by a later readable observation, registra
   rule: `null` unless the request sends `include=total_count`. With the flag
   the count is exact when `name`, `registration_id`, or `address` anchors the
   read. When only `resolver` or `contract_address` anchors the read, the count
-  is exact up to 10,000 rows and `null` beyond. Other unanchored reads always
-  return null.
+  is the stored event count, exact with no cap, except in the cases the history
+  collection filters list, where it is exact up to 10,000 rows and `null` beyond.
+  Other unanchored reads always return null.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can
@@ -5378,7 +5394,7 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- | --- |
 | `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 10,000 events and null above. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is the stored event count, exact with no cap, on the current position. On a historical at it is exact up to 10,000 events and null above. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -5441,16 +5457,20 @@ For a registrar lease first identified by a later readable observation, registra
   because a registry such as the `.eth` one holds more than an exact count
   composes within the request deadline. `counts.events` is present only with
   `include=counts` and counts the product-visible events the contract emitted
-  on this chain up to the selected position, in any namespace. For an ENSv2
+  on this chain up to the selected position, in any namespace. On the current
+  position it is the projection's stored [event count](projections.md#event-counts),
+  exact with no cap. On a historical `at` it counts the contract's events
+  through the selected block instead: exact up to 10,000 events, and `null`
+  above, after the count stops at 10,001. The current position also counts
+  rows, with the same cap, while the stored counts do not describe it or the
+  API's database role cannot read them. For an ENSv2
   registry, whose events are all in `ens`, it equals the `total_count` of
   `GET /v1/events?contract_address=` at the same chain and block: that feed
-  defaults to the `ens` namespace, which is served on one chain. The
-  overview's count and the feed's `include=total_count` count are both exact
-  up to 10,000 events and `null` above that, so they also agree above the
-  cap. For an address
+  defaults to the `ens` namespace, which is served on one chain. Both read
+  the same stored count on the current position, and both cap a row count
+  alike, so they agree above 10,000 too. For an address
   an operator also admits into another namespace on this chain, the overview
-  counts those events too and the default feed does not. The count reads the
-  contract's events rather than a projected total, and stops after 10,001. It includes the
+  counts those events too and the default feed does not. It includes the
   registry's root role changes (`RootPermissionChanged` `permission` rows),
   which the feed has listed since they became product history.
   `counts.roles`, also present with `include=counts`, is the exact number of
