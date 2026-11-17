@@ -192,9 +192,15 @@ async fn adaptive_redo_stores_what_fixed_redo_stores() -> TestResult {
                 })
                 .finish();
             let guard = tracing::subscriber::set_default(subscriber);
+            super::super::MAX_RESIDENT_EVENTS.set(0);
             let ends = walk(redo, None, RunMode::Redo).await?;
             drop(guard);
             let case = format!("full state forced: {force_full_state}, reused: {reuse}");
+            let resident = super::super::MAX_RESIDENT_EVENTS.get();
+            assert!(
+                resident <= CHUNK,
+                "{case}: the loader held {resident} prior events at once"
+            );
             assert_eq!(ends, self::ends(&ADAPTIVE_ENDS), "{case}");
             let planned = logs.text();
             assert_eq!(
