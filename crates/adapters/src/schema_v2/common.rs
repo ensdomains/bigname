@@ -174,28 +174,48 @@ impl EventStringSelector {
     }
 }
 
-/// The longest record key, in bytes, that a resolver record event may carry. Project stores the
-/// key in the primary keys of its record tables and in the text hydration order index. A
-/// PostgreSQL btree index row holds at most 2,704 bytes, and the widest of those rows carries
-/// about 200 bytes besides the key, so a longer key that does not compress cannot be stored.
+/// The longest record key, in bytes of JSON text, that a resolver record event may carry. Project
+/// stores the key in the primary keys of its record tables and in the text hydration order index,
+/// and its undo journal keys each changed row by the row's primary key as compact JSON text
+/// (`key_text` in `crates/project/src/families/store.rs`). A PostgreSQL btree index row holds at
+/// most 2,704 bytes, and the widest of those rows, the journal row of a guarded-arm record on
+/// `ethereum-mainnet`, carries 246 bytes besides the key, so a longer key that does not compress
+/// cannot be stored.
 ///
 /// The bound applies to the formatted key as it is stored (`text:{key}`, `text_opaque:0x{hex}`,
 /// `data:{key}`, `dns:{resource}:0x{hex}`), not to the raw key in the log: an opaque key is
-/// stored as hex and doubles in length. `str::len` counts UTF-8 bytes, as PostgreSQL's
-/// `octet_length` does. The longest record key set on mainnet is 2,126 bytes, so every key in
-/// use keeps updating under its own key.
+/// stored as hex and doubles in length. It counts the key's JSON text without its quotes
+/// ([`json_escaped_len`]), which is never shorter than its UTF-8. The longest record key set on
+/// mainnet is 2,126 bytes, and 2,126 as JSON text, so every key in use keeps updating under its
+/// own key.
 pub(super) const MAX_RECORD_KEY_BYTES: usize = 2_400;
 
-/// Whether `record_key` is longer than [`MAX_RECORD_KEY_BYTES`], logging one warning when it is.
-/// The caller then skips the log as it skips one whose indexed key is not the hash of its key:
-/// no record event, no substitute key and no row.
+/// The bytes `text` takes as a JSON string without its quotes, as serde_json writes it: two for
+/// `"`, `\` and the controls with a short escape (`\b`, `\t`, `\n`, `\f`, `\r`), six for every
+/// other control (`\u00xx`), and its UTF-8 bytes for everything else.
+pub(super) fn json_escaped_len(text: &str) -> usize {
+    text.len()
+        + text
+            .bytes()
+            .map(|byte| match byte {
+                b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 1,
+                0x00..=0x1f => 5,
+                _ => 0,
+            })
+            .sum::<usize>()
+}
+
+/// Whether `record_key` is longer than [`MAX_RECORD_KEY_BYTES`] as JSON text, logging one warning
+/// when it is. The caller then skips the log as it skips one whose indexed key is not the hash of
+/// its key: no record event, no substitute key and no row.
 pub(super) fn record_key_over_cap(
     selected: &Selected,
     raw: &RawLogInput,
     record_family: &str,
     record_key: &str,
 ) -> bool {
-    if record_key.len() <= MAX_RECORD_KEY_BYTES {
+    let escaped_bytes = json_escaped_len(record_key);
+    if escaped_bytes <= MAX_RECORD_KEY_BYTES {
         return false;
     }
     tracing::warn!(
@@ -209,7 +229,8 @@ pub(super) fn record_key_over_cap(
         event = %selected.event.name,
         record_family = %record_family,
         record_key_bytes = record_key.len(),
-        "resolver record key is longer than 2400 bytes; log skipped, no record written"
+        record_key_escaped_bytes = escaped_bytes,
+        "resolver record key is longer than 2400 bytes as JSON text; log skipped, no record written"
     );
     true
 }
