@@ -1,30 +1,32 @@
-//! The subnames page, the registry labels page and the child counts over the family child
-//! relation, with the page semantics of crates/storage/src/children/page.rs and reads.rs: the
-//! optional prefix or substring filter, the expiry fence with its null treatment, the name and timestamp sorts, the
-//! keyset cursor, and a registry's labels as the ENSv2 children its subregistry holds, optionally
-//! narrowed by the owner each serves (`project_name_summary.owner`). The total
-//! is an exact count, or `cap + 1` past a caller's cap, over the same filtered relation;
-//! there is no maintained child count, because eligibility depends on the parent's current
-//! state. Expiry filtering uses the canonical status stored at the publication clock. A caller's
-//! fixed `evaluated_at` adds an expiry fence; neither uses the database's transaction time.
+//! The served child types and the children relation's read filter. The subnames page, the
+//! registry labels page and the child counts read the stored child listing (`listing_page.rs`);
+//! the relation here, read at the family marker's block, spells a page's healed names and
+//! serves an address's surface-less registry children (`registry_children.rs`), with the page
+//! semantics of crates/storage/src/children/page.rs and reads.rs: the optional prefix or
+//! substring filter, the expiry fence with its null treatment, and a registry's labels as the
+//! ENSv2 children its subregistry holds, optionally narrowed by the owner each serves
+//! (`project_name_summary.owner`). Expiry filtering uses the canonical status stored at the
+//! publication clock. A caller's fixed `evaluated_at` adds an expiry fence; neither uses the
+//! database's transaction time.
 //!
-//! The registration and expiry times the timestamp sorts and the fence use, the released
-//! status the fence checks and the owner the labels' owner filter reads are the child's name summary (`project_name_summary`), which the
-//! family step writes from the child's composed `declared_summary`; a child with no name surface
-//! is released when its node's registrar lease is ([`released_lease`]), and its lease's holder,
-//! when the registrar retains one, is [`token_holder`](child_flags::token_holder).
-use std::collections::BTreeMap;
-
-use anyhow::{Context, Result, bail};
-use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
+//! The registration and expiry times the fence uses, the released status it checks and the
+//! owner the labels' owner filter reads are the child's name summary (`project_name_summary`),
+//! which the family step writes from the child's composed `declared_summary`; a child with no
+//! name surface is released when its node's registrar lease is ([`released_lease`]), and its
+//! lease's holder, when the registrar retains one, is
+//! [`token_holder`](child_flags::token_holder).
+use anyhow::{Context, Result};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 
 use crate::{
-    ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPageFilter,
-    ChildrenCurrentSort, ChildrenCurrentSortValue, RegistryLabelOwnerFilter, UnixSeconds,
+    ChildrenCurrentKeysetCursor, ChildrenCurrentPageFilter, RegistryLabelOwnerFilter, UnixSeconds,
     families::name::ensure_published,
 };
 
-use super::children::{CHILD_DISPLAY_NAME, Parents, Relation, push_listed};
+use super::{
+    children::{CHILD_DISPLAY_NAME, Parents, Relation, push_listed},
+    listing_page::{count, page},
+};
 use child_flags::released_lease;
 
 pub(super) mod child_flags;
@@ -64,8 +66,9 @@ pub struct FamilyChildRow {
 }
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
-/// the owner each serves when `owner` is given. Only [`count_registry_labels`] bounds the
-/// registry's registrations under the parent (`registration_limit`).
+/// the owner each serves when `owner` is given. `registration_limit` keeps at most that many of
+/// the registry's registrations under the parent (`push_selected`); the label counts are stored
+/// (`listing_page.rs`), so no reader sets it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RegistryLabels<'a> {
     pub(crate) registry: &'a str,
@@ -123,7 +126,7 @@ pub async fn count_children_shadow(
         .context("failed to fix the count snapshot")?;
     let mut counts = Vec::with_capacity(parent_logical_name_ids.len());
     for parent in parent_logical_name_ids {
-        counts.push((parent.clone(), count(&mut transaction, parent).await?));
+        counts.push((parent.clone(), count(&mut transaction, parent, None).await?));
     }
     transaction
         .commit()
@@ -154,242 +157,6 @@ pub(crate) async fn require_publication(
     .context("failed to read the chains of the child reads' parents")?;
     ensure_published(conn, &chains).await?;
     Ok(())
-}
-
-/// The exact unfiltered child count of one parent.
-async fn count(conn: &mut PgConnection, parent_logical_name_id: &str) -> Result<u64> {
-    let count: i64 = count_query(parent_logical_name_id)
-        .build_query_scalar()
-        .fetch_one(&mut *conn)
-        .await
-        .with_context(|| {
-            format!("failed to count the children shadow of {parent_logical_name_id}")
-        })?;
-    u64::try_from(count).context("negative children shadow count")
-}
-
-/// The exact number of labels `registry` holds under `parent_logical_name_id`, or `None` when
-/// it holds more than `cap` registrations there. The statement keeps at most `cap + 1` of them, in
-/// no order, so it reads a bounded relation, and the labels among a partial set are no count.
-pub(crate) async fn count_registry_labels(
-    conn: &mut PgConnection,
-    parent_logical_name_id: &str,
-    registry: &str,
-    cap: u64,
-) -> Result<Option<u64>> {
-    let limit = past(cap)?;
-    let (registrations, labels): (i64, i64) =
-        registry_labels_count_query(parent_logical_name_id, registry, limit)
-            .build_query_as()
-            .fetch_one(&mut *conn)
-            .await
-            .context("failed to count the labels of a registry")?;
-    if registrations >= limit {
-        return Ok(None);
-    }
-    Ok(Some(
-        u64::try_from(labels).context("negative registry label count")?,
-    ))
-}
-
-/// The bind of a `LIMIT` that keeps one row past `cap`.
-fn past(cap: u64) -> Result<i64> {
-    i64::try_from(cap)
-        .ok()
-        .and_then(|cap| cap.checked_add(1))
-        .context("children count cap is too large")
-}
-
-/// The exact unfiltered child count of each of `parent_logical_name_ids` in one statement, keyed
-/// by parent; a parent with no child (or no readable surface) has no entry.
-pub(crate) async fn counts(
-    conn: &mut PgConnection,
-    parent_logical_name_ids: &[String],
-) -> Result<BTreeMap<String, u64>> {
-    let rows: Vec<(String, i64)> = counts_query(parent_logical_name_ids)
-        .build_query_as()
-        .fetch_all(&mut *conn)
-        .await
-        .context("failed to count the children shadow of the parents")?;
-    rows.into_iter()
-        .map(|(parent, count)| {
-            Ok((
-                parent,
-                u64::try_from(count).context("negative children shadow count")?,
-            ))
-        })
-        .collect()
-}
-
-fn count_query(parent_logical_name_id: &str) -> QueryBuilder<'_, Postgres> {
-    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(
-        &mut builder,
-        Parents::One(parent_logical_name_id),
-        &ChildrenCurrentPageFilter::default(),
-        None,
-        None,
-    );
-    builder.push(") SELECT count(*) FROM children");
-    builder
-}
-
-/// The registrations kept (at most `registration_limit`) and the labels among them.
-fn registry_labels_count_query<'a>(
-    parent_logical_name_id: &'a str,
-    registry: &'a str,
-    registration_limit: i64,
-) -> QueryBuilder<'a, Postgres> {
-    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(
-        &mut builder,
-        Parents::One(parent_logical_name_id),
-        &ChildrenCurrentPageFilter::default(),
-        Some(RegistryLabels {
-            registry,
-            owner: None,
-            registration_limit: Some(registration_limit),
-        }),
-        None,
-    );
-    builder.push(
-        ") SELECT (SELECT count(*) FROM v2_candidates) AS registrations,
-                  (SELECT count(*) FROM children) AS labels",
-    );
-    builder
-}
-
-fn counts_query(parent_logical_name_ids: &[String]) -> QueryBuilder<'_, Postgres> {
-    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(
-        &mut builder,
-        Parents::Many(parent_logical_name_ids),
-        &ChildrenCurrentPageFilter::default(),
-        None,
-        None,
-    );
-    builder.push(
-        ") SELECT parent_logical_name_id, count(*) FROM children
-         GROUP BY parent_logical_name_id",
-    );
-    builder
-}
-
-/// One page and its total in one statement; the total stops at `total_cap + 1`, not the rows.
-pub(crate) async fn page(
-    conn: &mut PgConnection,
-    parent_logical_name_id: &str,
-    filter: &ChildrenCurrentPageFilter<'_>,
-    registry: Option<RegistryLabels<'_>>,
-    cursor: Option<&ChildrenCurrentKeysetCursor>,
-    page_size: u64,
-    total_cap: Option<u64>,
-) -> Result<FamilyChildrenPage> {
-    if page_size == 0 {
-        bail!("children shadow page_size must be positive");
-    }
-    let limit = i64::try_from(page_size).context("children shadow page_size is too large")? + 1;
-    let total_limit = total_cap.map(past).transpose()?;
-    if let Some(cursor) = cursor {
-        let matches = matches!(
-            (filter.sort, &cursor.sort_value),
-            (ChildrenCurrentSort::Name, ChildrenCurrentSortValue::Name)
-                | (
-                    ChildrenCurrentSort::ExpiresAt | ChildrenCurrentSort::RegisteredAt,
-                    ChildrenCurrentSortValue::Timestamp(_)
-                )
-        );
-        if !matches {
-            bail!("children shadow cursor sort value does not match the sort");
-        }
-    }
-    let mut builder = page_query(
-        parent_logical_name_id,
-        filter,
-        registry,
-        cursor,
-        limit,
-        total_limit,
-    );
-    let rows = builder
-        .build()
-        .fetch_all(&mut *conn)
-        .await
-        .with_context(|| {
-            format!("failed to load the children shadow of {parent_logical_name_id}")
-        })?;
-    let total_count = match rows.first() {
-        Some(row) => u64::try_from(row.try_get::<i64, _>("total_count")?)
-            .context("negative children shadow count")?,
-        None => 0,
-    };
-    let mut decoded = Vec::with_capacity(rows.len());
-    for row in &rows {
-        if let Some(child) = decode(row)? {
-            decoded.push(child);
-        }
-    }
-    let has_more = decoded.len() > usize::try_from(page_size).unwrap_or(usize::MAX);
-    decoded.truncate(usize::try_from(page_size).unwrap_or(usize::MAX));
-    let next_cursor = has_more
-        .then(|| decoded.last())
-        .flatten()
-        .map(|(row, sort_timestamp)| ChildrenCurrentKeysetCursor {
-            sort_value: match filter.sort {
-                ChildrenCurrentSort::Name => ChildrenCurrentSortValue::Name,
-                _ => ChildrenCurrentSortValue::Timestamp(*sort_timestamp),
-            },
-            canonical_display_name: row.canonical_display_name.clone(),
-            child_logical_name_id: row.child_logical_name_id.clone(),
-        });
-    Ok(FamilyChildrenPage {
-        total_count,
-        rows: decoded.into_iter().map(|(row, _)| row).collect(),
-        next_cursor,
-    })
-}
-
-fn page_query<'a>(
-    parent_logical_name_id: &'a str,
-    filter: &'a ChildrenCurrentPageFilter<'a>,
-    registry: Option<RegistryLabels<'a>>,
-    cursor: Option<&'a ChildrenCurrentKeysetCursor>,
-    limit: i64,
-    total_limit: Option<i64>,
-) -> QueryBuilder<'a, Postgres> {
-    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(
-        &mut builder,
-        Parents::One(parent_logical_name_id),
-        filter,
-        registry,
-        None,
-    );
-    let sort_timestamp = match filter.sort {
-        ChildrenCurrentSort::Name => "NULL::NUMERIC",
-        ChildrenCurrentSort::ExpiresAt => "children.expires_at",
-        ChildrenCurrentSort::RegisteredAt => "children.registered_at",
-    };
-    builder.push(format!(
-        "), sorted AS (SELECT children.*, {sort_timestamp} AS sort_timestamp FROM children),
-         page AS (SELECT * FROM sorted WHERE TRUE"
-    ));
-    if let Some(cursor) = cursor {
-        push_cursor_after(&mut builder, filter.order, cursor);
-    }
-    push_order(&mut builder, filter.sort, filter.order, "");
-    builder.push(" LIMIT ");
-    builder.push_bind(limit);
-    builder.push(") SELECT total.total_count, page.* FROM (SELECT count(*) AS total_count FROM ");
-    if let Some(total_limit) = total_limit {
-        builder.push("(SELECT 1 FROM children LIMIT ");
-        builder.push_bind(total_limit).push(") capped");
-    } else {
-        builder.push("children");
-    }
-    builder.push(") total LEFT JOIN page ON TRUE");
-    push_order(&mut builder, filter.sort, filter.order, "page.");
-    builder
 }
 
 /// The selected children CTEs and the `children` relation (left open, closed by the caller)
@@ -451,135 +218,15 @@ pub(super) fn push_children<'a>(
     }
 }
 
-fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<UnixSeconds>)>> {
-    let Some(child_logical_name_id) = row.try_get::<Option<String>, _>("child_logical_name_id")?
-    else {
-        return Ok(None);
-    };
-    Ok(Some((
-        FamilyChildRow {
-            parent_logical_name_id: row.try_get("parent_logical_name_id")?,
-            child_logical_name_id,
-            namespace: row.try_get("namespace")?,
-            canonical_display_name: row.try_get("canonical_display_name")?,
-            namehash: row.try_get("namehash")?,
-            labelhash: row.try_get("labelhash")?,
-            owner: row.try_get("owner")?,
-            registrant: row.try_get("registrant")?,
-            registry_authority: row.try_get("registry_authority")?,
-            lifecycle_shadow: row.try_get("lifecycle_shadow")?,
-            wrapper_held: row.try_get("wrapper_held")?,
-            released_lease: row.try_get("released_lease")?,
-            token_holder: row.try_get("token_holder")?,
-        },
-        row.try_get("sort_timestamp")?,
-    )))
-}
-
-fn push_cursor_after<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    order: ChildrenCurrentOrder,
-    cursor: &'a ChildrenCurrentKeysetCursor,
-) {
-    let strict = match order {
-        ChildrenCurrentOrder::Asc => " > ",
-        ChildrenCurrentOrder::Desc => " < ",
-    };
-    match &cursor.sort_value {
-        ChildrenCurrentSortValue::Name => {
-            builder.push(format!(" AND (canonical_display_name{strict}"));
-            builder.push_bind(&cursor.canonical_display_name);
-            builder.push(" OR (canonical_display_name = ");
-            builder.push_bind(&cursor.canonical_display_name);
-            builder.push(" AND child_logical_name_id > ");
-            builder.push_bind(&cursor.child_logical_name_id);
-            builder.push("))");
-        }
-        ChildrenCurrentSortValue::Timestamp(value) => {
-            let rank = null_rank(value.is_none(), order);
-            let rank_expr = null_rank_expr(order, "");
-            builder.push(format!(" AND ({rank_expr} > "));
-            builder.push_bind(rank);
-            builder.push(format!(" OR ({rank_expr} = "));
-            builder.push_bind(rank);
-            builder.push(" AND ");
-            match value {
-                None => {
-                    builder.push("sort_timestamp IS NULL AND ");
-                    push_name_tie_after(builder, cursor);
-                }
-                Some(value) => {
-                    builder.push(format!("(sort_timestamp{strict}"));
-                    builder.push_bind(*value);
-                    builder.push(" OR (sort_timestamp = ");
-                    builder.push_bind(*value);
-                    builder.push(" AND ");
-                    push_name_tie_after(builder, cursor);
-                    builder.push("))");
-                }
-            }
-            builder.push("))");
-        }
-    }
-}
-
-fn push_name_tie_after<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    cursor: &'a ChildrenCurrentKeysetCursor,
-) {
-    builder.push("(canonical_display_name, child_logical_name_id) > (");
-    builder.push_bind(&cursor.canonical_display_name);
-    builder.push(", ");
-    builder.push_bind(&cursor.child_logical_name_id);
-    builder.push(")");
-}
-
-fn push_order(
-    builder: &mut QueryBuilder<'_, Postgres>,
-    sort: ChildrenCurrentSort,
-    order: ChildrenCurrentOrder,
-    prefix: &str,
-) {
-    let direction = match order {
-        ChildrenCurrentOrder::Asc => "ASC",
-        ChildrenCurrentOrder::Desc => "DESC",
-    };
-    builder.push(match sort {
-        ChildrenCurrentSort::Name => format!(
-            " ORDER BY {prefix}canonical_display_name {direction}, \
-             {prefix}child_logical_name_id ASC"
-        ),
-        ChildrenCurrentSort::ExpiresAt | ChildrenCurrentSort::RegisteredAt => format!(
-            " ORDER BY {} ASC, {prefix}sort_timestamp {direction}, \
-             {prefix}canonical_display_name ASC, {prefix}child_logical_name_id ASC",
-            null_rank_expr(order, prefix)
-        ),
-    });
-}
-
-/// A missing timestamp is the smallest value: rows without one sort first ascending and last
-/// descending.
-fn null_rank_expr(order: ChildrenCurrentOrder, prefix: &str) -> String {
-    match order {
-        ChildrenCurrentOrder::Asc => {
-            format!("CASE WHEN {prefix}sort_timestamp IS NULL THEN 0 ELSE 1 END")
-        }
-        ChildrenCurrentOrder::Desc => {
-            format!("CASE WHEN {prefix}sort_timestamp IS NULL THEN 1 ELSE 0 END")
-        }
-    }
-}
-
-fn null_rank(is_null: bool, order: ChildrenCurrentOrder) -> i32 {
-    match (is_null, order) {
-        (false, ChildrenCurrentOrder::Asc) | (true, ChildrenCurrentOrder::Desc) => 1,
-        (true, ChildrenCurrentOrder::Asc) | (false, ChildrenCurrentOrder::Desc) => 0,
-    }
-}
-
+#[cfg(test)]
+pub(crate) mod listing_support;
+#[cfg(test)]
+mod listing_tests;
 #[cfg(test)]
 mod narrowed_plan_tests;
 #[cfg(test)]
 mod performance_tests;
 #[cfg(test)]
 mod registry_labels_tests;
+#[cfg(test)]
+pub(crate) mod served_page;

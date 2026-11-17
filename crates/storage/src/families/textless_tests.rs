@@ -257,6 +257,9 @@ impl Fixture {
             .execute(pool)
             .await?;
         }
+        // The child listing Project would store for these family rows at the publication.
+        let mut conn = pool.acquire().await?;
+        crate::families::topology::compose_listing(&mut conn).await?;
         Ok(())
     }
 }
@@ -337,11 +340,12 @@ async fn search_finds_and_orders_names_without_bytes() -> Result<()> {
             format!("known.{first}"),
             format!("{}.{first}", bracket(&fixture.undecodable)),
         ];
-        let ordered: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM unnest($1::text[]) name ORDER BY name")
-                .bind(&expected)
-                .fetch_all(pool)
-                .await?;
+        let ordered: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM unnest($1::text[]) name ORDER BY name COLLATE \"C\"",
+        )
+        .bind(&expected)
+        .fetch_all(pool)
+        .await?;
         expected = ordered;
         // One page, and pages that end inside and between the two kinds of surface.
         for page in [50, 1, 3] {
@@ -435,11 +439,12 @@ async fn a_parent_without_bytes_lists_and_counts_its_children() -> Result<()> {
             format!("{}.{first_name}", bracket(&fixture.undecodable)),
             format!("\\376\\376.{first_name}"),
         ];
-        let ordered: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM unnest($1::text[]) name ORDER BY name")
-                .bind(&expected)
-                .fetch_all(pool)
-                .await?;
+        let ordered: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM unnest($1::text[]) name ORDER BY name COLLATE \"C\"",
+        )
+        .bind(&expected)
+        .fetch_all(pool)
+        .await?;
         expected = ordered;
         assert_eq!(names, expected);
         assert_eq!(total, 5);

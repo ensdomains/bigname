@@ -42,8 +42,8 @@ async fn child_totals_are_null_above_the_cap() -> Result<()> {
     .await?;
 
     // Rows S2 and S4: above the cap the total is null on every page, plain and narrowed, and the
-    // rows and continuations are those of the uncapped read. Row L1 at the API: registrations
-    // equal to the cap count exactly.
+    // rows and continuations are those of the uncapped read. Row L1 at the API: labels equal to
+    // the cap count exactly.
     crate::v2::with_child_count_cap(2, async {
         assert_eq!(read_family_pages(&database, subnames).await?, without_totals(&uncapped));
         assert_eq!(
@@ -57,8 +57,8 @@ async fn child_totals_are_null_above_the_cap() -> Result<()> {
     })
     .await?;
 
-    // Row L6: more registrations than the cap serve a present, null label count, and the other
-    // counts are those of the uncapped read.
+    // Row L6: more labels than the cap serve a present, null label count, and the other counts
+    // are those of the uncapped read.
     crate::v2::with_child_count_cap(1, async {
         let (status, page) = read_family_response(&database, &overview).await?;
         assert_eq!(status, StatusCode::OK, "{page:#}");
@@ -78,8 +78,8 @@ async fn child_totals_are_null_above_the_cap() -> Result<()> {
 }
 
 /// Row L5: without `include=counts` the overview serves no `counts.labels` and never reads the
-/// child relation, so it answers while that relation is unreadable; with `include=counts` it
-/// reads it.
+/// stored label counts, so it answers while they are unreadable; with `include=counts` it reads
+/// them.
 #[tokio::test]
 async fn registry_overview_reads_no_labels_without_counts() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -90,8 +90,8 @@ async fn registry_overview_reads_no_labels_without_counts() -> Result<()> {
     assert!(before["data"]["counts"].get("labels").is_none(), "{before:#}");
 
     sqlx::query(
-        "ALTER TABLE bigname_phase.project_child_edge_candidate
-         RENAME TO project_child_edge_candidate_hidden",
+        "ALTER TABLE bigname_phase.project_child_listing_count
+         RENAME TO project_child_listing_count_hidden",
     )
     .execute(&database.pool)
     .await?;
@@ -100,6 +100,76 @@ async fn registry_overview_reads_no_labels_without_counts() -> Result<()> {
     assert_eq!(after["data"], before["data"]);
     let (status, counted) =
         read_family_response(&database, &format!("{plain}?include=counts")).await?;
-    assert_ne!(status, StatusCode::OK, "the counted overview must read the child relation: {counted:#}");
+    assert_ne!(status, StatusCode::OK, "the counted overview must read the stored label counts: {counted:#}");
+    database.cleanup().await
+}
+
+/// Row L-edge: a registry holding more registrations than the cap under its name, with at most
+/// the cap in labels, counts its labels exactly. three.alpha.eth's registration names alpha.eth's
+/// subregistry instance but was emitted from another address, so it is a subname and not a label
+/// of the subregistry address: the instance holds three registrations under alpha.eth and the
+/// address two labels. A count that read the instance's registrations stopped at a cap of two
+/// and served `null`. The storage row `registry_label_count_is_null_above_the_cap` covers the
+/// same class over hand-written family rows.
+#[tokio::test]
+async fn the_label_count_is_exact_above_the_cap_in_registrations() -> Result<()> {
+    const OTHER_EMITTER: &str = "0x00000000000000000000000000000000000000b2";
+    let database = TestDatabase::new_migrated().await?;
+    seed_family_children_fixture(&database).await?;
+    insert_family_label_preimage(&database.pool, b"three").await?;
+    let (three, _) = seed_family_name(&database, "three.alpha.eth", 0x6d1_0000, "ens_v2").await?;
+    let alpha_registry = Uuid::from_u128(0x6b0_0001);
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[child_registry_event(
+            "children-three",
+            Some(&three),
+            "RegistrationGranted",
+            241,
+            1,
+            OTHER_EMITTER,
+            json!({"registry_contract_instance_id": alpha_registry.to_string(),
+                   "status": "registered", "registrant": CHILD_OWNER,
+                   "expiry": 1_900_000_000i64}),
+        )],
+    )
+    .await?;
+    publish_test_families(&database, 241).await?;
+
+    let registrations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bigname_phase.project_child_registration_state
+         WHERE registry_contract_instance_id = $1 AND event_kind <> 'RegistrationReleased'",
+    )
+    .bind(alpha_registry.to_string())
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(registrations, 3, "the subregistry holds three registrations");
+    let names = |pages: &[Value]| -> Vec<Value> {
+        pages
+            .iter()
+            .flat_map(|page| page["data"].as_array().into_iter().flatten())
+            .map(|row| row["name"].clone())
+            .collect()
+    };
+    let subnames = read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?;
+    assert!(names(&subnames).contains(&json!("three.alpha.eth")), "{subnames:#?}");
+    let labels = read_family_pages(
+        &database,
+        &format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}/labels?page_size=10"),
+    )
+    .await?;
+    assert_eq!(
+        names(&labels),
+        [json!("one.alpha.eth"), json!("two.alpha.eth")],
+        "{labels:#?}"
+    );
+    let overview = format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}?include=counts");
+    crate::v2::with_child_count_cap(2, async {
+        let (status, page) = read_family_response(&database, &overview).await?;
+        assert_eq!(status, StatusCode::OK, "{page:#}");
+        assert_eq!(page["data"]["counts"]["labels"], json!(2), "{page:#}");
+        anyhow::Ok(())
+    })
+    .await?;
     database.cleanup().await
 }

@@ -210,6 +210,9 @@ async fn subregistry_parents_are_sampled_only_while_their_children_are_visible()
     );
     sqlx::query("UPDATE name_surfaces SET visibility_state='shadow',deactivation_reason='fixture',deactivated_at=now() WHERE logical_name_id=$1")
         .bind(name("ens", 2)).execute(&f.pool).await?;
+    // The surface changes in place with no block, which only a rebuild composes into the stored
+    // child counts the sampler reads.
+    publish(&f).await?;
     assert!(readers::names(&f.pool, 2, true).await?.is_empty());
     f.cleanup().await
 }

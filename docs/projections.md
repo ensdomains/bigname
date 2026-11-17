@@ -2214,7 +2214,8 @@ owned family: name identity and binding candidates,
 registration and lease state, wrapper state, registry ownership, resolver
 classification, the registry-node and resource resolver pointers, node and
 record-id records with resolver links, grants and account approvals,
-ENSv2 registry entries, child edges, reverse tuples and claims, and the address associations. Each row
+ENSv2 registry entries, child edges, reverse tuples and claims, the address associations, and
+the child listing with its counts. Each row
 belongs to one key and holds what the latest events of that key left, clears
 included: a zero pointer, record id `0` or a revoked grant
 stays a row. A row goes only when nothing remains for its key. Each grant also
@@ -2630,6 +2631,60 @@ a surface's visibility or a lineage readability flip, are covered because a
 recompute only happens with a code change that rotates the interpreter
 fingerprint, which rebuilds the families. A reorg goes through undo, which
 restores the summaries from the journal.
+
+### Child listing
+
+F17 stores each parent's listed children, one row per child in `project_child_listing`, so the
+subnames page, the registry labels page and the child counts read rows through indexes and
+compose no child at read. A row holds the child's served fields, its stored name, the sort keys
+and the label registry, and is composed by the children relation
+(`crates/storage/src/families/topology/listing.rs`) at the block Project publishes. The stored
+name spells a label from chain-observed preimages only. The stored relation and the stored
+parent spelling both skip `label_preimages` rows whose `source_kind` is `ens_rainbow_import`
+(`crates/storage/src/families/topology/children.rs:87`,
+`crates/storage/src/families/topology/children/spelling.rs:64`). The rainbow-table import has no
+block, so a row that read it would differ between a block-by-block run and a rebuild. A label
+only the import spells therefore keeps its placeholder in the stored name, in `display_key` and
+in `q` matching, however often its row is derived again, until a chain observes its preimage.
+The reader spells it at read (`crates/storage/src/families/topology/listing_page.rs`), so
+served names heal. TYR-339 moves stored names and sort keys to the imported form.
+
+A label observed on this chain derives again, at that block, the rows that hold it. The family
+step reads each other chain's new observations past a journalled watermark
+(`project_child_preimage_watermark`) and derives again the rows that hold one of their labels.
+Once the watermark has reached the other chain's finalized block (its safe block when finalized
+is unset), a step reads every newer observation, so a label first observed there reaches the
+stored name at this chain's next block. Until then a step reads about 1,000 observations,
+rounded up to whole blocks of the other chain (`SOURCE_EVENTS` and `CUTOFF`,
+`crates/project/src/families/derived/children/sources.rs:52` and `:75`). When that chain's
+finalized block moves past more observations above the watermark than one step reads, in
+ordinary catch-up or after an Interpret redo of that chain alone, a label waits about (the
+observations above the watermark / 1,000) blocks of this chain.
+
+`display_key` is the stored name in C collation, or its first 500 characters when it is longer
+than 2,000 bytes. `expires_key` and `registered_key` are the child's name summary timestamps in
+Unix seconds, -1 when it has none. `registry_address` is the ENSv2 registry whose labels the
+child is one of, and `summary_owner` is the owner its name summary serves.
+
+`project_child_listing_count` holds, per parent, the number of its rows under the empty
+registry address, and per parent and label registry the number of that registry's labels. A
+count of zero has no row.
+
+After a block's name summaries, the family step reads a work list. A child is derived again,
+under every parent that can list it, when the block touched its summary, an edge naming it,
+its ENSv2 registration, its registry node, its NameWrapper row, a registrar lease of its node or
+a preimage of its name or labels. It is also derived again at `recompose_at`, the second after
+its NameWrapper expiry, when the ENSv1→ENSv2 migration gate keeps it only until then. A parent
+is derived whole, in one statement, when the block moved its migration state, its ENSv2
+subregistry pointer, its surface, its spelling or an address window of its subregistry. The
+step compares the fresh rows with the stored ones, journals every changed row and count with
+its before-image, and moves each count by the same diff. A parent derived whole is set to the
+size of its fresh rows. Above 100,000 rows in one parent the runner logs a `WARN`. Undo restores
+the listing, its counts and the watermarks from the journal.
+
+The composition pass derives every parent whole in a children stream after the names stream.
+Inputs that change in place with no block, such as a lineage readability flip, are covered by
+the rebuild a hash rotation forces, as for the name summaries.
 
 ### ENSv2 registry entries
 

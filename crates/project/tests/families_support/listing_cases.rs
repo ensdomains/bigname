@@ -1,5 +1,5 @@
 //! The child listing cases' shared steps (`families_child_listing*.rs`): ENSv1 edges and label
-//! preimages written directly, the stored rows and counts of a parent, today's read-time answer
+//! preimages written directly, the stored rows and counts of a parent, the page the reader serves
 //! (`load_children_shadow_page`) and a block's journal.
 use anyhow::{Result, ensure};
 use bigname_storage::{ChildrenCurrentPageFilter, families::topology::load_children_shadow_page};
@@ -95,8 +95,8 @@ pub async fn counted(fixture: &Fixture, parent: &str) -> Result<Vec<(String, i64
     .await?)
 }
 
-/// Today's read-time answer for `parent`: every child the served relation lists, as (child,
-/// served name), in child order, and its exact total.
+/// The page the reader serves for `parent`: every child, as (child, served name), in child
+/// order, and its exact total.
 pub async fn served(fixture: &Fixture, parent: &str) -> Result<(Vec<(String, String)>, u64)> {
     let page = load_children_shadow_page(
         &fixture.pool,
@@ -115,7 +115,7 @@ pub async fn served(fixture: &Fixture, parent: &str) -> Result<(Vec<(String, Str
     Ok((rows, page.total_count))
 }
 
-/// The stored rows of `parent` equal today's read-time rows, names included, and its stored
+/// The stored rows of `parent` equal the rows the reader serves, names included, and its stored
 /// count equals the served total.
 pub async fn assert_served(fixture: &Fixture, parent: &str) -> Result<()> {
     let stored: Vec<(String, String)> = listed(fixture, parent)

@@ -1,7 +1,9 @@
 mod families;
+mod grant;
 mod page;
 mod reads;
 mod types;
+pub use grant::{CHILD_LISTING_TABLES, ChildListingUnreadable, unreadable_child_listing_tables};
 pub use page::load_children_current_page_filtered;
 pub use reads::{
     count_registry_labels_current, load_children_current_page, load_children_current_summaries,

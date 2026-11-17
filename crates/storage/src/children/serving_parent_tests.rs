@@ -83,7 +83,7 @@ async fn serving_parent_is_the_earliest_current_pointer_and_reads_the_chain_poin
         .fetch_one(&mut *connection)
         .await?;
         let visited = pointer_rows_visited(&plan[0]["Plan"]);
-        // No reverse index yet: the lookup reads the chain's pointer rows, not more.
+        // The lookup reads at most the chain's pointer rows.
         assert!(visited <= 50000.0, "visited {visited} pointer rows: {plan}");
         eprintln!(
             "serving parent lookup: pointer_rows_visited={visited}; execution_ms={}; plan={plan}",

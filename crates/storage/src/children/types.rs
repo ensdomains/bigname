@@ -64,7 +64,7 @@ pub enum ChildrenCurrentOrder {
 }
 
 /// Page-narrowing controls for declared direct child page reads. `q` is caller-normalized text
-/// compared byte-wise against the served child name as a prefix or a substring; `include_expired=false` omits
+/// compared byte-wise against the stored child name as a prefix or a substring; `include_expired=false` omits
 /// children whose published registration is expired or released, plus children whose expiry
 /// is earlier than an optionally supplied fixed evaluation time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,7 +90,7 @@ impl Default for ChildrenCurrentPageFilter<'_> {
 }
 
 /// Sort-specific keyset position for declared direct child page reads. The name sort orders by
-/// the served name the cursor already carries, so it needs no value of its own; the timestamp
+/// the stored name key the cursor already carries, so it needs no value of its own. The timestamp
 /// sorts carry the row's (possibly absent) timestamp.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChildrenCurrentSortValue {
@@ -99,8 +99,10 @@ pub enum ChildrenCurrentSortValue {
 }
 
 /// Storage-local keyset cursor for declared direct child collection reads. Every sort breaks ties
-/// by served name and then by child id, so the page order is stable and readable whatever the
-/// sort; the name is therefore part of every cursor.
+/// by the stored name key (`project_child_listing.display_key`) and then by child id, so the
+/// page order is stable whatever the sort and the key is part of every cursor.
+/// `canonical_display_name` holds that key, which is the stored name unless the name is longer
+/// than 2,000 bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildrenCurrentKeysetCursor {
     pub sort_value: ChildrenCurrentSortValue,
