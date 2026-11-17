@@ -7,9 +7,11 @@
 //!
 //! The interpreted record key (`text:{key}`, `text_opaque:0x{hex}`, `data:{key}`,
 //! `dns:{resource}:0x{hex(name)}`) is part of the primary key and the hydration-order index of
-//! the record tables, and a PostgreSQL btree index row holds at most 2,704 bytes. Interpret skips
-//! a log whose formatted record key is over 2,400 bytes, as it skips a log whose indexed key is
-//! not the hash of its key. Every key of 2,400 bytes or fewer is interpreted as before.
+//! the record tables. Project's undo journal keys each changed row by its primary key as JSON
+//! text, where `"`, `\` and control characters take two or six bytes. A PostgreSQL btree index
+//! row holds at most 2,704 bytes. Interpret skips a log whose formatted record key is over 2,400
+//! bytes as JSON text, as it skips a log whose indexed key is not the hash of its key. Every key
+//! of 2,400 bytes or fewer as JSON text is interpreted as before.
 use serde_json::Value;
 
 use super::*;
@@ -759,4 +761,22 @@ fn the_longest_stored_key_with_the_most_stored_escaping_still_updates() -> anyho
         ]
     );
     Ok(())
+}
+
+/// The cap's count is serde_json's: every character class, alone and mixed.
+#[test]
+fn the_cap_counts_a_key_as_serde_json_writes_it() {
+    let mut keys: Vec<String> = (0_u8..=0x7f)
+        .map(|byte| char::from(byte).to_string())
+        .collect();
+    keys.extend(["é", "€", "😀", "\u{2028}"].map(str::to_owned));
+    keys.push((0_u8..=0x7f).map(char::from).collect());
+    keys.push(format!("text:{}\"\\\n\u{1}\u{1f}\u{7f}/€", hash_hex(64)));
+    for key in keys {
+        assert_eq!(
+            crate::schema_v2::common::json_escaped_len(&key),
+            escaped_len(&key),
+            "{key:?}"
+        );
+    }
 }
