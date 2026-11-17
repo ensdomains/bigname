@@ -61,10 +61,8 @@ pub(super) async fn refresh(
     changed_sources: &[Value],
 ) -> Result<(Vec<Uuid>, u64, u64)> {
     let mut resources: BTreeSet<Uuid> = rediscovered.iter().copied().collect();
-    resources.extend(
-        prepare::dependent_resources(transaction, chain, Value::Array(changed_sources.to_vec()))
-            .await?,
-    );
+    resources
+        .extend(prepare::dependent_resources(transaction, chain, changed_sources.to_vec()).await?);
     let resources: Vec<_> = resources.into_iter().collect();
     let mut written = 0;
     let mut undo = 0;
