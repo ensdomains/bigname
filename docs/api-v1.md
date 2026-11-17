@@ -2709,6 +2709,11 @@ Error envelope:
 }
 ```
 
+`details` is an open object. A `500 internal_error` answered for a panic in a
+request handler carries `details.request_id`, a string the API also writes to
+its log line for that panic. Quote it when reporting the error. The message is
+fixed and does not repeat the panic text.
+
 Uniform mapping:
 
 <!-- openapi:enum ErrorCode -->
