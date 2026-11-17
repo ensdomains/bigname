@@ -155,6 +155,12 @@ pub(super) async fn load_page_on(
         catalogue,
     };
     let filter = EventHistoryReadFilter::default().with_page_options(options);
+    // Every probe tests the emitter on its rows, so a contract that emitted nothing would read the
+    // address's whole history to find no row. One probe of the emitter's own index settles it.
+    let emitter_silent = match filter.contract_address.as_deref() {
+        Some(contract) => !emitter_has_events(transaction, contract).await?,
+        None => false,
+    };
     let mut membership = matches::Membership::new();
     // Position cursors remain usable after their row disappears. A legacy row-only cursor
     // still has to identify an eligible, unsuppressed member of this exact collection.
@@ -162,6 +168,10 @@ pub(super) async fn load_page_on(
         let block_number = if let Some(position) = &cursor.position {
             position.block_number
         } else {
+            // No row of a contract that emitted nothing can be the cursor's.
+            if emitter_silent {
+                return Err(super::InvalidHistoryCursor.into());
+            }
             let mut cursor_filter = filter.clone();
             if !cursor_filter.bind_cursor_anchor_to_event_kinds {
                 cursor_filter.event_kinds.clear();
@@ -212,12 +222,6 @@ pub(super) async fn load_page_on(
         HistorySummaryMode::Full => {
             anyhow::bail!("bounded address history requires count-only summary")
         }
-    };
-    // Every probe tests the emitter on its rows, so a contract that emitted nothing would read the
-    // address's whole history to find no row. One probe of the emitter's own index settles it.
-    let emitter_silent = match filter.contract_address.as_deref() {
-        Some(contract) => !emitter_has_events(transaction, contract).await?,
-        None => false,
     };
     let count_outcome = if emitter_silent {
         catalogue_count::CountOutcome::Exact(0)

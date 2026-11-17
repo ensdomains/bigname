@@ -17,6 +17,9 @@ mod scoped {
         pub counters: BTreeMap<&'static str, usize>,
         pub combined_peak: usize,
         pub catalogue_receipt: Option<serde_json::Value>,
+        /// Whether a `contract_address` read leapfrogs between the address's and the
+        /// contract's buckets. Off, the walk visits every bucket of the address.
+        pub contract_leapfrog: bool,
     }
 
     impl Default for AddressHistoryWorkingSet {
@@ -29,6 +32,7 @@ mod scoped {
                 counters: BTreeMap::new(),
                 combined_peak: 0,
                 catalogue_receipt: None,
+                contract_leapfrog: true,
             }
         }
     }
@@ -52,6 +56,17 @@ mod scoped {
                 )
             })
             .unwrap_or((256, 1_024))
+    }
+
+    pub(super) fn contract_leapfrog() -> bool {
+        WORKING_SET
+            .try_with(|stats| {
+                stats
+                    .lock()
+                    .expect("address-history metrics lock")
+                    .contract_leapfrog
+            })
+            .unwrap_or(true)
     }
 
     pub(super) fn change(kind: &'static str, before: usize, after: usize) {
@@ -108,6 +123,17 @@ pub(super) fn cache_capacity() -> usize {
     #[cfg(not(any(test, feature = "test-support")))]
     {
         1_024
+    }
+}
+
+pub(super) fn contract_leapfrog() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        scoped::contract_leapfrog()
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        true
     }
 }
 

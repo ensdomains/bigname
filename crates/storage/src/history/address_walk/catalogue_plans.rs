@@ -261,3 +261,160 @@ fn collect_scans(node: &Value, scans: &mut Vec<Value>) {
         collect_scans(child, scans);
     }
 }
+
+/// The contract side of the `contract_address` walk reads the emitter's own index with the
+/// emitter and the block bound in its index condition, and sorts nothing, in both orders and
+/// for the null bucket, under a forced generic plan and after six runs of a prepared statement.
+/// It holds for an emitter among many with a few dozen rows each, an emitter with one row, and
+/// a registry-shaped emitter that holds most of the rows.
+#[tokio::test]
+async fn emitter_seek_keeps_its_index_under_a_generic_plan() -> Result<()> {
+    const SPREAD: &str = "0x0000000000000000000000000000000000000021";
+    const ONE: &str = "0x00000000000000000000000000000000000000e1";
+    const SKEWED: &str = "0x00000000000000000000000000000000000000d1";
+    let database = bigname_test_support::TestDatabase::create(
+        bigname_test_support::TestDatabaseConfig::new("catalogue_emitter_seek_plan"),
+    )
+    .await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        super::plan_tests::install(&mut connection, 32, 3_200).await?;
+        // The registry-shaped emitter holds three rows in four. Ninety-seven emitters share the
+        // rest, so the key is selective for them. One emitter holds a single row, in bucket 5.
+        // ANALYZE samples every row of a table this small, so every run plans on the same
+        // statistics.
+        sqlx::raw_sql(&format!(
+            "UPDATE normalized_events SET raw_fact_ref = jsonb_build_object('emitting_address',
+                 CASE WHEN event_identity = 'plan:grant:1300' THEN '{ONE}'
+                      WHEN normalized_event_id % 4 <> 0 THEN '{SKEWED}'
+                      ELSE '0x' || lpad(to_hex(normalized_event_id % 97), 40, '0') END);
+             ANALYZE normalized_events"
+        ))
+        .execute(&mut *connection)
+        .await?;
+        let (spread, one, skewed, total): (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE emitter = $1), count(*) FILTER (WHERE emitter = $2),
+                    count(*) FILTER (WHERE emitter = $3), count(*)
+             FROM (SELECT raw_fact_ref ->> 'emitting_address' AS emitter
+                   FROM normalized_events) events",
+        )
+        .bind(SPREAD)
+        .bind(ONE)
+        .bind(SKEWED)
+        .fetch_one(&mut *connection)
+        .await?;
+        ensure!(
+            spread > 1 && one == 1 && skewed * 2 > total,
+            "fixture: {spread} {one} {skewed} of {total}"
+        );
+        for (shape, emitter) in [("spread", SPREAD), ("one row", ONE), ("skewed", SKEWED)] {
+            for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
+                let filter = EventHistoryReadFilter {
+                    order,
+                    ..Default::default()
+                };
+                for bucket in [0, 5, crate::history::catalogue_contract::NULL_BUCKET] {
+                    for (mode, runs) in [("force_generic_plan", 1), ("auto", 6)] {
+                        let label = format!("{shape} {order:?} bucket {bucket} {mode}");
+                        let plan = prepared_emitter_plan(
+                            &mut connection,
+                            emitter,
+                            &filter,
+                            bucket,
+                            mode,
+                            runs,
+                        )
+                        .await?;
+                        let mut scans = Vec::new();
+                        collect_scans(&plan[0]["Plan"], &mut scans);
+                        collect_nodes(&plan[0]["Plan"], &mut scans);
+                        ensure!(
+                            scans.iter().all(|node| node["type"] != "Seq Scan"
+                                && node["type"] != "Sort"
+                                && node["type"] != "Bitmap Heap Scan"),
+                            "{label}: {scans:?}"
+                        );
+                        let reads = scans
+                            .iter()
+                            .filter(|scan| scan["relation"] == "normalized_events")
+                            .collect::<Vec<_>>();
+                        ensure!(!reads.is_empty(), "{label}: {scans:?}");
+                        for read in reads {
+                            let condition = read["condition"].as_str().unwrap_or_default();
+                            ensure!(
+                                read["index"] == "normalized_events_emitter_history_idx"
+                                    && condition.contains("emitting_address")
+                                    && condition.contains("block_number"),
+                                "{label}: {scans:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+fn collect_nodes(node: &Value, nodes: &mut Vec<Value>) {
+    nodes.push(json!({"type":node["Node Type"]}));
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        collect_nodes(child, nodes);
+    }
+}
+
+/// `EXPLAIN (ANALYZE)` of the emitter seek as a prepared statement in `mode`, after `runs - 1`
+/// executions.
+async fn prepared_emitter_plan(
+    connection: &mut PgConnection,
+    emitter: &str,
+    filter: &EventHistoryReadFilter,
+    bucket: i64,
+    mode: &str,
+    runs: usize,
+) -> Result<Value> {
+    use sqlx::{Arguments, Execute};
+
+    let mut transaction = connection.begin().await?;
+    sqlx::query(&format!("SET LOCAL plan_cache_mode = {mode}"))
+        .execute(&mut *transaction)
+        .await?;
+    let mut query = QueryBuilder::<Postgres>::new("");
+    super::catalogue::push_emitter_seek_query(&mut query, emitter, filter, bucket);
+    sqlx::raw_sql(&format!("PREPARE emitter_seek AS {}", query.sql()))
+        .execute(&mut *transaction)
+        .await?;
+    let mut built = query.build();
+    let arguments = built
+        .take_arguments()
+        .map_err(anyhow::Error::from_boxed)?
+        .unwrap_or_default();
+    // EXECUTE takes no protocol parameters, so PostgreSQL renders each bound value as a quoted
+    // literal for it.
+    let placeholders = (1..=arguments.len())
+        .map(|index| format!("quote_nullable(${index})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let literals: Vec<String> =
+        sqlx::query_scalar_with(&format!("SELECT ARRAY[{placeholders}]"), arguments)
+            .persistent(false)
+            .fetch_one(&mut *transaction)
+            .await?;
+    let execute = format!("EXECUTE emitter_seek({})", literals.join(", "));
+    for _ in 1..runs {
+        sqlx::raw_sql(&execute).execute(&mut *transaction).await?;
+    }
+    let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {execute}"))
+        .persistent(false)
+        .fetch_one(&mut *transaction)
+        .await?;
+    // A prepared statement belongs to the session, not the transaction.
+    sqlx::raw_sql("DEALLOCATE emitter_seek")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.rollback().await?;
+    Ok(plan)
+}
