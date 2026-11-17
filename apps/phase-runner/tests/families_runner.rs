@@ -1268,17 +1268,25 @@ async fn guarded_resolver_at_block_10(prefix: &str) -> Result<(ScratchDatabase, 
         .run_batch(context_on(MAINNET, &published, None))
         .await?;
     ensure!(marker_on(&scratch, MAINNET).await? == Some(10));
-    for manifest_id in [GUARDED_MANIFEST, RECORD_ID_MANIFEST] {
+    // The rows serve the foreign key from normalized_events. A chain holds one row per
+    // namespace, source family, deployment label and version, and one active row per namespace
+    // and source family, so the record-ID manifest takes its own label and is a shadow.
+    for (manifest_id, deployment_label, rollout_status) in [
+        (GUARDED_MANIFEST, "fixture", "active"),
+        (RECORD_ID_MANIFEST, "fixture-record-id", "shadow"),
+    ] {
         sqlx::query(
             "INSERT INTO manifest_versions (manifest_id, manifest_version, namespace,
                  source_family, chain_id, deployment_label, rollout_status, normalizer_version,
                  file_path, manifest_payload)
              OVERRIDING SYSTEM VALUE
-             VALUES ($1, 1, 'ens', 'ens_v2_resolver_l1', $2, 'fixture', 'active', 'fixture',
+             VALUES ($1, 1, 'ens', 'ens_v2_resolver_l1', $2, $3, $4, 'fixture',
                  'fixture/resolver-' || $1::text || '.toml', '{\"contracts\":[]}'::jsonb)",
         )
         .bind(manifest_id)
         .bind(MAINNET)
+        .bind(deployment_label)
+        .bind(rollout_status)
         .execute(scratch.pool())
         .await?;
     }
