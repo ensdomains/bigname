@@ -2,6 +2,7 @@
 //! Rebuild and replay use the same reducers and undo journal as live follow. A failed block
 //! leaves the marker and every family at the preceding complete publication.
 mod addresses;
+mod bind;
 mod block;
 mod child_registrations;
 mod classification;
@@ -497,6 +498,12 @@ async fn current_marker(pool: &PgPool, chain_id: &str) -> (Option<Marker>, bool)
     (Some(current), readable)
 }
 
+#[cfg(test)]
+#[path = "bind_log.rs"]
+mod bind_log;
+#[cfg(test)]
+#[path = "bind_tests.rs"]
+mod bind_tests;
 #[cfg(test)]
 #[path = "guard_tests.rs"]
 mod guard_tests;
