@@ -15,14 +15,14 @@ use super::{
 };
 use crate::Marker;
 
-fn at(number: i64) -> Marker {
+pub(super) fn at(number: i64) -> Marker {
     Marker {
         number,
         hash: hash(number),
     }
 }
 
-fn row(value: Value) -> Row {
+pub(super) fn row(value: Value) -> Row {
     let Value::Object(row) = value else {
         unreachable!("rows are objects")
     };
@@ -55,7 +55,7 @@ fn pointer(number: i64, log: i64, resolver: &str) -> Row {
     )
 }
 
-const RESOLVER: &str = "0x00000000000000000000000000000000000000r1";
+pub(super) const RESOLVER: &str = "0x00000000000000000000000000000000000000r1";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 
 fn link(number: i64, log: i64, node: &str, record_id: &str) -> Row {
@@ -107,7 +107,7 @@ async fn publish(
 }
 
 /// Every family table as ordered JSON, and the marker without its sequence.
-async fn snapshot(pool: &PgPool) -> Result<Vec<(String, Value)>> {
+pub(super) async fn snapshot(pool: &PgPool) -> Result<Vec<(String, Value)>> {
     let mut snapshot = Vec::new();
     for name in tables::JOURNALLED
         .iter()
@@ -133,7 +133,7 @@ async fn snapshot(pool: &PgPool) -> Result<Vec<(String, Value)>> {
 }
 
 /// Undo the block the marker stands on under an undoing repair record whose target is `pending`.
-async fn undo_one(pool: &PgPool, pending: i64) -> Result<Option<Marker>> {
+pub(super) async fn undo_one(pool: &PgPool, pending: i64) -> Result<Option<Marker>> {
     sqlx::query(
         "INSERT INTO project_repair_record (chain_id, attempt, reason, replay_target_number,
              replay_target_hash, state, pending_undo_target)
@@ -156,7 +156,7 @@ async fn undo_one(pool: &PgPool, pending: i64) -> Result<Option<Marker>> {
         })))
 }
 
-fn key(table: &'static TableSpec, row: &Row) -> Row {
+pub(super) fn key(table: &'static TableSpec, row: &Row) -> Row {
     table
         .key
         .iter()
