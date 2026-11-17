@@ -1038,10 +1038,14 @@ async fn a_record_key_at_the_cap_is_stored_under_the_longest_arm_identity() -> R
 }
 
 const MAINNET: &str = "ethereum-mainnet";
-/// The ENSv2 resolver manifest of the guarded-arm writes below. Its three digits make the arm
-/// identity `{node}|ens_v2_resolver_l1|ens|101` 93 bytes, the longest in use.
+/// The ENSv2 resolver manifest of the node-keyed writes below. Its three digits make the guarded
+/// arm identity `{node}|ens_v2_resolver_l1|ens|101` 93 bytes, the longest in use.
 const GUARDED_MANIFEST: i64 = 101;
 const GUARDED_RESOLVER: &str = "0x00000000000000000000000000000000000000c2";
+/// The record-ID resolver manifest. The adapter reads a manifest that declares `Linked` as a
+/// record-ID resolver, so the two writes need their own manifests and resolvers.
+const RECORD_ID_MANIFEST: i64 = 102;
+const RECORD_ID_RESOLVER: &str = "0x00000000000000000000000000000000000000c3";
 
 alloy_sol_types::sol! {
     event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
@@ -1095,8 +1099,9 @@ async fn a_record_key_over_the_cap_as_json_text_is_skipped_before_project() -> R
 
 // The widest key Interpret admits: 2,400 bytes as JSON text, hex with 50 quotes, 2,350 bytes as
 // UTF-8. Interpret writes it by node and by record id through the schema-v2 adapter, and Project
-// stores both rows and journals them under the guarded arm on ethereum-mainnet. The node record
-// row's journal key is 2,574 bytes, so its index row is 2,648 bytes of PostgreSQL's 2,704.
+// stores both rows and journals them on ethereum-mainnet, the node record row under the guarded
+// arm. That row's journal key is 2,574 bytes, so its index row is 2,648 bytes of PostgreSQL's
+// 2,704.
 #[tokio::test]
 async fn the_widest_record_key_as_json_text_is_stored_and_journalled() -> Result<()> {
     use anyhow::Context as _;
@@ -1132,18 +1137,20 @@ async fn the_widest_record_key_as_json_text_is_stored_and_journalled() -> Result
          FROM project_record_id_value WHERE chain_id = $1 AND resolver_address = $2",
     )
     .bind(MAINNET)
-    .bind(GUARDED_RESOLVER)
+    .bind(RECORD_ID_RESOLVER)
     .fetch_one(scratch.pool())
     .await?;
     ensure!(stored == (78, 2_350), "{stored:?}");
     let journal: Vec<(String, i32)> = sqlx::query_as(
         "SELECT family, octet_length(key) FROM project_family_undo
-         WHERE chain_id = $1 AND block_number = 11 AND strpos(key, $2) > 0
-           AND family IN ('project_node_record_value', 'project_record_id_value')
+         WHERE chain_id = $1 AND block_number = 11
+           AND (family = 'project_node_record_value' AND strpos(key, $2) > 0
+             OR family = 'project_record_id_value' AND strpos(key, $3) > 0)
          ORDER BY family",
     )
     .bind(MAINNET)
     .bind(GUARDED_RESOLVER)
+    .bind(RECORD_ID_RESOLVER)
     .fetch_all(scratch.pool())
     .await?;
     ensure!(
@@ -1223,7 +1230,7 @@ fn json_text_len(text: &str) -> usize {
     serde_json::to_string(text).map_or(0, |json| json.len() - 2)
 }
 
-/// The 20 control characters JSON writes as six-byte `\u00xx` escapes, NUL aside.
+/// Twenty of the control characters JSON writes as six-byte `\u00xx` escapes, NUL aside.
 fn six_byte_controls() -> Vec<char> {
     (0x01_u8..0x20)
         .filter(|byte| !matches!(byte, 0x08..=0x0a | 0x0c | 0x0d))
@@ -1252,8 +1259,8 @@ fn hex_with(digits: usize, inserted: &[char]) -> String {
     text
 }
 
-/// Lineage on ethereum-mainnet with the families published through block 10, and the ENSv2
-/// resolver manifest of the guarded arm. Returns the database and the published marker.
+/// Lineage on ethereum-mainnet with the families published through block 10, and the two ENSv2
+/// resolver manifests. Returns the database and the published marker.
 async fn guarded_resolver_at_block_10(prefix: &str) -> Result<(ScratchDatabase, BlockMarker)> {
     let scratch = ready_on(prefix, MAINNET).await?;
     let published = head_marker_on(&scratch, MAINNET, 10).await?;
@@ -1261,36 +1268,66 @@ async fn guarded_resolver_at_block_10(prefix: &str) -> Result<(ScratchDatabase, 
         .run_batch(context_on(MAINNET, &published, None))
         .await?;
     ensure!(marker_on(&scratch, MAINNET).await? == Some(10));
-    sqlx::query(
-        "INSERT INTO manifest_versions (manifest_id, manifest_version, namespace, source_family,
-             chain_id, deployment_label, rollout_status, normalizer_version, file_path,
-             manifest_payload)
-         OVERRIDING SYSTEM VALUE
-         VALUES ($1, 1, 'ens', 'ens_v2_resolver_l1', $2, 'fixture', 'active', 'fixture',
-             'fixture/guarded-resolver.toml', '{\"contracts\":[]}'::jsonb)",
-    )
-    .bind(GUARDED_MANIFEST)
-    .bind(MAINNET)
-    .execute(scratch.pool())
-    .await?;
+    for manifest_id in [GUARDED_MANIFEST, RECORD_ID_MANIFEST] {
+        sqlx::query(
+            "INSERT INTO manifest_versions (manifest_id, manifest_version, namespace,
+                 source_family, chain_id, deployment_label, rollout_status, normalizer_version,
+                 file_path, manifest_payload)
+             OVERRIDING SYSTEM VALUE
+             VALUES ($1, 1, 'ens', 'ens_v2_resolver_l1', $2, 'fixture', 'active', 'fixture',
+                 'fixture/resolver-' || $1::text || '.toml', '{\"contracts\":[]}'::jsonb)",
+        )
+        .bind(manifest_id)
+        .bind(MAINNET)
+        .execute(scratch.pool())
+        .await?;
+    }
     Ok((scratch, published))
 }
 
-/// Interpret a `TextChanged` and a `TextUpdated` of `key`, both from the guarded resolver at
-/// block 11 of ethereum-mainnet, through the schema-v2 adapter, and file every event it emits as
-/// Interpret stores it. Returns how many `RecordChanged` events it filed.
+/// Interpret a `TextChanged` of `key` from the guarded resolver and a `TextUpdated` of `key` from
+/// the record-ID resolver, both at block 11 of ethereum-mainnet, through the schema-v2 adapter,
+/// and file every event it emits as Interpret stores it. Returns how many `RecordChanged` events
+/// it filed.
 async fn interpret_guarded_text_writes(scratch: &ScratchDatabase, key: &str) -> Result<usize> {
     use alloy_sol_types::SolEvent as _;
     use bigname_adapters::schema_v2::{
         AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
     };
 
-    let events = serde_json::json!({ "abi": { "events": [
+    let manifest = |manifest_id: i64, events: serde_json::Value| ManifestInput {
+        manifest_id,
+        manifest_version: 1,
+        namespace: "ens".to_owned(),
+        source_family: "ens_v2_resolver_l1".to_owned(),
+        chain_id: MAINNET.to_owned(),
+        deployment_label: "fixture".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+        payload_json: serde_json::json!({ "abi": { "events": events } }).to_string(),
+    };
+    let admission = |manifest_id: i64, address: &str| AddressAdmissionInput {
+        address: address.to_owned(),
+        contract_instance_id: uuid::Uuid::from_u128(u128::try_from(manifest_id).unwrap_or(0)),
+        source_manifest_id: Some(manifest_id),
+        role: Some("resolver".to_owned()),
+        discovery_edge_kind: None,
+        discovery_from_contract_instance_id: None,
+        discovery_observation_key: None,
+        active_from_block: Some(0),
+        active_to_block: None,
+    };
+    let node_events = serde_json::json!([{
+        "name": "TextChanged",
+        "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+        "emitter_roles": ["resolver"],
+        "normalized_events": ["RecordChanged"],
+    }]);
+    let record_id_events = serde_json::json!([
         {
-            "name": "TextChanged",
-            "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            "name": "Linked",
+            "fragment": "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)",
             "emitter_roles": ["resolver"],
-            "normalized_events": ["RecordChanged"],
+            "normalized_events": ["ResolverRecordLinked", "PreimageObserved"],
         },
         {
             "name": "TextUpdated",
@@ -1298,49 +1335,42 @@ async fn interpret_guarded_text_writes(scratch: &ScratchDatabase, key: &str) -> 
             "emitter_roles": ["resolver"],
             "normalized_events": ["RecordChanged"],
         },
-    ] } });
+    ]);
     let logs = [
-        TextChanged {
-            node: keccak256(b"escaped record key node"),
-            indexedKey: keccak256(key.as_bytes()),
-            key: key.to_owned(),
-            value: "value".to_owned(),
-        }
-        .encode_log_data(),
-        TextUpdated {
-            recordId: alloy_primitives::U256::MAX,
-            keyHash: keccak256(key.as_bytes()),
-            key: key.to_owned(),
-            value: "value".to_owned(),
-        }
-        .encode_log_data(),
+        (
+            GUARDED_RESOLVER,
+            TextChanged {
+                node: keccak256(b"escaped record key node"),
+                indexedKey: keccak256(key.as_bytes()),
+                key: key.to_owned(),
+                value: "value".to_owned(),
+            }
+            .encode_log_data(),
+        ),
+        (
+            RECORD_ID_RESOLVER,
+            TextUpdated {
+                recordId: alloy_primitives::U256::MAX,
+                keyHash: keccak256(key.as_bytes()),
+                key: key.to_owned(),
+                value: "value".to_owned(),
+            }
+            .encode_log_data(),
+        ),
     ];
     let block_hash = format!("{MAINNET}-block-11");
     let block_timestamp = sqlx::types::time::OffsetDateTime::from_unix_timestamp(11)?;
     let output = bigname_adapters::interpret_schema_v2_batch(BatchInput {
         chain_id: MAINNET.to_owned(),
-        manifests: vec![ManifestInput {
-            manifest_id: GUARDED_MANIFEST,
-            manifest_version: 1,
-            namespace: "ens".to_owned(),
-            source_family: "ens_v2_resolver_l1".to_owned(),
-            chain_id: MAINNET.to_owned(),
-            deployment_label: "fixture".to_owned(),
-            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
-            payload_json: events.to_string(),
-        }],
+        manifests: vec![
+            manifest(GUARDED_MANIFEST, node_events),
+            manifest(RECORD_ID_MANIFEST, record_id_events),
+        ],
         discovery_rules: Vec::new(),
-        admissions: vec![AddressAdmissionInput {
-            address: GUARDED_RESOLVER.to_owned(),
-            contract_instance_id: uuid::Uuid::from_u128(101),
-            source_manifest_id: Some(GUARDED_MANIFEST),
-            role: Some("resolver".to_owned()),
-            discovery_edge_kind: None,
-            discovery_from_contract_instance_id: None,
-            discovery_observation_key: None,
-            active_from_block: Some(0),
-            active_to_block: None,
-        }],
+        admissions: vec![
+            admission(GUARDED_MANIFEST, GUARDED_RESOLVER),
+            admission(RECORD_ID_MANIFEST, RECORD_ID_RESOLVER),
+        ],
         prior_events: Vec::new(),
         blocks: vec![RawBlockInput {
             chain_id: MAINNET.to_owned(),
@@ -1352,7 +1382,7 @@ async fn interpret_guarded_text_writes(scratch: &ScratchDatabase, key: &str) -> 
         raw_logs: logs
             .into_iter()
             .zip(0_i64..)
-            .map(|(log, log_index)| RawLogInput {
+            .map(|((emitter, log), log_index)| RawLogInput {
                 chain_id: MAINNET.to_owned(),
                 block_hash: block_hash.clone(),
                 block_number: 11,
@@ -1361,7 +1391,7 @@ async fn interpret_guarded_text_writes(scratch: &ScratchDatabase, key: &str) -> 
                 transaction_hash: format!("{MAINNET}-transaction-11"),
                 transaction_index: 0,
                 log_index,
-                emitting_address: GUARDED_RESOLVER.to_owned(),
+                emitting_address: emitter.to_owned(),
                 topics: log
                     .topics()
                     .iter()
@@ -1400,16 +1430,17 @@ async fn interpret_guarded_text_writes(scratch: &ScratchDatabase, key: &str) -> 
         .count())
 }
 
-/// The guarded resolver's node record and record-id rows on ethereum-mainnet.
+/// The guarded resolver's node record rows and the record-ID resolver's rows on ethereum-mainnet.
 async fn guarded_record_rows(scratch: &ScratchDatabase) -> Result<(i64, i64)> {
     Ok(sqlx::query_as(
         "SELECT (SELECT count(*) FROM project_node_record_value
                  WHERE chain_id = $1 AND resolver_address = $2),
                 (SELECT count(*) FROM project_record_id_value
-                 WHERE chain_id = $1 AND resolver_address = $2)",
+                 WHERE chain_id = $1 AND resolver_address = $3)",
     )
     .bind(MAINNET)
     .bind(GUARDED_RESOLVER)
+    .bind(RECORD_ID_RESOLVER)
     .fetch_one(scratch.pool())
     .await?)
 }
