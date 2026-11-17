@@ -411,7 +411,14 @@ fn whole_registry_warning_counts_tokens_not_registry_level_events() {
     };
     let parent = event(&format!("{REGISTRY}:-:-:-:ParentUpdated"));
     let token = event(&format!("{REGISTRY}:-:0x01:-:LabelRegistered"));
-    let loads = |prior: &[_]| super::whole_registry_loads(prior, &dependencies);
+    // Fed one event at a time, as the restore's chunk edges may fall anywhere.
+    let loads = |prior: &[_]| {
+        let mut loads = super::restore_pass::WholeRegistryLoads::new(&dependencies);
+        for event in prior {
+            loads.observe(std::slice::from_ref(event));
+        }
+        loads.finish()
+    };
     assert_eq!(
         loads(std::slice::from_ref(&parent)),
         [(REGISTRY.to_owned(), 0, 1, 2)]

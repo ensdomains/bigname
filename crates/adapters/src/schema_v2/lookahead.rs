@@ -382,17 +382,92 @@ pub fn prepare_schema_v2_batch_lookahead(
 /// `latest_v2_topology` is the timestamp of the chain's latest ENSv2 registry event before the
 /// batch, which a restore of every event would have reached.
 pub fn restore_schema_v2_lookahead_session(
-    mut restore: AdapterSessionRestore,
+    restore: AdapterSessionRestore,
     prior_events: Vec<PriorEventInput>,
     resume_predecessor_timestamp: Option<time::OffsetDateTime>,
     latest_v2_topology: Option<time::OffsetDateTime>,
     loaded: &V1BatchDependencies,
 ) -> anyhow::Result<AdapterSession> {
-    coverage::checked(loaded, true, || {
-        restore.apply_prior_events(prior_events)?;
-        restore.include_v2_topology_timestamp(latest_v2_topology);
-        Ok(restore.finish(resume_predecessor_timestamp))
-    })
+    let mut restore = LookaheadRestore::new(restore, loaded);
+    restore.apply(prior_events)?;
+    restore.finish(resume_predecessor_timestamp, latest_v2_topology)
+}
+
+/// `restore_schema_v2_lookahead_session` with the prior events handed over in restore order
+/// across several calls, so the caller holds one chunk of them at a time. Each chunk is
+/// applied under the loaded-keys check. Time-derived state advances once, in `finish`, and
+/// the unloaded keys every step read are reported together there, so the session, or the
+/// error, is the one a single call over all the events gives.
+///
+/// Every check reads the loaded names and ENSv2 state keys `new` was given, built once. No
+/// later call takes another set, so one restore cannot be checked against two.
+pub struct LookaheadRestore {
+    restore: AdapterSessionRestore,
+    loaded: coverage::LoadedSets,
+    latest_v2_delta: Option<i64>,
+    unloaded: Option<UnloadedKeys>,
+}
+
+impl LookaheadRestore {
+    pub fn new(restore: AdapterSessionRestore, loaded: &V1BatchDependencies) -> Self {
+        Self {
+            restore,
+            loaded: coverage::LoadedSets::new(loaded),
+            latest_v2_delta: None,
+            unloaded: None,
+        }
+    }
+
+    /// Apply the next prior events. An unloaded key is kept for `finish`, so only another
+    /// error ends the restore here.
+    pub fn apply(&mut self, events: Vec<PriorEventInput>) -> anyhow::Result<()> {
+        let restore = &mut self.restore;
+        let mut latest = None;
+        let applied = coverage::checked_with(&mut self.loaded, true, || {
+            latest = restore.apply_prior_event_rows(events)?;
+            Ok(())
+        });
+        self.latest_v2_delta = self.latest_v2_delta.max(latest);
+        let Err(error) = applied else {
+            return Ok(());
+        };
+        let keys = error.downcast::<UnloadedKeys>()?;
+        self.unloaded = Some(merge_unloaded(self.unloaded.take(), keys));
+        Ok(())
+    }
+
+    pub fn finish(
+        self,
+        resume_predecessor_timestamp: Option<time::OffsetDateTime>,
+        latest_v2_topology: Option<time::OffsetDateTime>,
+    ) -> anyhow::Result<AdapterSession> {
+        let Self {
+            mut restore,
+            mut loaded,
+            latest_v2_delta,
+            unloaded,
+        } = self;
+        let session = coverage::checked_with(&mut loaded, true, || {
+            restore.settle_prior_events(latest_v2_delta)?;
+            restore.include_v2_topology_timestamp(latest_v2_topology);
+            Ok(restore.finish(resume_predecessor_timestamp))
+        });
+        let Some(unloaded) = unloaded else {
+            return session;
+        };
+        let more = session
+            .err()
+            .and_then(|error| error.downcast::<UnloadedKeys>().ok());
+        Err(merge_unloaded(more, unloaded).into())
+    }
+}
+
+fn merge_unloaded(collected: Option<UnloadedKeys>, mut keys: UnloadedKeys) -> UnloadedKeys {
+    if let Some(collected) = collected {
+        keys.names.extend(collected.names);
+        keys.v2_keys.extend(collected.v2_keys);
+    }
+    keys
 }
 
 /// Whether `key` is loaded, itself or through its registry.
@@ -403,6 +478,8 @@ pub fn v2_key_loaded(loaded: &V1BatchDependencies, key: &str) -> bool {
             .is_some_and(|(address, _)| loaded.v2_keys.contains(&v2_registry_key(address)))
 }
 
+#[cfg(test)]
+pub(super) use coverage::loaded_set_builds;
 pub use coverage::{UnloadedKeys, v2_key, v2_registry_key};
 pub(super) use coverage::{
     observe_name, observe_node, observe_v2, observe_v2_expiry_window, observe_v2_registry,

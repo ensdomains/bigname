@@ -2694,6 +2694,15 @@ or the latest persisted state per key. A smaller capacity may cause more
 database reads, but it has no interpretation meaning and is not part of the
 [interpreter content hash](glossary.md#interpreter-content-hash).
 
+The [lookahead loader](glossary.md#lookahead-loader) holds at most 1,024 decoded
+prior events at a time. Its rounds read events in chunks of that size and keep
+only the references they follow. Its restore applies the final set's events in
+chunks of that size, in restore order, and drops each chunk once applied. The
+adapter state the restore builds is not bounded this way: it keeps every loaded
+name, resource and [ENSv2 state key](glossary.md#ensv2-state-key) until the batch
+ends. A batch whose time span makes many registrations fall due still needs
+memory in proportion to them.
+
 ENSv1 [registry fallback handoff](glossary.md#registry-fallback-handoff)
 tracking is populated only by pointers selected through the old registry. Its
 per-name fan-out contains at most one entry for each distinct registry, registrar, or wrapper resource given an old-registry pointer since the preceding handoff. Repeated authority epochs and wrap/unwrap cycles can therefore grow this set without a fixed per-name ceiling until handoff.
@@ -2789,9 +2798,11 @@ of those names and resources, adds the names and resources those events
 reference, and repeats until a round adds nothing. Each round reads only the
 names, resources and ENSv2 state keys the previous round added, and a retried
 attempt (below) only the names and keys it adds and what those link to, so
-Interpret reads each name, resource and key once per batch: in one snapshot the
-latest event of a key does not depend on which names, resources or keys asked
-for it. To find the state keys of the
+the rounds read each name, resource and key once per batch. They read events
+only to follow their references. The restore then reads the latest events of the
+final set again in one query, which returns exactly the rounds' events: in one
+snapshot the latest event of a key does not depend on which names, resources or
+keys asked for it. To find the state keys of the
 requested names and resources it reads every stored event of theirs marked
 canonical, safe or finalized, whether or not the event's block is still on the
 canonical lineage, and the restore then takes, for each key, the latest event on
