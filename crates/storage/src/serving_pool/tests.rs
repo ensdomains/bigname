@@ -22,18 +22,18 @@ const DROP_AFTER: Duration = Duration::from_millis(50);
 const WAIT_STEP: Duration = Duration::from_millis(20);
 const WAIT_STEPS: usize = 500;
 
-async fn database(name: &str) -> Result<TestDatabase> {
+pub(super) async fn database(name: &str) -> Result<TestDatabase> {
     TestDatabase::create(TestDatabaseConfig::new(name)).await
 }
 
 /// A pool built as the API builds its request pool, on the test database.
-async fn serving_pool(db: &TestDatabase, max_connections: u32) -> Result<PgPool> {
+pub(super) async fn serving_pool(db: &TestDatabase, max_connections: u32) -> Result<PgPool> {
     Ok(serving_pool_options(max_connections)
         .connect_with(db.pool().connect_options().as_ref().clone())
         .await?)
 }
 
-async fn acquire_all(pool: &PgPool, size: u32) -> Result<Vec<PoolConnection<Postgres>>> {
+pub(super) async fn acquire_all(pool: &PgPool, size: u32) -> Result<Vec<PoolConnection<Postgres>>> {
     let mut held = Vec::new();
     for _ in 0..size {
         held.push(pool.acquire().await?);
@@ -61,7 +61,7 @@ async fn drop_begin_in_flight(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-async fn backend_pid(conn: &mut PgConnection) -> Result<i32> {
+pub(super) async fn backend_pid(conn: &mut PgConnection) -> Result<i32> {
     Ok(sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *conn)
         .await?)
@@ -69,7 +69,10 @@ async fn backend_pid(conn: &mut PgConnection) -> Result<i32> {
 
 /// The backend of `conn` and the session state the server reports for it, read from `observer`,
 /// another pool.
-async fn server_state(observer: &PgPool, conn: &mut PgConnection) -> Result<(i32, String)> {
+pub(super) async fn server_state(
+    observer: &PgPool,
+    conn: &mut PgConnection,
+) -> Result<(i32, String)> {
     let pid = backend_pid(conn).await?;
     let state: String = sqlx::query_scalar("SELECT state FROM pg_stat_activity WHERE pid = $1")
         .bind(pid)
@@ -79,11 +82,11 @@ async fn server_state(observer: &PgPool, conn: &mut PgConnection) -> Result<(i32
     Ok((pid, state))
 }
 
-fn idle(pid: i32) -> (i32, String) {
+pub(super) fn idle(pid: i32) -> (i32, String) {
     (pid, "idle".to_owned())
 }
 
-async fn wait_until_idle(pool: &PgPool, count: usize) -> Result<()> {
+pub(super) async fn wait_until_idle(pool: &PgPool, count: usize) -> Result<()> {
     for _ in 0..WAIT_STEPS {
         if pool.num_idle() == count {
             return Ok(());
@@ -109,7 +112,7 @@ async fn wait_until_ended(observer: &PgPool, pid: i32) -> Result<()> {
 }
 
 /// A read as the API composes one: a pinned snapshot, a statement in it, a commit.
-async fn composed_read(pool: &PgPool) -> Result<()> {
+pub(super) async fn composed_read(pool: &PgPool) -> Result<()> {
     let mut snapshot = crate::begin_read_snapshot(pool).await?;
     let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
         .fetch_one(&mut *snapshot)
@@ -124,7 +127,7 @@ async fn composed_read(pool: &PgPool) -> Result<()> {
 
 /// What this thread logs while a capture is held.
 #[derive(Clone, Default)]
-struct Logs(Arc<Mutex<Vec<u8>>>);
+pub(super) struct Logs(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for Logs {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -141,7 +144,7 @@ impl io::Write for Logs {
 }
 
 impl Logs {
-    fn capture(&self) -> tracing::subscriber::DefaultGuard {
+    pub(super) fn capture(&self) -> tracing::subscriber::DefaultGuard {
         let logs = self.clone();
         tracing::subscriber::set_default(
             tracing_subscriber::fmt()
@@ -151,7 +154,7 @@ impl Logs {
         )
     }
 
-    fn text(&self) -> String {
+    pub(super) fn text(&self) -> String {
         String::from_utf8_lossy(&self.0.lock().expect("log buffer poisoned")).into_owned()
     }
 }

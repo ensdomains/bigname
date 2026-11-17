@@ -120,7 +120,7 @@ recommended starting point before the public edge is undrained.
 
 | Environment variable | Default | Undrain starting value | Mechanism |
 | --- | ---: | ---: | --- |
-| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every v2 REST, status, and health route; returns `408 request_timeout`. Plus 5 s, it is each API connection's `idle_in_transaction_session_timeout`. |
+| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every v2 REST, status, and health route; returns `408 request_timeout` and logs one WARN line with the matched route template and the deadline. Plus 5 s, it is each API connection's `idle_in_transaction_session_timeout`. |
 | `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to both API request pools. The readiness pool has a fixed two-second check limit. |
 | `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. `/healthz` bypasses it. |
 | `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` | Independent in-flight ceiling reserved for `/healthz`; excess health work is load-shed as `503 overloaded`. |
@@ -168,6 +168,15 @@ ceiling. `/v1/status` no longer scans the legacy invalidation backlog: its
 schema-v2 status read is bounded by the configured request timeout and uses
 the phase lookup pool.
 
+A request that reaches the whole-request deadline logs one WARN line,
+`request exceeded the configured time limit`, with `route` and `timeout_ms`.
+`route` is the matched route template, or `unmatched`, never the raw path.
+`timeout_ms` is the configured deadline. A panic in a request handler answers
+`500 internal_error` with `details.request_id` and logs one ERROR line,
+`request handler panicked`, with the same `request_id` and the panic text. The
+response never carries the panic text. Before this build, a panic dropped the
+connection with no response and no log line.
+
 The RPC deadlines are shorter than the whole-request deadline. A hung provider
 therefore becomes the route's existing in-band execution-failure result rather
 than consuming an API request indefinitely. The request deadline remains a
@@ -181,8 +190,11 @@ the limits together. The readiness-pool result determines database
 reachability, while `database.identity` is populated only when both probes
 return the same opaque identity token. The
 phase request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; the readiness
-connection is additional, so the API process can open at most
-`BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
+connection and the connection that cancels a dropped request's statement are
+additional, so the API process holds at most
+`BIGNAME_DATABASE_MAX_CONNECTIONS + 2` PostgreSQL connections. A connection the
+API closes after an unanswered cancel can leave its server session open
+briefly (`docs/deployment.md`, the cancel on drop).
 HTTP-concurrency saturation and exhaustion of the request pool therefore
 cannot queue the readiness probe past the compose healthcheck's five-second
 window: a healthy but busy process returns `200` with `status="ready"`, though

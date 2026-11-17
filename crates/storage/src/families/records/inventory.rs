@@ -102,9 +102,7 @@ async fn family_record_inventory_for_key(
     let Some(resource_id) = resource_id else {
         return Ok(None);
     };
-    let mut snapshot = crate::families::read_snapshot(pool)
-        .await
-        .map_err(internal)?;
+    let mut snapshot = crate::begin_read_snapshot(pool).await.map_err(internal)?;
     let chain_id: String =
         sqlx::query_scalar("SELECT chain_id FROM bigname_phase.resources WHERE resource_id = $1")
             .bind(resource_id)
