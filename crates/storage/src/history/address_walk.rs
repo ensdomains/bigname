@@ -213,7 +213,15 @@ pub(super) async fn load_page_on(
             anyhow::bail!("bounded address history requires count-only summary")
         }
     };
-    let count_outcome = if catalogue {
+    // Every probe tests the emitter on its rows, so a contract that emitted nothing would read the
+    // address's whole history to find no row. One probe of the emitter's own index settles it.
+    let emitter_silent = match filter.contract_address.as_deref() {
+        Some(contract) => !emitter_has_events(transaction, contract).await?,
+        None => false,
+    };
+    let count_outcome = if emitter_silent {
+        catalogue_count::CountOutcome::Exact(0)
+    } else if catalogue {
         catalogue_count::count(transaction, &read, &filter, summary_mode).await?
     } else {
         catalogue_count::CountOutcome::Unknown
@@ -231,16 +239,18 @@ pub(super) async fn load_page_on(
         },
     );
     let page_timer = seams::Timer::new("address_history_page_walk_micros");
-    walk::collect(
-        transaction,
-        &read,
-        &filter,
-        keyset.as_ref(),
-        None,
-        &mut membership,
-        &mut output,
-    )
-    .await?;
+    if !emitter_silent {
+        walk::collect(
+            transaction,
+            &read,
+            &filter,
+            keyset.as_ref(),
+            None,
+            &mut membership,
+            &mut output,
+        )
+        .await?;
+    }
     drop(page_timer);
     let total = if let Some(count) = proved_count {
         count
@@ -317,4 +327,30 @@ pub(super) async fn load_page_on(
         }),
         interpret_redo_fence: fence.cloned(),
     })
+}
+
+/// Whether `contract` emitted any readable event, by the leading key of
+/// `normalized_events_emitter_history_idx` and the terms that index is partial on. The walk's
+/// filters imply all three, so `false` means no row of any page can match.
+async fn emitter_has_events(
+    connection: &mut sqlx::PgConnection,
+    contract: &str,
+) -> anyhow::Result<bool> {
+    use anyhow::Context;
+
+    let emitted = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events ne
+         WHERE lower(ne.raw_fact_ref ->> 'emitting_address') = $1
+           AND ne.raw_fact_ref ->> 'emitting_address' IS NOT NULL
+           AND ne.canonicality_state IN ('canonical', 'safe', 'finalized'))",
+    )
+    .bind(contract)
+    .persistent(false)
+    .fetch_one(connection)
+    .await
+    .context("failed to probe the requested contract's events")?;
+    if !emitted {
+        seams::count("contract_without_events", 1);
+    }
+    Ok(emitted)
 }

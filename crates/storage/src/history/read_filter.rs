@@ -64,6 +64,13 @@ impl EventHistoryReadFilter {
         self.bind_cursor_anchor_to_event_kinds = options.bind_cursor_anchor_to_event_kinds;
         self.order = options.order;
         self.block_window = options.block_window.clone();
+        self.from_block = options.from_block;
+        self.to_block = options.to_block;
+        self.contract_address = options
+            .contract_address
+            .as_ref()
+            .map(|address| address.to_ascii_lowercase());
+        self.namespace = options.namespace.clone();
         self
     }
 

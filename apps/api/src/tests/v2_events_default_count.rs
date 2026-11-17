@@ -97,7 +97,9 @@ async fn events_default_read_sends_no_count_statement_on_any_anchor() -> Result<
     for route in [
         format!("/v1/events?registration_id={EVENTS_REGISTRATION}"),
         "/v1/events?name=history.eth".to_owned(),
-        format!("/v1/events?address={EVENTS_ADDRESS}"),
+        // An address alone reads the address-history walk, whose count is no single statement
+        // (`v2_events_address_walk.rs`). With a name it keeps the SQL page.
+        format!("/v1/events?address={EVENTS_ADDRESS}&name=history.eth"),
         format!("/v1/events?resolver=1:{EVENTS_RESOLVER}"),
         format!("/v1/events?resolver=1:{EVENTS_RESOLVER}&name=history.eth"),
         format!("/v1/events?registration_id={EVENTS_REGISTRATION}&finality=latest"),

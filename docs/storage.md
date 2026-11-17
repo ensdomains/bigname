@@ -1198,8 +1198,28 @@ is no full-address application-side anchor, payload, or attribution collection. 
 can still require many retained facts during composition; the fixed name batch does not impose
 a new bound on that name's lifecycle evidence.
 
-The legacy full-selector reader remains in use for unpaged/diagnostic storage calls and
-`GET /v1/events?address=...`; this bounded route does not change those contracts.
+The legacy full-selector reader remains in use for unpaged/diagnostic storage calls and for a
+`GET /v1/events` read that combines `address` with a `name`, `registration_id` or `resolver`
+anchor. A `GET /v1/events` read that `address` alone anchors uses this bounded reader, with its
+`namespace`, `contract_address`, `from_block` and `to_block` applied to every event inside the
+walk.
+
+That bounded reader and the full-selector page must admit the same events. Membership comes from
+the address's anchors, and then every event must also pass the same event-level filters on both
+paths, before paging and before counting. A change to either path is checked against this list:
+
+- the requested namespace of the event itself, not only of the anchor that reached it;
+- activated rows only;
+- readable canonicality, including the block's lineage;
+- `contract_address`, as the event's emitting contract;
+- the block window: `from_block`, `to_block`, the timestamp window and the publication bound;
+- the event kinds: `type`, `exclude_type`, `kind`, or the default product kinds;
+- `record_key`, with its record-version resets;
+- account kinds reached only through their own account arms, never through a name or resource;
+- the product duplicate rules for retained snapshots and token-state-only rows;
+- one winner among registry handoff copies, chosen over the same filters;
+- the cursor position in the shared history order;
+- `at` and `finality`, refused before either path reads.
 The three indexes cover only activated rows in readable canonicality states, so an anchor read
 that drops either condition cannot use them and falls back to a broad scan, such as
 `normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the
