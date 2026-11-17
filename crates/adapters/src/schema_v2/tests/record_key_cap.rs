@@ -118,6 +118,193 @@ fn hash_hex(length: usize) -> String {
     text
 }
 
+/// The bytes `text` takes as a JSON string without its quotes, the form in which Project's undo
+/// journal keys a record row.
+fn escaped_len(text: &str) -> usize {
+    serde_json::to_string(text)
+        .expect("a string serializes")
+        .len()
+        - 2
+}
+
+fn data_manifest() -> ManifestInput {
+    manifest(
+        4153,
+        "ens_v1_resolver_l1",
+        "DataChanged",
+        "event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData)",
+        &[],
+        &["RecordChanged"],
+    )
+}
+
+fn text_without_value_manifest() -> ManifestInput {
+    manifest(
+        4154,
+        "ens_v1_resolver_l1",
+        "TextChanged",
+        TEXT_CHANGED_WITHOUT_VALUE,
+        &[],
+        &["RecordChanged"],
+    )
+}
+
+fn v2_text_manifest() -> ManifestInput {
+    manifest(
+        4155,
+        "ens_v2_resolver_l1",
+        "TextChanged",
+        TEXT_CHANGED,
+        &[],
+        &["RecordChanged"],
+    )
+}
+
+fn record_id_manifest() -> ManifestInput {
+    manifest_with_events(
+        4156,
+        "ens",
+        "ens_v2_resolver_l1",
+        &[
+            (
+                "Linked",
+                "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)",
+                &["resolver"],
+                &["ResolverRecordLinked", "PreimageObserved"],
+            ),
+            (
+                "TextUpdated",
+                "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)",
+                &["resolver"],
+                &["RecordChanged"],
+            ),
+            (
+                "DataUpdated",
+                "event DataUpdated(uint256 indexed recordId, string indexed keyHash, string key, bytes value)",
+                &["resolver"],
+                &["RecordChanged"],
+            ),
+        ],
+    )
+}
+
+/// One write of `key` through each resolver event whose text or data record key the log
+/// chooses, one per call site of the cap and topic shape, as `(event, record family, output)`.
+fn interpret_every_record_key_event(
+    key: &str,
+) -> anyhow::Result<Vec<(&'static str, &'static str, BatchOutput)>> {
+    let three_topic = legacy_text_without_value::TextChanged {
+        node: node(),
+        indexedKey: keccak256(key.as_bytes()),
+        key: key.to_owned(),
+    }
+    .encode_log_data();
+    let two_topic = legacy_unindexed_text_without_value::TextChanged {
+        node: node(),
+        indexedKey: key.to_owned(),
+        key: key.to_owned(),
+    }
+    .encode_log_data();
+    let data = resolver_strings::DataChanged {
+        node: node(),
+        indexedKey: keccak256(key.as_bytes()),
+        key: key.to_owned(),
+        indexedData: keccak256(b"data"),
+    }
+    .encode_log_data();
+    let text_updated = TextUpdated {
+        recordId: U256::from(7),
+        keyHash: keccak256(key.as_bytes()),
+        key: key.to_owned(),
+        value: "value".to_owned(),
+    }
+    .encode_log_data();
+    let data_updated = DataUpdated {
+        recordId: U256::from(7),
+        keyHash: keccak256(key.as_bytes()),
+        key: key.to_owned(),
+        value: vec![0x01].into(),
+    }
+    .encode_log_data();
+    let v2_resolver = || vec![admission(4155, "resolver")];
+    let record_id_resolver = || vec![admission(4156, "resolver")];
+    Ok(vec![
+        (
+            "ENSv1 TextChanged",
+            "text",
+            interpret_v1_text(vec![v1_text(key.as_bytes(), b"value")])?,
+        ),
+        (
+            "three-topic TextChanged without value",
+            "text",
+            interpret_logs(text_without_value_manifest(), Vec::new(), vec![three_topic])?,
+        ),
+        (
+            "two-topic TextChanged without value",
+            "text",
+            interpret_logs(text_without_value_manifest(), Vec::new(), vec![two_topic])?,
+        ),
+        (
+            "ENSv1 DataChanged",
+            "data",
+            interpret_logs(data_manifest(), Vec::new(), vec![data])?,
+        ),
+        (
+            "ENSv2 resolver TextChanged",
+            "text",
+            interpret_logs(
+                v2_text_manifest(),
+                v2_resolver(),
+                vec![v1_text(key.as_bytes(), b"value")],
+            )?,
+        ),
+        (
+            "record-ID TextUpdated",
+            "text",
+            interpret_logs(
+                record_id_manifest(),
+                record_id_resolver(),
+                vec![text_updated],
+            )?,
+        ),
+        (
+            "record-ID DataUpdated",
+            "data",
+            interpret_logs(
+                record_id_manifest(),
+                record_id_resolver(),
+                vec![data_updated],
+            )?,
+        ),
+    ])
+}
+
+fn assert_written_by_every_event(key: &str, case: &str) -> anyhow::Result<()> {
+    for (event, family, output) in interpret_every_record_key_event(key)? {
+        let changes = record_changes(&output);
+        let expected = format!("{family}:{key}");
+        assert!(
+            changes.len() == 1 && changes[0].0 == expected,
+            "{case}: {event} must write the key of {} bytes, got keys of {:?} bytes",
+            expected.len(),
+            changes.iter().map(|(key, _)| key.len()).collect::<Vec<_>>()
+        );
+    }
+    Ok(())
+}
+
+fn assert_skipped_by_every_event(key: &str, case: &str) -> anyhow::Result<()> {
+    for (event, _, output) in interpret_every_record_key_event(key)? {
+        assert_skipped(&output, &format!("{case}: {event}"));
+    }
+    Ok(())
+}
+
+/// The formatted key's length as UTF-8 and as JSON text. `text:` and `data:` are both five bytes.
+fn formatted_lengths(key: &str) -> (usize, usize) {
+    (5 + key.len(), 5 + escaped_len(key))
+}
+
 #[test]
 fn a_text_key_at_the_cap_is_written_and_one_byte_over_is_skipped() -> anyhow::Result<()> {
     let at_cap = interpret_v1_text(vec![v1_text("k".repeat(2_395).as_bytes(), b"value")])?;
@@ -143,6 +330,7 @@ fn a_text_key_far_over_the_cap_is_skipped() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The longest record key stored on mainnet is 2,126 bytes, as UTF-8 and as JSON text.
 #[test]
 fn the_largest_key_on_mainnet_still_updates_under_its_own_key() -> anyhow::Result<()> {
     let key = "k".repeat(2_121);
@@ -151,7 +339,7 @@ fn the_largest_key_on_mainnet_still_updates_under_its_own_key() -> anyhow::Resul
         v1_text(key.as_bytes(), b"second"),
     ])?;
     let record_key = format!("text:{key}");
-    assert_eq!(record_key.len(), 2_126);
+    assert_eq!((record_key.len(), escaped_len(&record_key)), (2_126, 2_126));
     assert_eq!(
         record_changes(&output),
         vec![
@@ -247,14 +435,7 @@ fn a_dns_record_key_over_the_cap_is_skipped() -> anyhow::Result<()> {
 fn a_data_key_over_the_cap_is_skipped() -> anyhow::Result<()> {
     let key = "k".repeat(2_396);
     let output = interpret_logs(
-        manifest(
-            4153,
-            "ens_v1_resolver_l1",
-            "DataChanged",
-            "event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData)",
-            &[],
-            &["RecordChanged"],
-        ),
+        data_manifest(),
         Vec::new(),
         vec![
             resolver_strings::DataChanged {
@@ -286,18 +467,7 @@ fn a_legacy_text_key_over_the_cap_is_skipped() -> anyhow::Result<()> {
     }
     .encode_log_data();
     for (shape, log) in [("three-topic", indexed), ("two-topic", unindexed)] {
-        let output = interpret_logs(
-            manifest(
-                4154,
-                "ens_v1_resolver_l1",
-                "TextChanged",
-                TEXT_CHANGED_WITHOUT_VALUE,
-                &[],
-                &["RecordChanged"],
-            ),
-            Vec::new(),
-            vec![log],
-        )?;
+        let output = interpret_logs(text_without_value_manifest(), Vec::new(), vec![log])?;
         assert_skipped(&output, &format!("{shape} TextChanged without value"));
     }
     Ok(())
@@ -306,14 +476,7 @@ fn a_legacy_text_key_over_the_cap_is_skipped() -> anyhow::Result<()> {
 #[test]
 fn an_ensv2_resolver_text_key_over_the_cap_is_skipped() -> anyhow::Result<()> {
     let output = interpret_logs(
-        manifest(
-            4155,
-            "ens_v2_resolver_l1",
-            "TextChanged",
-            TEXT_CHANGED,
-            &[],
-            &["RecordChanged"],
-        ),
+        v2_text_manifest(),
         vec![admission(4155, "resolver")],
         vec![v1_text("k".repeat(2_396).as_bytes(), b"value")],
     )?;
@@ -323,33 +486,6 @@ fn an_ensv2_resolver_text_key_over_the_cap_is_skipped() -> anyhow::Result<()> {
 
 #[test]
 fn a_record_id_text_or_data_key_over_the_cap_is_skipped() -> anyhow::Result<()> {
-    let record_id_manifest = || {
-        manifest_with_events(
-            4156,
-            "ens",
-            "ens_v2_resolver_l1",
-            &[
-                (
-                    "Linked",
-                    "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)",
-                    &["resolver"],
-                    &["ResolverRecordLinked", "PreimageObserved"],
-                ),
-                (
-                    "TextUpdated",
-                    "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)",
-                    &["resolver"],
-                    &["RecordChanged"],
-                ),
-                (
-                    "DataUpdated",
-                    "event DataUpdated(uint256 indexed recordId, string indexed keyHash, string key, bytes value)",
-                    &["resolver"],
-                    &["RecordChanged"],
-                ),
-            ],
-        )
-    };
     let key = "k".repeat(2_396);
     let text = TextUpdated {
         recordId: U256::from(7),
@@ -494,5 +630,133 @@ fn a_long_dns_name_from_a_named_resource_is_observed_and_stored_whole() -> anyho
     assert_eq!(raw.raw_name.len(), 3_299);
     assert_eq!(raw.dns_encoded_name.len(), 3_301);
     assert_eq!(output.label_preimages.len(), 300);
+    Ok(())
+}
+
+/// Project's undo journal keys each changed record row by its primary key as JSON text, where
+/// `"` and `\` take two bytes. A key over 2,400 bytes as JSON text is skipped although its UTF-8
+/// is not, and a key of exactly 2,400 bytes as JSON text is written.
+#[test]
+fn a_quote_or_backslash_is_measured_as_its_two_byte_escape() -> anyhow::Result<()> {
+    for character in ['"', '\\'] {
+        let over = format!("{}{character}", hash_hex(2_394));
+        assert_eq!(formatted_lengths(&over), (2_400, 2_401));
+        assert_skipped_by_every_event(&over, &format!("{character:?}, 2,401 bytes escaped"))?;
+
+        let at_cap = format!("{}{character}", hash_hex(2_393));
+        assert_eq!(formatted_lengths(&at_cap), (2_399, 2_400));
+        assert_written_by_every_event(&at_cap, &format!("{character:?}, 2,400 bytes escaped"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_control_character_with_a_short_escape_is_measured_as_two_bytes() -> anyhow::Result<()> {
+    let over = format!("{}\n", hash_hex(2_394));
+    assert_eq!(formatted_lengths(&over), (2_400, 2_401));
+    assert_skipped_by_every_event(&over, "a newline, 2,401 bytes escaped")?;
+
+    let at_cap = format!("{}\t", hash_hex(2_393));
+    assert_eq!(formatted_lengths(&at_cap), (2_399, 2_400));
+    assert_written_by_every_event(&at_cap, "a tab, 2,400 bytes escaped")
+}
+
+#[test]
+fn any_other_control_character_is_measured_as_six_bytes() -> anyhow::Result<()> {
+    let at_cap = format!("{}\u{1}\u{1}", hash_hex(2_383));
+    assert_eq!(formatted_lengths(&at_cap), (2_390, 2_400));
+    assert_written_by_every_event(&at_cap, "two U+0001, 2,400 bytes escaped")?;
+
+    let over = format!("{}\u{1}\u{1}\u{1}", hash_hex(2_383));
+    assert_eq!(formatted_lengths(&over), (2_391, 2_406));
+    assert_skipped_by_every_event(&over, "three U+0001, 2,406 bytes escaped")
+}
+
+/// A key of six-byte control characters alone grows six-fold as JSON text, so a key of 405 bytes
+/// is already over the cap.
+#[test]
+fn a_key_of_control_characters_is_measured_six_fold() -> anyhow::Result<()> {
+    let at_cap = "\u{1}".repeat(399);
+    assert_eq!(formatted_lengths(&at_cap), (404, 2_399));
+    assert_written_by_every_event(&at_cap, "399 U+0001, 2,399 bytes escaped")?;
+
+    let over = "\u{1}".repeat(400);
+    assert_eq!(formatted_lengths(&over), (405, 2_405));
+    assert_skipped_by_every_event(&over, "400 U+0001, 2,405 bytes escaped")
+}
+
+/// serde_json writes a character outside ASCII as its UTF-8 bytes, not as a `\u` escape.
+#[test]
+fn a_non_ascii_character_is_measured_as_its_utf8_bytes() -> anyhow::Result<()> {
+    let at_cap = "€".repeat(798);
+    assert_eq!(formatted_lengths(&at_cap), (2_399, 2_399));
+    assert_written_by_every_event(&at_cap, "798 three-byte characters")?;
+
+    let over = "€".repeat(799);
+    assert_eq!(formatted_lengths(&over), (2_402, 2_402));
+    assert_skipped_by_every_event(&over, "799 three-byte characters")
+}
+
+#[test]
+fn a_slash_or_delete_is_not_escaped() -> anyhow::Result<()> {
+    for character in ['/', '\u{7f}'] {
+        let at_cap = format!("{}{character}", hash_hex(2_394));
+        assert_eq!(formatted_lengths(&at_cap), (2_400, 2_400));
+        assert_written_by_every_event(&at_cap, &format!("{character:?} at the cap"))?;
+    }
+    Ok(())
+}
+
+/// The cap does not count on compression. PostgreSQL would compress 2,395 quotes to a few bytes
+/// in any index row, but their JSON text is 4,795 bytes, so the log is skipped.
+#[test]
+fn a_key_of_quotes_is_skipped_although_it_would_compress() -> anyhow::Result<()> {
+    let key = "\"".repeat(2_395);
+    assert_eq!(formatted_lengths(&key), (2_400, 4_795));
+    assert_skipped_by_every_event(&key, "2,395 quotes, 4,795 bytes escaped")
+}
+
+/// Every ASCII character but NUL, which makes a key opaque, counts as the bytes serde_json writes
+/// for it: a key of 2,400 bytes as JSON text is written and one of 2,401 bytes is skipped.
+#[test]
+fn every_ascii_character_counts_as_its_json_text() -> anyhow::Result<()> {
+    for byte in 0x01_u8..=0x7f {
+        let character = char::from(byte);
+        let width = escaped_len(&character.to_string());
+        let at_cap = format!("{}{character}", hash_hex(2_395 - width));
+        assert_eq!(formatted_lengths(&at_cap).1, 2_400, "{byte:#04x}");
+        let written = interpret_v1_text(vec![v1_text(at_cap.as_bytes(), b"value")])?;
+        assert_eq!(
+            record_changes(&written).len(),
+            1,
+            "{byte:#04x} at 2,400 bytes escaped"
+        );
+
+        let over = format!("{}{character}", hash_hex(2_396 - width));
+        let skipped = interpret_v1_text(vec![v1_text(over.as_bytes(), b"value")])?;
+        assert_skipped(&skipped, &format!("{byte:#04x} at 2,401 bytes escaped"));
+    }
+    Ok(())
+}
+
+/// The most any record key stored on mainnet grows as JSON text is 40 bytes. A key as long as the
+/// longest stored one that grows by those 40 bytes is 2,166 bytes as JSON text, and still updates
+/// under its own key.
+#[test]
+fn the_longest_stored_key_with_the_most_stored_escaping_still_updates() -> anyhow::Result<()> {
+    let key = format!("{}{}", "\"".repeat(40), "k".repeat(2_081));
+    assert_eq!(formatted_lengths(&key), (2_126, 2_166));
+    let output = interpret_v1_text(vec![
+        v1_text(key.as_bytes(), b"first"),
+        v1_text(key.as_bytes(), b"second"),
+    ])?;
+    let record_key = format!("text:{key}");
+    assert_eq!(
+        record_changes(&output),
+        vec![
+            (record_key.clone(), json!("first")),
+            (record_key, json!("second")),
+        ]
+    );
     Ok(())
 }

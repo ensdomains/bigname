@@ -1037,6 +1037,383 @@ async fn a_record_key_at_the_cap_is_stored_under_the_longest_arm_identity() -> R
     scratch.cleanup().await
 }
 
+const MAINNET: &str = "ethereum-mainnet";
+/// The ENSv2 resolver manifest of the guarded-arm writes below. Its three digits make the arm
+/// identity `{node}|ens_v2_resolver_l1|ens|101` 93 bytes, the longest in use.
+const GUARDED_MANIFEST: i64 = 101;
+const GUARDED_RESOLVER: &str = "0x00000000000000000000000000000000000000c2";
+
+alloy_sol_types::sol! {
+    event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
+    event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value);
+}
+
+// A text record key of at most 2,400 bytes as UTF-8 that is longer as JSON text: hex, which
+// PostgreSQL cannot compress, with 20 control characters that JSON writes as six bytes each
+// (2,500 bytes as JSON text), or with 70 quotes (2,465). Project's undo journal keys each changed
+// row by its primary key as JSON text. Under the guarded arm on ethereum-mainnet the node record
+// row's journal row carries 246 bytes besides the key, so neither key fits PostgreSQL's 2,704-byte
+// btree index row. The schema-v2 adapter skips each key's writes, by node and by record id, and
+// Project publishes the block with no record row.
+#[tokio::test]
+async fn a_record_key_over_the_cap_as_json_text_is_skipped_before_project() -> Result<()> {
+    use anyhow::Context as _;
+
+    for (prefix, key) in [
+        (
+            "families_escaped_controls",
+            hex_with(2_375, &six_byte_controls()),
+        ),
+        ("families_escaped_quotes", hex_with(2_320, &['"'; 70])),
+    ] {
+        let record_key = format!("text:{key}");
+        let lengths = (record_key.len(), json_text_len(&record_key));
+        ensure!(
+            lengths == (2_400, 2_500) || lengths == (2_395, 2_465),
+            "{prefix}: {lengths:?}"
+        );
+        let (scratch, published) = guarded_resolver_at_block_10(prefix).await?;
+        let written = interpret_guarded_text_writes(&scratch, &key).await?;
+        let head = head_marker_on(&scratch, MAINNET, HEAD).await?;
+        let outcome = ProjectPhase::new(scratch.pool().clone())
+            .run_batch(context_on(MAINNET, &head, Some(&published)))
+            .await
+            .with_context(|| format!("{prefix}: Project publishes the block"))?;
+        ensure!(
+            matches!(outcome, PhaseBatchOutcome::Complete(_)),
+            "{prefix}: {outcome:?}"
+        );
+        ensure!(written == 0, "{prefix}: Interpret wrote {written} records");
+        ensure!(
+            guarded_record_rows(&scratch).await? == (0, 0),
+            "{prefix}: no record row"
+        );
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+// The widest key Interpret admits: 2,400 bytes as JSON text, hex with 50 quotes, 2,350 bytes as
+// UTF-8. Interpret writes it by node and by record id through the schema-v2 adapter, and Project
+// stores both rows and journals them under the guarded arm on ethereum-mainnet. The node record
+// row's journal key is 2,574 bytes, so its index row is 2,648 bytes of PostgreSQL's 2,704.
+#[tokio::test]
+async fn the_widest_record_key_as_json_text_is_stored_and_journalled() -> Result<()> {
+    use anyhow::Context as _;
+
+    let key = hex_with(2_295, &['"'; 50]);
+    let record_key = format!("text:{key}");
+    ensure!((record_key.len(), json_text_len(&record_key)) == (2_350, 2_400));
+    let (scratch, published) = guarded_resolver_at_block_10("families_escaped_widest").await?;
+    let written = interpret_guarded_text_writes(&scratch, &key).await?;
+    ensure!(written == 2, "Interpret wrote {written} records");
+    let head = head_marker_on(&scratch, MAINNET, HEAD).await?;
+    let outcome = ProjectPhase::new(scratch.pool().clone())
+        .run_batch(context_on(MAINNET, &head, Some(&published)))
+        .await
+        .context("Project stores the widest key")?;
+    ensure!(
+        matches!(outcome, PhaseBatchOutcome::Complete(_)),
+        "{outcome:?}"
+    );
+    ensure!(marker_on(&scratch, MAINNET).await? == Some(HEAD));
+
+    let stored: (String, i32, i32) = sqlx::query_as(
+        "SELECT arm, octet_length(arm_identity), octet_length(record_key)
+         FROM project_node_record_value WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(MAINNET)
+    .bind(GUARDED_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    ensure!(stored == ("guarded".to_owned(), 93, 2_350), "{stored:?}");
+    let stored: (i32, i32) = sqlx::query_as(
+        "SELECT octet_length(record_id), octet_length(record_key)
+         FROM project_record_id_value WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(MAINNET)
+    .bind(GUARDED_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    ensure!(stored == (78, 2_350), "{stored:?}");
+    let journal: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT family, octet_length(key) FROM project_family_undo
+         WHERE chain_id = $1 AND block_number = 11 AND strpos(key, $2) > 0
+           AND family IN ('project_node_record_value', 'project_record_id_value')
+         ORDER BY family",
+    )
+    .bind(MAINNET)
+    .bind(GUARDED_RESOLVER)
+    .fetch_all(scratch.pool())
+    .await?;
+    ensure!(
+        journal
+            == vec![
+                ("project_node_record_value".to_owned(), 2_574),
+                ("project_record_id_value".to_owned(), 2_549),
+            ],
+        "{journal:?}"
+    );
+    scratch.cleanup().await
+}
+
+// A record key over the cap as JSON text that reaches Project anyway, filed by hand past
+// Interpret: the 2,500-byte key above under the guarded arm on ethereum-mainnet. PostgreSQL refuses
+// the journal row, and Project stops once with a data-integrity error, retry policy or not.
+#[tokio::test]
+async fn a_journal_key_over_the_btree_row_limit_is_not_retried() -> Result<()> {
+    let key = hex_with(2_375, &six_byte_controls());
+    let (scratch, published) = guarded_resolver_at_block_10("families_escaped_journal").await?;
+    let node = format!("0x{}", hex::encode(keccak256(b"escaped record key node")));
+    let after = serde_json::json!({
+        "node": node,
+        "resolver": GUARDED_RESOLVER,
+        "record_family": "text",
+        "record_key": format!("text:{key}"),
+        "selector_key": key,
+        "source_event": "TextChanged",
+        "value": "value",
+    });
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, block_number, block_hash,
+             derivation_kind, canonicality_state, after_state)
+         VALUES ('fixture:escaped-key', 'ens', 'RecordChanged', 'ens_v2_resolver_l1', 1, $1, $2,
+             11, $2 || '-block-11', 'ens_v2_resolver', 'canonical', $3)",
+    )
+    .bind(GUARDED_MANIFEST)
+    .bind(MAINNET)
+    .bind(&after)
+    .execute(scratch.pool())
+    .await?;
+    let head = head_marker_on(&scratch, MAINNET, HEAD).await?;
+    for retry_family_failures in [true, false] {
+        let project =
+            ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
+                retry_family_failures,
+                ..FamilySettings::default()
+            });
+        let error = match project
+            .run_batch(context_on(MAINNET, &head, Some(&published)))
+            .await
+        {
+            Ok(outcome) => anyhow::bail!("the unjournalable key published: {outcome:?}"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        ensure!(
+            error.kind() == phase_runner::error::ErrorKind::DataIntegrity
+                && !error.is_retryable()
+                && message.contains(" exceeds btree version 4 maximum 2704 ")
+                && message.contains("\"project_family_undo_pkey\""),
+            "retry {retry_family_failures}: {:?} retryable {}: {message}",
+            error.kind(),
+            error.is_retryable()
+        );
+        ensure!(
+            marker_on(&scratch, MAINNET).await? == Some(10),
+            "the refused block published nothing"
+        );
+    }
+    scratch.cleanup().await
+}
+
+/// The bytes `text` takes as a JSON string without its quotes, the form of the journal key.
+fn json_text_len(text: &str) -> usize {
+    serde_json::to_string(text).map_or(0, |json| json.len() - 2)
+}
+
+/// The 20 control characters JSON writes as six-byte `\u00xx` escapes, NUL aside.
+fn six_byte_controls() -> Vec<char> {
+    (0x01_u8..0x20)
+        .filter(|byte| !matches!(byte, 0x08..=0x0a | 0x0c | 0x0d))
+        .take(20)
+        .map(char::from)
+        .collect()
+}
+
+/// `digits` characters of keccak hashes in hex, which PostgreSQL cannot compress, with each of
+/// `inserted` placed before an evenly spaced digit.
+fn hex_with(digits: usize, inserted: &[char]) -> String {
+    let hashes: String = (0_u64..)
+        .map(|seed| hex::encode(keccak256(seed.to_be_bytes())))
+        .take(digits.div_ceil(64))
+        .collect();
+    let step = digits / inserted.len();
+    let mut text = String::with_capacity(digits + inserted.len());
+    for (index, digit) in hashes[..digits].chars().enumerate() {
+        if index % step == 0
+            && let Some(character) = inserted.get(index / step)
+        {
+            text.push(*character);
+        }
+        text.push(digit);
+    }
+    text
+}
+
+/// Lineage on ethereum-mainnet with the families published through block 10, and the ENSv2
+/// resolver manifest of the guarded arm. Returns the database and the published marker.
+async fn guarded_resolver_at_block_10(prefix: &str) -> Result<(ScratchDatabase, BlockMarker)> {
+    let scratch = ready_on(prefix, MAINNET).await?;
+    let published = head_marker_on(&scratch, MAINNET, 10).await?;
+    ProjectPhase::new(scratch.pool().clone())
+        .run_batch(context_on(MAINNET, &published, None))
+        .await?;
+    ensure!(marker_on(&scratch, MAINNET).await? == Some(10));
+    sqlx::query(
+        "INSERT INTO manifest_versions (manifest_id, manifest_version, namespace, source_family,
+             chain_id, deployment_label, rollout_status, normalizer_version, file_path,
+             manifest_payload)
+         OVERRIDING SYSTEM VALUE
+         VALUES ($1, 1, 'ens', 'ens_v2_resolver_l1', $2, 'fixture', 'active', 'fixture',
+             'fixture/guarded-resolver.toml', '{\"contracts\":[]}'::jsonb)",
+    )
+    .bind(GUARDED_MANIFEST)
+    .bind(MAINNET)
+    .execute(scratch.pool())
+    .await?;
+    Ok((scratch, published))
+}
+
+/// Interpret a `TextChanged` and a `TextUpdated` of `key`, both from the guarded resolver at
+/// block 11 of ethereum-mainnet, through the schema-v2 adapter, and file every event it emits as
+/// Interpret stores it. Returns how many `RecordChanged` events it filed.
+async fn interpret_guarded_text_writes(scratch: &ScratchDatabase, key: &str) -> Result<usize> {
+    use alloy_sol_types::SolEvent as _;
+    use bigname_adapters::schema_v2::{
+        AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
+    };
+
+    let events = serde_json::json!({ "abi": { "events": [
+        {
+            "name": "TextChanged",
+            "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            "emitter_roles": ["resolver"],
+            "normalized_events": ["RecordChanged"],
+        },
+        {
+            "name": "TextUpdated",
+            "fragment": "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)",
+            "emitter_roles": ["resolver"],
+            "normalized_events": ["RecordChanged"],
+        },
+    ] } });
+    let logs = [
+        TextChanged {
+            node: keccak256(b"escaped record key node"),
+            indexedKey: keccak256(key.as_bytes()),
+            key: key.to_owned(),
+            value: "value".to_owned(),
+        }
+        .encode_log_data(),
+        TextUpdated {
+            recordId: alloy_primitives::U256::MAX,
+            keyHash: keccak256(key.as_bytes()),
+            key: key.to_owned(),
+            value: "value".to_owned(),
+        }
+        .encode_log_data(),
+    ];
+    let block_hash = format!("{MAINNET}-block-11");
+    let block_timestamp = sqlx::types::time::OffsetDateTime::from_unix_timestamp(11)?;
+    let output = bigname_adapters::interpret_schema_v2_batch(BatchInput {
+        chain_id: MAINNET.to_owned(),
+        manifests: vec![ManifestInput {
+            manifest_id: GUARDED_MANIFEST,
+            manifest_version: 1,
+            namespace: "ens".to_owned(),
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            chain_id: MAINNET.to_owned(),
+            deployment_label: "fixture".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+            payload_json: events.to_string(),
+        }],
+        discovery_rules: Vec::new(),
+        admissions: vec![AddressAdmissionInput {
+            address: GUARDED_RESOLVER.to_owned(),
+            contract_instance_id: uuid::Uuid::from_u128(101),
+            source_manifest_id: Some(GUARDED_MANIFEST),
+            role: Some("resolver".to_owned()),
+            discovery_edge_kind: None,
+            discovery_from_contract_instance_id: None,
+            discovery_observation_key: None,
+            active_from_block: Some(0),
+            active_to_block: None,
+        }],
+        prior_events: Vec::new(),
+        blocks: vec![RawBlockInput {
+            chain_id: MAINNET.to_owned(),
+            block_hash: block_hash.clone(),
+            block_number: 11,
+            block_timestamp,
+            canonicality_state: "canonical".to_owned(),
+        }],
+        raw_logs: logs
+            .into_iter()
+            .zip(0_i64..)
+            .map(|(log, log_index)| RawLogInput {
+                chain_id: MAINNET.to_owned(),
+                block_hash: block_hash.clone(),
+                block_number: 11,
+                block_timestamp,
+                canonicality_state: "canonical".to_owned(),
+                transaction_hash: format!("{MAINNET}-transaction-11"),
+                transaction_index: 0,
+                log_index,
+                emitting_address: GUARDED_RESOLVER.to_owned(),
+                topics: log
+                    .topics()
+                    .iter()
+                    .map(|topic| format!("{topic:#x}"))
+                    .collect(),
+                data: log.data.to_vec(),
+            })
+            .collect(),
+    })?;
+    for event in &output.normalized_events {
+        sqlx::query(
+            "INSERT INTO normalized_events (event_identity, namespace, logical_name_id,
+                 event_kind, source_family, manifest_version, source_manifest_id, chain_id,
+                 block_number, block_hash, derivation_kind, canonicality_state, after_state)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'canonical', $12)",
+        )
+        .bind(&event.event_identity)
+        .bind(&event.namespace)
+        .bind(&event.logical_name_id)
+        .bind(&event.event_kind)
+        .bind(&event.source_family)
+        .bind(event.manifest_version)
+        .bind(event.source_manifest_id)
+        .bind(&event.chain_id)
+        .bind(event.block_number)
+        .bind(&event.block_hash)
+        .bind(&event.derivation_kind)
+        .bind(&event.after_state)
+        .execute(scratch.pool())
+        .await?;
+    }
+    Ok(output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "RecordChanged")
+        .count())
+}
+
+/// The guarded resolver's node record and record-id rows on ethereum-mainnet.
+async fn guarded_record_rows(scratch: &ScratchDatabase) -> Result<(i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT (SELECT count(*) FROM project_node_record_value
+                 WHERE chain_id = $1 AND resolver_address = $2),
+                (SELECT count(*) FROM project_record_id_value
+                 WHERE chain_id = $1 AND resolver_address = $2)",
+    )
+    .bind(MAINNET)
+    .bind(GUARDED_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?)
+}
+
 // The runner also matches PostgreSQL's refusal of a NUL in a text value. No Project write binds a
 // string as text, so this binds one directly to pin the wording a real server uses.
 #[tokio::test]
@@ -1078,8 +1455,12 @@ async fn postgresql_words_a_nul_in_jsonb_as_the_runner_matches() -> Result<()> {
 }
 
 fn context(head: &BlockMarker, resume: Option<&BlockMarker>) -> PhaseContext {
+    context_on(CHAIN, head, resume)
+}
+
+fn context_on(chain: &str, head: &BlockMarker, resume: Option<&BlockMarker>) -> PhaseContext {
     PhaseContext {
-        chain_id: CHAIN.to_owned(),
+        chain_id: chain.to_owned(),
         phase: PhaseName::Project,
         mode: RunMode::Normal,
         redo_attempt: None,
@@ -1098,10 +1479,18 @@ fn context(head: &BlockMarker, resume: Option<&BlockMarker>) -> PhaseContext {
 }
 
 async fn head_marker(scratch: &ScratchDatabase, number: i64) -> Result<BlockMarker> {
+    head_marker_on(scratch, CHAIN, number).await
+}
+
+async fn head_marker_on(
+    scratch: &ScratchDatabase,
+    chain: &str,
+    number: i64,
+) -> Result<BlockMarker> {
     let hash: String = sqlx::query_scalar(
         "SELECT block_hash FROM chain_lineage WHERE chain_id = $1 AND block_number = $2",
     )
-    .bind(CHAIN)
+    .bind(chain)
     .bind(number)
     .fetch_one(scratch.pool())
     .await?;
@@ -1137,10 +1526,14 @@ async fn marker_row(scratch: &ScratchDatabase) -> Result<(Option<i64>, Option<St
 }
 
 async fn marker(scratch: &ScratchDatabase) -> Result<Option<i64>> {
+    marker_on(scratch, CHAIN).await
+}
+
+async fn marker_on(scratch: &ScratchDatabase, chain: &str) -> Result<Option<i64>> {
     Ok(sqlx::query_scalar(
         "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
     )
-    .bind(CHAIN)
+    .bind(chain)
     .fetch_optional(scratch.pool())
     .await?
     .flatten())
@@ -1156,19 +1549,23 @@ async fn project_state(scratch: &ScratchDatabase) -> Result<(String, Option<i64>
     .await?)
 }
 
+async fn ready(prefix: &str) -> Result<ScratchDatabase> {
+    ready_on(prefix, CHAIN).await
+}
+
 /// Lineage, the other phases complete through the head, Project at the head, and one event per
 /// block so a family rebuild has thirty blocks of work.
-async fn ready(prefix: &str) -> Result<ScratchDatabase> {
+async fn ready_on(prefix: &str, chain: &str) -> Result<ScratchDatabase> {
     let scratch = ScratchDatabase::create(prefix).await?;
-    seed_lineage(scratch.pool(), CHAIN, HEAD).await?;
+    seed_lineage(scratch.pool(), chain, HEAD).await?;
     sqlx::query("UPDATE chain_lineage SET canonicality_state = 'canonical' WHERE chain_id = $1")
-        .bind(CHAIN)
+        .bind(chain)
         .execute(scratch.pool())
         .await?;
     PhaseStore::new(scratch.pool().clone())
-        .initialize_chain(CHAIN)
+        .initialize_chain(chain)
         .await?;
-    let hash = format!("{CHAIN}-block-{HEAD}");
+    let hash = format!("{chain}-block-{HEAD}");
     sqlx::query(
         "UPDATE chain_phase_state
          SET phase_status = 'completed',
@@ -1181,7 +1578,7 @@ async fn ready(prefix: &str) -> Result<ScratchDatabase> {
              started_at = now(), finished_at = now()
          WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project')",
     )
-    .bind(CHAIN)
+    .bind(chain)
     .bind(HEAD)
     .bind(&hash)
     .bind(INTERPRETER_CONTENT_HASH)
@@ -1195,7 +1592,7 @@ async fn ready(prefix: &str) -> Result<ScratchDatabase> {
              last_processed_block_hash
          ) VALUES ($1, 'source', 'test', 'new_signature_range', 0, $2, $3, $3, $4)",
     )
-    .bind(CHAIN)
+    .bind(chain)
     .bind(HEAD + 1)
     .bind(HEAD)
     .bind(hash)
@@ -1209,7 +1606,7 @@ async fn ready(prefix: &str) -> Result<ScratchDatabase> {
                 $1 || '-block-' || block, 'ens_v2_registry_resource_surface', 'canonical', '{}'
          FROM generate_series(1, $2) block",
     )
-    .bind(CHAIN)
+    .bind(chain)
     .bind(HEAD)
     .execute(scratch.pool())
     .await?;
