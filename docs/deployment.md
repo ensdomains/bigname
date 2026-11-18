@@ -7402,3 +7402,37 @@ the same family rows and journal as before, row for row.
 - No schema-migration and no new setting.
 - The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
   Ingest redo.
+
+## Resolver record keys measured as JSON text
+
+The build that measures the resolver record key bound on the key's JSON text changes
+`crates/adapters/src/schema_v2/common.rs` ([architecture](architecture.md#record_inventory),
+[known divergence](upstream.md#record-key-length-limit)). It rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain. The
+[projection content hash](glossary.md#projection-content-hash) includes it, so that rotates too.
+The integration branch already rotates both, so this change adds no redo beyond the full
+re-derivation that branch needs.
+
+What changes for names:
+
+- Project's [undo journal](glossary.md#family-undo-journal) keys each changed record row by the
+  row's primary key as JSON text. There `"`, `\` and the control characters with a short escape
+  take two bytes, and every other control character takes six. A key within 2,400 bytes as UTF-8
+  could still be longer than one btree index row of the journal holds.
+- A text or data record write whose stored key is longer than 2,400 bytes as JSON text now yields
+  no `RecordChanged`. That covers `TextChanged` and `DataChanged` from an ENSv1 or Basenames
+  resolver, `TextChanged` from a PublicResolverV2 or any other ENSv2 resolver, and an ENSv2
+  record-ID resolver's `TextUpdated` and `DataUpdated`. Interpret logs one `WARN` naming the log,
+  its emitter, the key's length and its length as JSON text, and the batch continues.
+- Before this build, such a write with a key that does not compress stopped Project at its block.
+- A key without those characters is judged exactly as before. So are opaque and DNS record keys,
+  which are stored in hex. The longest record key stored on mainnet is 2,126 bytes, and 2,126
+  bytes as JSON text, so every stored key keeps updating under its own key.
+
+An existing deployment finishes the full-range Interpret redo and then the stamped Project redo
+it installs before the matching API serves, at a planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under matching runner and API
+binaries. Do not mark old rows ready under the new hash.
+
+The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no Ingest
+redo. It adds no schema-migration, table or setting.

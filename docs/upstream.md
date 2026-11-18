@@ -588,10 +588,10 @@ to the applicable entries below.
 > **Since**: `2026-06-12`
 
 <a id="record-key-length-limit"></a>
-> **Record key length limit** — a text, data or DNS record write whose stored record key would be longer than 2,400 bytes is not indexed. Interpret skips the log, so the write leaves no indexed value, no record inventory entry and no history row. Every shorter key is indexed as before.
+> **Record key length limit** — a text, data or DNS record write whose stored record key would be longer than 2,400 bytes as JSON text is not indexed. Interpret skips the log, so the write leaves no indexed value, no record inventory entry and no history row. Every shorter key is indexed as before.
 > **Upstream**: the setters store and emit the key they are given, at any length `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15-L22 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/DataResolver.sol:L19-L27 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L51 @ ens_v1@91c966f)` `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L188-L195 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L221-L228 @ ens_v2@a971bd64)`.
 > **Our rule**: `docs/architecture.md` § `record_inventory`.
-> **Why**: the stored key is part of btree indexes, and PostgreSQL holds at most 2,704 bytes in one btree index row. A longer key that does not compress could not be stored. The longest record key set on mainnet is about 2.1 KB.
+> **Why**: the stored key is part of btree indexes, and Project's [undo journal](glossary.md#family-undo-journal) holds it as JSON text in its primary key. PostgreSQL holds at most 2,704 bytes in one btree index row. A longer key that does not compress could not be stored. The longest record key set on mainnet is about 2.1 KB.
 > **Since**: `2026-11-10`
 
 <a id="ens-verified-resolution-ccip-read-non-following"></a>
