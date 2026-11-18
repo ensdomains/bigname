@@ -512,10 +512,11 @@ async fn v2_subnames_match_contains_filters_before_paging_and_counting() -> Resu
             vec!["carol.alpha.eth", "one.alpha.eth", "two.alpha.eth"],
         ),
         ("q=_&match=contains", vec![]),
-        // Undated carol sorts last descending, as without `match`.
+        // Undated carol sorts last descending, as without `match`. One and two share an expiry,
+        // so they run by name descending: the exact reverse of the ascending page.
         (
             "q=o&match=contains&sort=expires_at&order=desc",
-            vec!["one.alpha.eth", "two.alpha.eth", "carol.alpha.eth"],
+            vec!["two.alpha.eth", "one.alpha.eth", "carol.alpha.eth"],
         ),
     ] {
         let pages = read_family_pages(

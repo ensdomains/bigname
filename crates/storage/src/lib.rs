@@ -74,11 +74,12 @@ pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
 };
 pub use children::{
-    ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,
-    ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
-    ChildrenCurrentSummary, RegistryChildrenPage, RegistryLabelOwnerFilter,
-    count_registry_labels_current, load_children_current_page, load_children_current_page_filtered,
-    load_children_current_summaries, load_registry_children_current_page,
+    CHILD_LISTING_TABLES, ChildListingUnreadable, ChildrenCurrentKeysetCursor,
+    ChildrenCurrentOrder, ChildrenCurrentPage, ChildrenCurrentPageFilter, ChildrenCurrentRow,
+    ChildrenCurrentSort, ChildrenCurrentSortValue, ChildrenCurrentSummary, RegistryChildrenPage,
+    RegistryLabelOwnerFilter, count_registry_labels_current, load_children_current_page,
+    load_children_current_page_filtered, load_children_current_summaries,
+    load_registry_children_current_page, unreadable_child_listing_tables,
 };
 pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
@@ -93,18 +94,18 @@ pub use history::{
     HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
     HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary, HistorySummaryMode,
     InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor, NameHistoryPage,
-    NameHistoryRow, capture_interpret_redo_fence, count_contract_events, load_address_history,
-    load_address_history_for_relations, load_address_history_page,
-    load_address_history_page_for_relations, load_address_history_page_for_relations_on,
-    load_bounded_record_attribution, load_bounded_registration_resource_ids,
-    load_candidate_logical_name_ids_for_registration_id, load_event_history,
-    load_event_history_page, load_event_history_page_with_redo_policy, load_history_events_by_ids,
-    load_history_payment_values, load_history_token_ids, load_name_history, load_name_history_head,
-    load_name_history_page, load_name_history_page_with_child_registrations,
-    load_recorded_primary_names, load_registrar_grant_resource_ids_by_logical_name_id,
-    load_resource_history, load_resource_history_page,
-    load_wrapped_registrar_resource_ids_by_logical_name_id, resolve_chain_block_ranges,
-    revalidate_interpret_redo_fence,
+    NameHistoryRow, capture_interpret_redo_fence, count_contract_events,
+    count_contract_events_at_publication, load_address_history, load_address_history_for_relations,
+    load_address_history_page, load_address_history_page_for_relations,
+    load_address_history_page_for_relations_on, load_bounded_record_attribution,
+    load_bounded_registration_resource_ids, load_candidate_logical_name_ids_for_registration_id,
+    load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
+    load_history_events_by_ids, load_history_payment_values, load_history_token_ids,
+    load_name_history, load_name_history_head, load_name_history_page,
+    load_name_history_page_with_child_registrations, load_recorded_primary_names,
+    load_registrar_grant_resource_ids_by_logical_name_id, load_resource_history,
+    load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
+    resolve_chain_block_ranges, revalidate_interpret_redo_fence, stored_event_counts_readable,
 };
 pub use history::{HistoryPosition, load_history_anchor_position, load_history_transaction_index};
 pub use history::{HistoryRegistryHandoff, load_history_registry_handoffs};
@@ -113,7 +114,7 @@ pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state
 pub use history::{
     explain_contract_event_count_for_test, explain_event_history_count_for_test,
     explain_name_history_page_with_child_registrations_for_test,
-    explain_registration_history_filter_for_test,
+    explain_registration_history_filter_for_test, explain_stored_event_count_for_test,
 };
 pub use identity::{
     ENS_V2_ROOT_UPSTREAM_RESOURCE, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind,

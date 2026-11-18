@@ -9,6 +9,7 @@ use super::{
     duplicates::push_product_history_duplicate_filter,
     event_history_read_filter,
     paging::{push_history_filters, push_history_order},
+    stored_count,
     summary::push_history_count_query,
     wrapped_registrar::{
         ResourceNamehashAnchor, push_namehash_surfaces_query, push_registrar_grant_resources_query,
@@ -104,7 +105,9 @@ pub async fn explain_event_history_count_for_test(
 ) -> Result<Option<Value>> {
     let limit = match mode {
         HistorySummaryMode::Count => None,
-        HistorySummaryMode::CappedCount(cap) => Some(i64::try_from(cap.saturating_add(1))?),
+        HistorySummaryMode::CappedCount(cap) | HistorySummaryMode::StoredOrCapped(cap) => {
+            Some(i64::try_from(cap.saturating_add(1))?)
+        }
         HistorySummaryMode::None | HistorySummaryMode::Full => return Ok(None),
     };
     let filter = event_history_read_filter(pool, filter, true, false).await?;
@@ -148,6 +151,40 @@ async fn explain_count_query(
     };
     let mut query = QueryBuilder::<Postgres>::new("");
     push_history_count_query(&mut query, &filter, true, limit);
+    let plan = explain_prepared(&mut transaction, query, generic_plan).await?;
+    transaction.rollback().await?;
+    connection.close().await?;
+    Ok(plan)
+}
+
+/// `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` of the statement the stored event counts run for an
+/// app-facing event-history read of `filter`, executed as a prepared statement on a generic or a
+/// custom plan. `None` when the read's filters are not a stored count's key. A test-support
+/// seam, never a production query path.
+pub async fn explain_stored_event_count_for_test(
+    pool: &PgPool,
+    filter: EventHistoryFilter,
+    generic_plan: bool,
+) -> Result<Option<Value>> {
+    let filter = event_history_read_filter(pool, filter, true, false).await?;
+    let Some(key) = stored_count::key(&filter, true) else {
+        return Ok(None);
+    };
+    let mut connection = pool.acquire().await?.detach();
+    let mut transaction = connection.begin().await?;
+    let mut query = QueryBuilder::<Postgres>::new("");
+    stored_count::push_stored_count_query(&mut query, &key);
+    let plan = explain_prepared(&mut transaction, query, generic_plan).await?;
+    transaction.rollback().await?;
+    connection.close().await?;
+    Ok(Some(plan))
+}
+
+async fn explain_prepared(
+    transaction: &mut sqlx::PgConnection,
+    mut query: QueryBuilder<'_, Postgres>,
+    generic_plan: bool,
+) -> Result<Value> {
     let (setting, expected) = if generic_plan {
         ("force_generic_plan", (1, 0))
     } else {
@@ -192,7 +229,5 @@ async fn explain_count_query(
         plans == expected,
         "expected {setting} plan counts {expected:?}, found {plans:?}"
     );
-    transaction.rollback().await?;
-    connection.close().await?;
     Ok(plan)
 }

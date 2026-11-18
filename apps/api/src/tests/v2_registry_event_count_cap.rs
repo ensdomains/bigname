@@ -1,5 +1,7 @@
-// TYR-428: the registry overview's `counts.events` follows the `/v1/events` emitter opt-in count:
-// exact up to the shared cap and `null` above it, and its statement stops reading at the cap.
+// TYR-428: the registry overview's `counts.events` follows the `/v1/events` emitter opt-in count.
+// On the current position both are the stored event count, exact under any cap (TYR-462). A
+// historical selection, and a read the stored counts cannot serve, count rows: exact up to the
+// shared cap and `null` above it, and the statement stops reading at the cap.
 const REGISTRY_EVENTS_AT_62: &str = "2023-11-14T22:14:22Z";
 
 #[tokio::test]
@@ -30,9 +32,23 @@ async fn registry_event_count_is_null_above_the_cap() -> Result<()> {
     })
     .await?;
 
-    // Rows A2 and A5: above the cap the count is present and null, like the feed's, and the
-    // other counts are those of the uncapped read.
+    // Rows A2 and A5 on the current position: above the cap the stored count is exact, equal to
+    // the feed's, and the other counts are those of the uncapped read.
     crate::v2::with_emitter_count_cap(5, async {
+        let page = registry_payload(&database, &overview).await?;
+        assert_eq!(page["data"]["counts"]["events"], json!(6), "{page}");
+        assert_eq!(page["data"]["counts"]["roles"], uncapped["data"]["counts"]["roles"]);
+        assert_eq!(page["data"]["counts"]["labels"], uncapped["data"]["counts"]["labels"]);
+        assert_eq!(page["data"]["referenced_by"], uncapped["data"]["referenced_by"]);
+        let total = registry_payload(&database, &feed).await?;
+        assert_eq!(total["page"]["total_count"], json!(6), "{total}");
+        anyhow::Ok(())
+    })
+    .await?;
+
+    // Rows A2 and A5 counted from the rows: above the cap the count is present and null, like
+    // the feed's, and the other counts are those of the uncapped read.
+    crate::v2::with_row_counts_only(crate::v2::with_emitter_count_cap(5, async {
         let page = registry_payload(&database, &overview).await?;
         assert_eq!(page["data"]["counts"]["events"], Value::Null, "{page}");
         assert!(page["data"]["counts"].get("events").is_some(), "{page}");
@@ -42,7 +58,7 @@ async fn registry_event_count_is_null_above_the_cap() -> Result<()> {
         let total = registry_payload(&database, &feed).await?;
         assert_eq!(total["page"]["total_count"], Value::Null, "{total}");
         anyhow::Ok(())
-    })
+    }))
     .await?;
 
     // Row A3: a historical selection counts through its block and caps the same way.
@@ -163,37 +179,43 @@ async fn registry_event_count_plan_stops_at_the_cap() -> Result<()> {
     Ok(())
 }
 
-/// Rows A1 and A2 at the production cap: with no test override, `counts.events` is exact up to 10,000 events and `null` above,
-/// and the contract feed's opt-in count agrees on both sides of the cap.
+/// Rows A1 and A2 at the production cap, counted from the rows: with no test override,
+/// `counts.events` is exact up to 10,000 events and `null` above, and the contract feed's opt-in
+/// count agrees on both sides of the cap.
 #[tokio::test]
 async fn registry_event_count_is_null_above_ten_thousand() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_fixture(&database).await?;
+    crate::v2::with_row_counts_only(registry_event_counts_null_above_ten_thousand(&database)).await?;
+    database.cleanup().await
+}
+
+async fn registry_event_counts_null_above_ten_thousand(database: &TestDatabase) -> Result<()> {
     let overview = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
     let feed = format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1");
     let created = |n: i64| {
         registry_event(&format!("registry-alpha-bulk-{n}"), None, "RegistryCreated", 65 + n % 19,
             ALPHA_REGISTRY, json!({ "source_event": "RegistryCreated", "registry": ALPHA_REGISTRY }))
     };
-    let uncapped = registry_payload(&database, &overview).await?;
+    let uncapped = registry_payload(database, &overview).await?;
     assert_eq!(uncapped["data"]["counts"]["events"], json!(6), "{uncapped}");
 
     // The fixture's six events and 9,994 more reach the cap: exact on the overview and the feed.
     let bulk = (0..9_994).map(created).collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &bulk).await?;
-    let at_cap = registry_payload(&database, &overview).await?;
+    let at_cap = registry_payload(database, &overview).await?;
     assert_eq!(at_cap["data"]["counts"]["events"], json!(10_000));
-    let total = registry_payload(&database, &feed).await?;
+    let total = registry_payload(database, &feed).await?;
     assert_eq!(total["page"]["total_count"], json!(10_000));
 
     // One more event: both are null, and the other counts are unchanged.
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[created(9_994)]).await?;
-    let above = registry_payload(&database, &overview).await?;
+    let above = registry_payload(database, &overview).await?;
     assert!(above["data"]["counts"].get("events").is_some());
     assert_eq!(above["data"]["counts"]["events"], Value::Null);
     assert_eq!(above["data"]["counts"]["roles"], uncapped["data"]["counts"]["roles"]);
     assert_eq!(above["data"]["counts"]["labels"], uncapped["data"]["counts"]["labels"]);
-    let total = registry_payload(&database, &feed).await?;
+    let total = registry_payload(database, &feed).await?;
     assert_eq!(total["page"]["total_count"], Value::Null);
-    database.cleanup().await
+    Ok(())
 }

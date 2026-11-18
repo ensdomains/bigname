@@ -1922,7 +1922,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `include_expired=true|false`, `include=counts`, `cursor`, `page_size`, and
   optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
-  `q` applies prefix matching to the served `name` under exactly the rules
+  `q` applies prefix matching to the child's name under exactly the rules
   documented for `q` on `GET /v1/addresses/{address}/names`: the whole value is
   normalized as an ENSIP-15 name prefix (`q=AL` matches `alpha.parent.eth`),
   one trailing dot marks a label boundary (`q=alpha.` matches
@@ -1931,7 +1931,23 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   prefix (the default) or substring matching exactly as on
   `GET /v1/addresses/{address}/names`, so `q=o&match=contains` matches
   `carol.parent.eth` and `two.parent.eth`. The comparison is byte-wise against
-  the served name, so a [non-name form](glossary.md#non-name-form) row matches
+  the child's stored name. The stored name spells each label from a preimage a
+  chain observed and leaves any other label as its `[labelhash]` placeholder,
+  while the served `name` also uses the proof-checked rainbow import. A child
+  whose stored name keeps a placeholder its served name spells matches, and
+  sorts, by the placeholder. A label only the rainbow import spells keeps its
+  placeholder in the stored name until a chain observes its preimage: deriving
+  the row again for another reason, or a rebuild, does not spell it. TYR-339
+  moves stored names and sort keys to the imported form. A label first observed
+  on another chain reaches the stored name at this chain's next block once this
+  chain's watermark for that chain, the highest of its blocks this chain has
+  read observations from, has reached that chain's finalized block (its safe
+  block when finalized is unset). Until then each block of this chain reads
+  about 1,000 observations above the watermark, in whole blocks of that chain.
+  So after that chain's finalized block moves past more observations above the
+  watermark, or after an Interpret redo of that chain alone, a label can wait
+  about (the observations above the watermark / 1,000) blocks of this chain.
+  A [non-name form](glossary.md#non-name-form) row matches
   only a prefix, or with `match=contains` a substring, of its placeholder or
   escaped text.
   `sort` defaults to `name` and `order` to `asc`. `expires_at` and
@@ -1939,9 +1955,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   same way `GET /v1/addresses/{address}/names` reads them; a child with no
   current name row or no such timestamp is the smallest value: it sorts before
   every dated row ascending and after every dated row descending. Ties, and the
-  whole `name` sort, break
-  by served name and then by child identity. Any other `sort` or `order` value
-  returns `400 invalid_input`.
+  whole `name` sort, break by the stored name, compared byte by byte (the C
+  collation), and then by child identity. A stored name longer than 2,000 bytes
+  sorts by its first 500 characters. `order=desc` is the exact reverse of
+  `order=asc`, ties included: equal timestamps run by stored name and child
+  identity descending too. A child whose stored name keeps a placeholder the
+  served name spells serves its healed name and sorts by its placeholder. Any other `sort` or
+  `order` value returns `400 invalid_input`.
   `include_expired` defaults to `true`: the last ended registration remains
   listable until a later registration supersedes it, subject to the route's
   other eligibility rules. `include_expired=false` omits children whose
@@ -2085,11 +2105,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   and order. Cursors are bound to namespace, parent, `q`, `match=contains`
   when it narrows a `q`, `include_expired`, sort, and order; a cursor replayed under different controls returns
   `400 invalid_input`. Legacy publication and expiry evaluation fields are ignored.
-  `page.total_count` is the number of children the page's `q` and
-  `include_expired` controls admit, computed with the same child-name and
-  expiry predicates as its list, before the cursor, in the same statement as
-  the page. It is exact up to 10,000 children and `null` above: the count stops
-  after 10,001. The rows and cursors do not depend on it.
+  The cursor holds the last row's sort value, stored name key and child identity,
+  and the next page continues strictly after that position.
+  `page.total_count` is the parent's direct readable subname count, read from
+  the count Project stores for the parent, when the page admits every child,
+  that is when `q` is absent and `include_expired` is not `false`. A narrowed
+  page reports the filtered total, counted with the same child-name and
+  expiry predicates as its list, before the cursor; that count stops after
+  10,001. Either total is exact up to 10,000 children and `null` above. The
+  rows and cursors do not depend on either total.
 - Snapshot behavior: the parent, child rows and filtered count are read on one
   database snapshot of the captured publication, disclosed in `meta.as_of`. The
   cursor holds only its sort position and query filters; expiry uses each page's
@@ -2346,7 +2370,7 @@ A recognized namespace with no available publication returns retryable `409 stal
   `include=total_count`, whatever anchors the read. With the flag, a read that
   `name`, `registration_id`, `address`, or `resolver` bounds runs the exact,
   uncapped count described above, over the page's filters and in its read
-  transaction, except for the emitter-only reads in the next item. Unanchored
+  transaction, except for the emitter-only reads in the next items. Unanchored
   `/v1/events` reads (namespace, type, and block or timestamp windows only)
   never count and always report `total_count=null`.
   A `/v1/events` read bounded only by `contract_address` also defaults to
@@ -2358,12 +2382,27 @@ A recognized namespace with no available publication returns retryable `409 stal
   counts again at its current published position. No cached or approximate
   total is returned, and an exact empty result is zero.
 - A `/v1/events` read that only an emitting contract anchors (`resolver`,
-  `contract_address`, or both, with no `name`, `registration_id`, or
-  `address`) caps the opt-in count at 10,000 rows. One contract can emit more
-  rows than an exact count reads within the request deadline. Up to the cap
-  `include=total_count` returns the exact total as above. Above it the count
-  stops after 10,001 rows and the page reports `total_count=null`. The rows,
-  `next_cursor`, and `has_more` are the same as without the flag.
+  `contract_address`, or both naming one contract, with no `name`,
+  `registration_id`, or `address`) serves `include=total_count` from the
+  projection's stored [event counts](projections.md#event-counts). The total
+  is exact with no cap, at the page's published position, under any
+  `namespace`, `type`, `exclude_type`, and `kind` filter. It is the number of
+  rows the read's pages list, as above.
+- The same read keeps the capped row count in these cases:
+  - With `record_key`.
+  - With `from_block`, `to_block`, `from_timestamp`, or `to_timestamp`.
+  - With a `resolver` and a different `contract_address`.
+  - While the stored counts do not describe the page's published position, as
+    during a Project redo or when a publication lands between the page's
+    capture and its count.
+  - When the API's database role cannot read the stored counts.
+
+  The capped count is exact up to 10,000 rows. One contract can emit more rows
+  than an exact count reads within the request deadline, so above the cap the
+  count stops after 10,001 rows and the page reports `total_count=null`. So
+  `null` still occurs, and a client that reads `null` as "more than 10,000"
+  keeps working. The rows, `next_cursor`, and `has_more` are the same in every
+  case, and the same as without the flag.
 
 ### History event payloads (`include=data`, `include=raw`)
 
@@ -3729,7 +3768,12 @@ introduces it rebuilds Project from full history before serving the option; see
   `400 invalid_input`, with or without `q`. A valid `match` without a nonempty
   `q` selects nothing and is ignored. The match mode applies before grouping,
   sorting, pagination and `page.total_count`.
-  `sort` defaults to `name`, ordered by the row's served name. `expires_at`,
+  `sort` defaults to `name`, ordered by the row's stored name, the same stored
+  name `q` compares with. A name with no raw bytes is stored with each label
+  spelled from a chain-observed preimage, so a label only the rainbow import
+  spells keeps its `[labelhash]` placeholder there until a chain observes its
+  preimage (TYR-339): such a row serves its healed name but sorts by the
+  placeholder. `expires_at`,
   `registered_at` and `created_at` order by the row's name timestamps as served
   on the row; `created_at` is the name's first observation, the block time of
   the earliest event attributed to the name, including an earlier registrar
@@ -3992,8 +4036,8 @@ introduces it rebuilds Project from full history before serving the option; see
   a later permissions request can alter grants. The 1,000-row cap bounds returned grant
   rows, not bytes or total database work. The name page maximum remains 200.
   `include=counts` adds `subname_count`, the row's
-  direct readable subname count (one bounded per-parent aggregate over the
-  page's names), and the same `record_count`; the two expansions combine as
+  direct readable subname count (read by key from the child counts Project
+  stores), and the same `record_count`; the two expansions combine as
   `include=counts,role_summary`. No `event_count` is offered, for the reason
   given on `GET /v1/names/{name}`. Any other `include` value returns
   `400 invalid_input`.
@@ -4721,7 +4765,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total, and page.total_count is null without it. When only resolver or contract_address anchors the read, it is exact up to 10,000 rows and null above. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total, and page.total_count is null without it. When only resolver or contract_address anchors the read, the total is the stored event count, exact with no cap. With record_key, a block or timestamp window, or a resolver and a different contract_address, it is exact up to 10,000 rows and null above. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4850,8 +4894,9 @@ For a registrar lease first identified by a later readable observation, registra
   rule: `null` unless the request sends `include=total_count`. With the flag
   the count is exact when `name`, `registration_id`, or `address` anchors the
   read. When only `resolver` or `contract_address` anchors the read, the count
-  is exact up to 10,000 rows and `null` beyond. Other unanchored reads always
-  return null.
+  is the stored event count, exact with no cap, except in the cases the history
+  collection filters list, where it is exact up to 10,000 rows and `null` beyond.
+  Other unanchored reads always return null.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can
@@ -5378,7 +5423,7 @@ For a registrar lease first identified by a later readable observation, registra
 | --- | --- | --- | --- | --- | --- |
 | `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 registrations under its name, and null otherwise. counts.events is exact up to 10,000 events and null above. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. counts adds counts.labels, counts.roles and counts.events. counts.labels is exact when the registry holds at most 10,000 labels under its name, and null otherwise. counts.events is the stored event count, exact with no cap, on the current position. On a historical at it is exact up to 10,000 events and null above. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -5436,21 +5481,24 @@ For a registrar lease first identified by a later readable observation, registra
   name `name` selects, the earliest name whose current subregistry pointer
   targets the registry. Labels the registry holds under another name that also
   points at it are not counted. It is `0` when no name points at the registry.
-  It is exact when the registry holds at most 10,000 registrations under that
-  name, and `null` otherwise: the count stops reading after 10,001 of them,
-  because a registry such as the `.eth` one holds more than an exact count
-  composes within the request deadline. `counts.events` is present only with
+  It is read from the label count Project stores for that name, and is exact
+  when the registry holds at most 10,000 labels under it and `null` otherwise.
+  `counts.events` is present only with
   `include=counts` and counts the product-visible events the contract emitted
-  on this chain up to the selected position, in any namespace. For an ENSv2
+  on this chain up to the selected position, in any namespace. On the current
+  position it is the projection's stored [event count](projections.md#event-counts),
+  exact with no cap. On a historical `at` it counts the contract's events
+  through the selected block instead: exact up to 10,000 events, and `null`
+  above, after the count stops at 10,001. The current position also counts
+  rows, with the same cap, while the stored counts do not describe it or the
+  API's database role cannot read them. For an ENSv2
   registry, whose events are all in `ens`, it equals the `total_count` of
   `GET /v1/events?contract_address=` at the same chain and block: that feed
-  defaults to the `ens` namespace, which is served on one chain. The
-  overview's count and the feed's `include=total_count` count are both exact
-  up to 10,000 events and `null` above that, so they also agree above the
-  cap. For an address
+  defaults to the `ens` namespace, which is served on one chain. Both read
+  the same stored count on the current position, and both cap a row count
+  alike, so they agree above 10,000 too. For an address
   an operator also admits into another namespace on this chain, the overview
-  counts those events too and the default feed does not. The count reads the
-  contract's events rather than a projected total, and stops after 10,001. It includes the
+  counts those events too and the default feed does not. It includes the
   registry's root role changes (`RootPermissionChanged` `permission` rows),
   which the feed has listed since they became product history.
   `counts.roles`, also present with `include=counts`, is the exact number of
@@ -5576,10 +5624,13 @@ For a registrar lease first identified by a later readable observation, registra
   linked from a name — holds no servable labels here and returns an empty
   page: the child collection is projected under a parent name, and the root
   name has no child projection.
-- Pagination behavior: standard collection pagination by `display_name`
-  ascending. `page.total_count` is the exact number of labels the owner filter
-  admits, counted before paging; unfiltered, it is the same number as
-  `counts.labels` on the registry route whenever that count is not `null`. So `exclude_owner=<address>&page_size=1`
+- Pagination behavior: standard collection pagination by stored name
+  ascending, compared byte by byte, then by child identity, as the `name` sort
+  of `GET /v1/names/{name}/subnames` orders them. `page.total_count` is the
+  exact number of labels the owner filter admits, counted before paging;
+  unfiltered, it is read from the label count Project stores for the
+  registry's name, and equals `counts.labels` on the registry route whenever
+  that count is not `null`. So `exclude_owner=<address>&page_size=1`
   answers whether the registry holds any label that address does not own from
   `total_count` alone. The cursor binds the chain, the registry and the owner
   filter.

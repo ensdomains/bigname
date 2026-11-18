@@ -1448,7 +1448,9 @@ relations by name and `SELECT` privilege, the snapshot guard by exact signature
 and `EXECUTE` privilege, and the `canonicality_state` type. If an object or its
 required privilege is unavailable, the API refuses to start and its diagnostic
 names every unavailable identity. Startup does not check the `INSERT` on
-`ens_names`: the API serves without it.
+`ens_names`: the API serves without it. The child listing tables only warn:
+without their `SELECT` the API starts and only the routes that read them fail
+(see [the child listing family and its counts](#the-child-listing-family-and-its-counts)).
 
 After the phase schema exists, the schema owner provisions the dedicated login
 with these privileges (substitute
@@ -1511,6 +1513,8 @@ GRANT SELECT ON TABLE
     bigname_phase.project_ens_v2_registry_parent,
     bigname_phase.project_child_edge_candidate,
     bigname_phase.project_parent_subregistry,
+    bigname_phase.project_child_listing,
+    bigname_phase.project_child_listing_count,
     bigname_phase.project_reverse_tuple,
     bigname_phase.project_reverse_node_claim,
     bigname_phase.project_claim_normalization,
@@ -1522,6 +1526,7 @@ GRANT SELECT ON TABLE
     bigname_phase.project_history_source,
     bigname_phase.project_history_source_edge,
     bigname_phase.project_history_catalogue_marker,
+    bigname_phase.project_event_count,
     bigname_phase.project_address_record_node_index,
     bigname_phase.project_address_record_id_index,
     bigname_phase.project_name_history,
@@ -1547,14 +1552,18 @@ For an existing API role, after applying
 `20261005170000_project_address_history_catalogue.sql`, the schema owner must apply these
 additional SELECT grants before serving the new API binary. On a serving standby, wait for
 the schema-migration and grants applied on the primary to replay there. The API startup check
-refuses to start if any of these relations is absent or unreadable.
+refuses to start if any of the four catalogue relations is absent or unreadable. The list also
+carries `project_event_count`, which needs `20261104130000_project_event_count.sql` and which
+the startup check does not require (see
+[serving the stored event counts](#serving-the-stored-event-counts)).
 
 ```sql
 GRANT SELECT ON TABLE
     bigname_phase.project_address_history_anchor,
     bigname_phase.project_history_source,
     bigname_phase.project_history_source_edge,
-    bigname_phase.project_history_catalogue_marker
+    bigname_phase.project_history_catalogue_marker,
+    bigname_phase.project_event_count
 TO bigname_api;
 ```
 
@@ -6280,7 +6289,7 @@ A release that adds an index to the drop list is deployed in this order:
 
 The build that stores each parent's listed children (TYR-455) adds the child listing family,
 `project_child_listing`, and its counts, `project_child_listing_count`
-(see [owned key families](projections.md#owned-key-families)). Project derives a listed child's
+(see [child listing](projections.md#child-listing)). Project derives a listed child's
 row from the children relation at every publication, journals it with the other families, and
 keeps each parent's count and each (parent, label registry) count from the same diff. The
 composition pass derives every parent's rows in a children stream after the names stream.
@@ -6303,9 +6312,14 @@ composition pass derives every parent's rows in a children stream after the name
   and writes only those it spells further, journalling nothing and moving no count. Interpret's
   redo never removes a label from `label_preimages`, so a row the undone block healed keeps its
   healed name, as a rebuild at that block spells it.
-- A label first learned on another chain reaches the stored name at this chain's next block.
-  An imported label reaches it only when its row is derived again for another reason
-  (TYR-373/374). Served names heal at read time.
+- A label first learned on another chain reaches the stored name at this chain's next block
+  once the watermark below has caught up to that chain's finalized block (its safe block when
+  finalized is unset). Until then each block reads about 1,000 of that chain's observations
+  above the watermark, rounded up to whole blocks, so a label can wait about (the observations
+  above the watermark / 1,000) blocks of this chain. A label only the rainbow-table import
+  spells keeps its placeholder in the stored name until a chain observes its preimage: the
+  stored spelling reads chain-observed preimages only, so deriving the row again or a rebuild
+  does not spell it (TYR-339 moves it to the imported form). Served names heal at read time.
 - Each chain keeps, per other chain, the highest block whose preimage observations its family step
   has read (`project_child_preimage_watermark`), journalled with its block. The watermark never
   passes the other chain's finalized block (its safe block when finalized is unset), so a reorg of
@@ -6330,8 +6344,40 @@ composition pass derives every parent's rows in a children stream after the name
   row in one statement and journals every changed row. Above 100,000 rows the runner logs a
   `WARN` naming the chain, block, parent and row count, so a large undo journal can be traced to
   its block.
-- The readers do not change in this build. The subname and label lists still compose children
-  at read.
+- The subnames page, the registry labels page and the child counts read the stored rows.
+  Without the listing and count tables, as without their grant, the API still starts and only
+  those routes fail (next item).
+- The readers need `SELECT` on the listing and count tables. Before restarting an existing API
+  role, apply the grant below on the primary and let it replay on any serving standby. Fresh role
+  setup above already includes it. An API role without it still starts, and logs one `WARN` at
+  startup naming the tables and the routes that read them: the subnames and registry labels
+  pages, and `include=counts` on the name, registry and address-name routes. Until the grant is
+  applied those requests answer `internal_error`, each with one `ERROR` line naming the tables,
+  and every other route serves. Each such read checks the grant in its own snapshot, so applying
+  it needs no restart.
+
+  ```sql
+  GRANT SELECT ON bigname_phase.project_child_listing, bigname_phase.project_child_listing_count
+      TO bigname_api;
+  ```
+- Wire changes:
+  - The `name` sort, and every tie, orders the stored name byte by byte (C collation), where
+    the database collation ordered it before. Names whose byte order differs from that
+    collation's, such as ones with hyphens or non-ASCII characters, can change places.
+  - `order=desc` is the exact reverse of `order=asc`. Children with equal timestamps used to
+    run by name ascending in a descending page, and children with equal names by child
+    identity ascending. Both now run descending.
+  - `q` matches the stored name. It differs from the served name for a label that the
+    rainbow-table import alone spells, until a chain observes its preimage (TYR-339), and
+    for one another chain observed while this chain's watermark for that chain lags behind
+    its finalized block (its safe block when finalized is unset), for about (the observations
+    above the watermark / 1,000) blocks of this chain. Such a child serves healed but sorts
+    and matches by its placeholder.
+  - A name longer than 2,000 bytes sorts by its first 500 characters, then child identity.
+  - A cursor issued before the change is still accepted. It resumes at its last row's position
+    in the new order, so rows the old order placed differently can be skipped or repeated, and
+    one whose last row was such a long name or an import-healed name resumes from a different
+    position. A client walking a list across the release restarts from the first page.
 - The children relation moves from the reader sources to the composition sources, and the
   family step is in `crates/project/src`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The
@@ -6357,8 +6403,10 @@ catalogue window.
   the release: the family writer writes the table, so without it the first family block fails.
 - A family step that touches more than 10,000 count keys logs a `WARN` naming the chain, block
   and key count.
-- The readers do not change in this build. Event `total_count` and the registry overview's
-  `counts.events` still count at read.
+- The readers serve the stored counts once the family marker is live under this build's hash.
+  See [serving the stored event counts](#serving-the-stored-event-counts). Until then event
+  `total_count` and the registry overview's `counts.events` count at read, exact up to 10,000
+  and `null` above.
 - The count statement and its shared predicate are in `crates/project/src` and in
   `crates/storage/src/history/count_contract.rs`, so the build rotates the
   [projection content hash](glossary.md#projection-content-hash) for every chain. The
@@ -6373,6 +6421,37 @@ catalogue window.
 
 The manifest-authority fingerprint and the compiled watch plan are unchanged, so stamp no
 Interpret or Ingest redo.
+
+### Serving the stored event counts
+
+The API build that reads the stored event counts serves them as `include=total_count` on
+`/v1/events` reads that only an emitting contract anchors, and as the registry overview's
+`counts.events` on the current position (see [event counts](projections.md#event-counts)).
+
+- Clients see exact totals above 10,000 where they saw `null`. A read with `record_key`, a block
+  or timestamp window, or a `resolver` and a different `contract_address`, and the registry
+  overview at a historical `at`, still count rows: exact up to 10,000 and `null` above
+  ([history collection filters](api-v1-routes.md#history-collection-filters)).
+- The API role needs `SELECT` on `bigname_phase.project_event_count`. The provisioning grant
+  above lists it. For an existing role, the schema owner applies it on the primary:
+
+  ```sql
+  GRANT SELECT ON TABLE bigname_phase.project_event_count TO bigname_api;
+  ```
+
+  The grant turns the stored counts on, and no restart is needed after it. Without it the API
+  starts and serves as before: each read checks the privilege in its own transaction and counts
+  rows instead, and startup logs one `WARN` naming the table. A missing grant never fails a
+  request.
+- Each read also checks, in its own transaction, that every chain's family marker is servable
+  and stands at the block the read is bound to. During a Project redo, or after a publication
+  between a page's capture and its count, the read counts rows. A servable marker of this
+  build's projection content hash always stands over filled counts, so the reader needs no flag
+  and no ordering beyond the redo that fills the table.
+- The reader is in `crates/storage/src/history/` outside the hashed files and in `apps/api`, so
+  neither the [interpreter content hash](glossary.md#interpreter-content-hash) nor the
+  [projection content hash](glossary.md#projection-content-hash) rotates. It adds no
+  schema-migration.
 
 ## The address listing family
 
@@ -6399,8 +6478,9 @@ families. The composition pass derives every row in the names stream.
   observation derives again, by the `unhealed_labelhashes` GIN index, only the rows that still
   spell one of its labels as `[labelhash]`, from this chain or, through the same watermark
   (`project_child_preimage_watermark`), from another chain. An undo keeps a healed name, as a
-  rebuild at the restored block spells it. An imported label reaches the stored name only when
-  its row is derived again for another reason (TYR-373/374).
+  rebuild at the restored block spells it. A label only the rainbow-table import spells keeps
+  its placeholder in the stored name until a chain observes its preimage, because the stored
+  spelling reads chain-observed preimages only (TYR-339).
 - The address-names route reads the stored listing for the ownership relations and
   `relation=former_owner`, and the address events read takes its current anchors from it. A page
   reads about as many names as it returns. The total counts stored rows, so a name a reorg has

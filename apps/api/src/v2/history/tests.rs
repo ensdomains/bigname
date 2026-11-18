@@ -177,6 +177,7 @@ fn history_total_count_applies_the_cap() {
         manifest_versions: Vec::new(),
         chain_position_samples: Vec::new(),
         last_updated: None,
+        count_cap: Some(HISTORY_TOTAL_COUNT_CAP),
     };
     assert_eq!(history_total_count(None), None);
     assert_eq!(history_total_count(Some(&summary(0))), Some(0));

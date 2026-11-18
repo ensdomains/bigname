@@ -4,6 +4,9 @@
 
 /// The history count statement's select list (`crates/storage/src/history/summary.rs`).
 const EVENTS_COUNT_STATEMENT: &str = "COUNT(*)::BIGINT AS total_count";
+/// The stored event count's sum (`crates/storage/src/history/stored_count.rs`), which counts an
+/// emitter-anchored read in place of the history count statement.
+const EVENTS_STORED_COUNT_STATEMENT: &str = "storage:history.stored_event_count */";
 /// The registration of `history.eth` in `seed_v2_history_fixture`.
 const EVENTS_REGISTRATION: &str = "00000000-0000-0000-0000-000000007100";
 const EVENTS_RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
@@ -30,7 +33,10 @@ async fn counted_events(database: &TestDatabase, uri: &str) -> Result<(Value, us
     let counts = sent
         .statements()
         .iter()
-        .filter(|statement| statement.contains(EVENTS_COUNT_STATEMENT))
+        .filter(|statement| {
+            statement.contains(EVENTS_COUNT_STATEMENT)
+                || statement.contains(EVENTS_STORED_COUNT_STATEMENT)
+        })
         .count();
     Ok((payload, counts))
 }
@@ -93,6 +99,7 @@ async fn events_default_read_sends_no_count_statement_on_any_anchor() -> Result<
     .bind(EVENTS_RESOLVER)
     .execute(&database.pool)
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     for route in [
         format!("/v1/events?registration_id={EVENTS_REGISTRATION}"),
